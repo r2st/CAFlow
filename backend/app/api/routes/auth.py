@@ -40,7 +40,12 @@ def _token_response(practitioner: Practitioner, firm: Firm) -> TokenResponse:
     )
 
 
-@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=RegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a firm and its owner",
+)
 def register_firm(payload: FirmRegisterRequest, request: Request, db: DbSession):
     """Create a firm together with its owner practitioner."""
     existing = db.scalar(
@@ -93,7 +98,7 @@ def register_firm(payload: FirmRegisterRequest, request: Request, db: DbSession)
     return _token_response(owner, firm)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse, summary="Sign in")
 def login(payload: LoginRequest, request: Request, db: DbSession):
     practitioner = db.scalar(
         select(Practitioner).where(func.lower(Practitioner.email) == payload.email.lower())
@@ -128,17 +133,17 @@ def login(payload: LoginRequest, request: Request, db: DbSession):
     return _token_response(practitioner, firm)
 
 
-@router.get("/me", response_model=PractitionerOut)
+@router.get("/me", response_model=PractitionerOut, summary="The signed-in practitioner")
 def read_me(practitioner: CurrentPractitioner):
     return practitioner
 
 
-@router.get("/firm", response_model=FirmOut)
+@router.get("/firm", response_model=FirmOut, summary="The signed-in practitioner's firm")
 def read_firm(firm: CurrentFirm):
     return firm
 
 
-@router.get("/practitioners", response_model=list[PractitionerOut])
+@router.get("/practitioners", response_model=list[PractitionerOut], summary="List the firm's team")
 def list_practitioners(practitioner: CurrentPractitioner, db: DbSession):
     stmt = (
         select(Practitioner)
@@ -149,7 +154,10 @@ def list_practitioners(practitioner: CurrentPractitioner, db: DbSession):
 
 
 @router.post(
-    "/practitioners", response_model=PractitionerOut, status_code=status.HTTP_201_CREATED
+    "/practitioners",
+    response_model=PractitionerOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a team member",
 )
 def add_practitioner(
     payload: PractitionerCreate, admin: FirmAdmin, firm: CurrentFirm, db: DbSession
@@ -210,7 +218,11 @@ def add_practitioner(
     return practitioner
 
 
-@router.patch("/practitioners/{practitioner_id}", response_model=PractitionerOut)
+@router.patch(
+    "/practitioners/{practitioner_id}",
+    response_model=PractitionerOut,
+    summary="Update a team member",
+)
 def update_practitioner(
     practitioner_id: uuid.UUID, payload: PractitionerUpdate, admin: FirmAdmin, db: DbSession
 ):

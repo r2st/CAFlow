@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -24,6 +24,15 @@ from app.models.compliance import ComplianceItem
 
 class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "documents"
+    __table_args__ = (
+        # Every document list is newest-first inside a firm or a client.
+        Index("ix_document_firm_created", "firm_id", "created_at"),
+        Index("ix_document_client_created", "client_id", "created_at"),
+        # The category filter on the firm-wide document list.
+        Index("ix_document_firm_category", "firm_id", "category"),
+        # Checklist resolution: which uploads answer this filing?
+        Index("ix_document_item_category", "compliance_item_id", "category"),
+    )
 
     firm_id: Mapped[uuid.UUID] = mapped_column(
         UuidType, ForeignKey("firms.id", ondelete="CASCADE"), nullable=False, index=True

@@ -55,7 +55,11 @@ def _get_client_or_404(db: Session, firm_id: uuid.UUID, client_id: uuid.UUID) ->
 # ------------------------------------------------- practitioner: access mgmt --
 
 
-@router.post("/clients/{client_id}/portal-link", response_model=MagicLinkOut)
+@router.post(
+    "/clients/{client_id}/portal-link",
+    response_model=MagicLinkOut,
+    summary="Mint a magic link for a client",
+)
 def create_portal_link(
     client_id: uuid.UUID,
     payload: MagicLinkRequest,
@@ -106,7 +110,11 @@ def create_portal_link(
     )
 
 
-@router.get("/clients/{client_id}/portal-access", response_model=PortalAccessOut)
+@router.get(
+    "/clients/{client_id}/portal-access",
+    response_model=PortalAccessOut,
+    summary="A client's portal access state",
+)
 def read_portal_access(
     client_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
 ):
@@ -119,7 +127,11 @@ def read_portal_access(
     )
 
 
-@router.post("/clients/{client_id}/portal-access/revoke", response_model=PortalAccessOut)
+@router.post(
+    "/clients/{client_id}/portal-access/revoke",
+    response_model=PortalAccessOut,
+    summary="Revoke every link issued so far",
+)
 def revoke_portal_links(client_id: uuid.UUID, practitioner: Manager, db: DbSession):
     """Invalidate every link issued so far. Future links still work."""
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
@@ -142,7 +154,11 @@ def revoke_portal_links(client_id: uuid.UUID, practitioner: Manager, db: DbSessi
     )
 
 
-@router.post("/clients/{client_id}/portal-access/disable", response_model=PortalAccessOut)
+@router.post(
+    "/clients/{client_id}/portal-access/disable",
+    response_model=PortalAccessOut,
+    summary="Turn a client's portal off",
+)
 def disable_portal(client_id: uuid.UUID, practitioner: Manager, db: DbSession):
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
     client.portal_enabled = False
@@ -165,7 +181,11 @@ def disable_portal(client_id: uuid.UUID, practitioner: Manager, db: DbSession):
     )
 
 
-@router.post("/clients/{client_id}/portal-access/enable", response_model=PortalAccessOut)
+@router.post(
+    "/clients/{client_id}/portal-access/enable",
+    response_model=PortalAccessOut,
+    summary="Turn a client's portal on",
+)
 def enable_portal(client_id: uuid.UUID, practitioner: Manager, db: DbSession):
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
     client.portal_enabled = True
@@ -218,7 +238,11 @@ def _shared_document(document: Document) -> SharedDocumentOut:
     )
 
 
-@router.get("/portal/me", response_model=PortalOverview)
+@router.get(
+    "/portal/me",
+    response_model=PortalOverview,
+    summary="Everything the client sees on landing",
+)
 def portal_overview(client: PortalClient, db: DbSession):
     """Everything the client sees on landing: filings, checklists, documents."""
     today = date.today()
@@ -295,7 +319,10 @@ def portal_overview(client: PortalClient, db: DbSession):
 
 
 @router.post(
-    "/portal/documents", response_model=SharedDocumentOut, status_code=status.HTTP_201_CREATED
+    "/portal/documents",
+    response_model=SharedDocumentOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a document as the client",
 )
 def portal_upload(
     client: PortalClient,
@@ -347,7 +374,7 @@ def portal_upload(
     return _shared_document(document)
 
 
-@router.get("/portal/documents/{document_id}/download")
+@router.get("/portal/documents/{document_id}/download", summary="Download a document as the client")
 def portal_download(document_id: uuid.UUID, client: PortalClient, db: DbSession):
     """Download a document the firm shared, or one the client uploaded."""
     document = db.get(Document, document_id)

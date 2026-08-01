@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -67,7 +67,13 @@ class Practitioner(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """A CA or staff member inside a firm. This is the login identity."""
 
     __tablename__ = "practitioners"
-    __table_args__ = (UniqueConstraint("firm_id", "email", name="uq_practitioner_firm_email"),)
+    __table_args__ = (
+        UniqueConstraint("firm_id", "email", name="uq_practitioner_firm_email"),
+        # Sign-in matches on lower(email), which cannot use the plain email
+        # index. Expressed as text so it renders identically on PostgreSQL and
+        # on the SQLite database the test-suite builds.
+        Index("ix_practitioner_email_lower", text("lower(email)")),
+    )
 
     firm_id: Mapped[uuid.UUID] = mapped_column(
         UuidType, ForeignKey("firms.id", ondelete="CASCADE"), nullable=False, index=True

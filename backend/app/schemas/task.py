@@ -5,13 +5,13 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from app.models.base import TaskPriority, TaskStatus
-from app.schemas.common import ORMModel
+from app.schemas.common import ORMModel, SanitizedModel
 
 
-class TaskCreate(BaseModel):
+class TaskCreate(SanitizedModel):
     title: str = Field(min_length=2, max_length=512)
     description: str | None = None
     client_id: uuid.UUID | None = None
@@ -23,7 +23,7 @@ class TaskCreate(BaseModel):
     estimated_minutes: int | None = Field(default=None, ge=0, le=60 * 24 * 30)
 
 
-class TaskUpdate(BaseModel):
+class TaskUpdate(SanitizedModel):
     title: str | None = Field(default=None, min_length=2, max_length=512)
     description: str | None = None
     assignee_id: uuid.UUID | None = None
@@ -58,29 +58,29 @@ class TaskOut(ORMModel):
     is_overdue: bool = False
 
 
-class BulkTaskUpdate(BaseModel):
+class BulkTaskUpdate(SanitizedModel):
     task_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
     status: TaskStatus | None = None
     assignee_id: uuid.UUID | None = None
     priority: TaskPriority | None = None
 
 
-class BulkTaskUpdateResult(BaseModel):
+class BulkTaskUpdateResult(SanitizedModel):
     updated: int
     skipped: int
 
 
-class TaskGenerateRequest(BaseModel):
+class TaskGenerateRequest(SanitizedModel):
     horizon_days: int = Field(default=21, ge=1, le=365)
 
 
-class TaskGenerateResponse(BaseModel):
+class TaskGenerateResponse(SanitizedModel):
     created: int
     horizon_days: int
     tasks: list[TaskOut]
 
 
-class WorkloadRowOut(BaseModel):
+class WorkloadRowOut(SanitizedModel):
     practitioner_id: uuid.UUID | None
     practitioner_name: str
     role: str | None
@@ -94,7 +94,7 @@ class WorkloadRowOut(BaseModel):
     by_status: dict[str, int]
 
 
-class WorkloadResponse(BaseModel):
+class WorkloadResponse(SanitizedModel):
     as_of: date
     rows: list[WorkloadRowOut]
     unassigned_open: int

@@ -25,6 +25,10 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("firm_id", "invoice_number", name="uq_invoice_firm_number"),
         Index("ix_invoice_firm_status", "firm_id", "status"),
+        # Ageing and the overdue sweep both walk a firm's invoices by due date.
+        Index("ix_invoice_firm_due", "firm_id", "due_date"),
+        # A client's outstanding balance.
+        Index("ix_invoice_client_status", "client_id", "status"),
     )
 
     firm_id: Mapped[uuid.UUID] = mapped_column(

@@ -96,7 +96,11 @@ def serialise_checklist(
 # Declared before /{document_id} so the literal path is not swallowed by it.
 
 
-@router.get("/outstanding", response_model=OutstandingDocumentsResponse)
+@router.get(
+    "/outstanding",
+    response_model=OutstandingDocumentsResponse,
+    summary="Filings still waiting on documents",
+)
 def outstanding_documents(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -126,7 +130,11 @@ def outstanding_documents(
     )
 
 
-@router.get("/checklist/{compliance_item_id}", response_model=ChecklistOut)
+@router.get(
+    "/checklist/{compliance_item_id}",
+    response_model=ChecklistOut,
+    summary="The document checklist for one filing",
+)
 def item_checklist(
     compliance_item_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
 ):
@@ -137,7 +145,12 @@ def item_checklist(
 # -------------------------------------------------------------------- upload --
 
 
-@router.post("/upload", response_model=DocumentUploadResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/upload",
+    response_model=DocumentUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a document for a client",
+)
 def upload_document(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -208,7 +221,7 @@ def upload_document(
 # ---------------------------------------------------------------------- CRUD --
 
 
-@router.get("", response_model=Page[DocumentOut])
+@router.get("", response_model=Page[DocumentOut], summary="List documents")
 def list_documents(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -249,12 +262,12 @@ def list_documents(
     )
 
 
-@router.get("/{document_id}", response_model=DocumentOut)
+@router.get("/{document_id}", response_model=DocumentOut, summary="A single document")
 def get_document(document_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession):
     return serialise_document(_get_document_or_404(db, practitioner.firm_id, document_id))
 
 
-@router.get("/{document_id}/download")
+@router.get("/{document_id}/download", summary="Download a document")
 def download_document(
     document_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
 ):
@@ -277,7 +290,11 @@ def download_document(
     )
 
 
-@router.patch("/{document_id}", response_model=DocumentOut)
+@router.patch(
+    "/{document_id}",
+    response_model=DocumentOut,
+    summary="Re-categorise, re-link or share a document",
+)
 def update_document(
     document_id: uuid.UUID,
     payload: DocumentUpdate,
@@ -319,7 +336,11 @@ def update_document(
     return serialise_document(document)
 
 
-@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a document",
+)
 def delete_document(
     document_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
 ):

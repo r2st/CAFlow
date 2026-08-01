@@ -27,6 +27,12 @@ class Reminder(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_reminder_status_scheduled", "status", "scheduled_for"),
         Index("ix_reminder_firm_client", "firm_id", "client_id"),
+        # The firm-facing reminder list; the dispatcher uses the global
+        # status/scheduled_for index above instead.
+        Index("ix_reminder_firm_status_scheduled", "firm_id", "status", "scheduled_for"),
+        # De-duplication before scheduling: "have we already chased this
+        # client about this filing?"
+        Index("ix_reminder_client_type", "client_id", "reminder_type", "scheduled_for"),
     )
 
     firm_id: Mapped[uuid.UUID] = mapped_column(

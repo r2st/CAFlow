@@ -39,6 +39,11 @@ class Client(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("firm_id", "pan", name="uq_client_firm_pan"),
         Index("ix_client_firm_name", "firm_id", "name"),
+        # Nearly every client query filters out deactivated clients.
+        Index("ix_client_firm_active", "firm_id", "is_active"),
+        # The chase list walks clients whose portal is on but who have not
+        # signed in.
+        Index("ix_client_firm_portal", "firm_id", "portal_enabled"),
     )
 
     firm_id: Mapped[uuid.UUID] = mapped_column(

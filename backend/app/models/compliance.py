@@ -93,6 +93,14 @@ class ComplianceItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_compliance_item_firm_due", "firm_id", "due_date"),
         Index("ix_compliance_item_firm_status", "firm_id", "status"),
         Index("ix_compliance_item_period", "firm_id", "period_label"),
+        # The dashboard and calendar both filter firm + status and then sort
+        # by due date; without the trailing column that sort is a filesort.
+        Index("ix_compliance_item_firm_status_due", "firm_id", "status", "due_date"),
+        # The client portal and client detail page read one client's filings
+        # over a date window.
+        Index("ix_compliance_item_client_due", "client_id", "due_date"),
+        # "What is on my plate" for one practitioner.
+        Index("ix_compliance_item_assignee_due", "assigned_practitioner_id", "due_date"),
     )
 
     firm_id: Mapped[uuid.UUID] = mapped_column(

@@ -77,7 +77,11 @@ def _replace_lines(invoice: Invoice, lines) -> None:
 # Literal paths first so they are not captured by /{invoice_id}.
 
 
-@router.get("/billable", response_model=BillableWorkResponse)
+@router.get(
+    "/billable",
+    response_model=BillableWorkResponse,
+    summary="Filed work that has not been billed",
+)
 def billable_work(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -111,7 +115,7 @@ def billable_work(
     )
 
 
-@router.get("/revenue", response_model=RevenueSummaryOut)
+@router.get("/revenue", response_model=RevenueSummaryOut, summary="Revenue and receivables summary")
 def revenue(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -135,7 +139,11 @@ def revenue(
     return RevenueSummaryOut(**vars(summary))
 
 
-@router.post("/generate", response_model=InvoiceGenerateResponse)
+@router.post(
+    "/generate",
+    response_model=InvoiceGenerateResponse,
+    summary="Draft invoices from unbilled work",
+)
 def generate_invoices(
     payload: InvoiceGenerateRequest, practitioner: Manager, db: DbSession
 ):
@@ -175,7 +183,12 @@ def generate_invoices(
 # --------------------------------------------------------------------- CRUD --
 
 
-@router.post("", response_model=InvoiceDetailOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=InvoiceDetailOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create an invoice",
+)
 def create_invoice(payload: InvoiceCreate, practitioner: Manager, db: DbSession):
     client = db.get(Client, payload.client_id)
     if client is None or client.firm_id != practitioner.firm_id:
@@ -214,7 +227,7 @@ def create_invoice(payload: InvoiceCreate, practitioner: Manager, db: DbSession)
     return serialise_detail(invoice)
 
 
-@router.get("", response_model=Page[InvoiceOut])
+@router.get("", response_model=Page[InvoiceOut], summary="List invoices")
 def list_invoices(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -252,12 +265,12 @@ def list_invoices(
     )
 
 
-@router.get("/{invoice_id}", response_model=InvoiceDetailOut)
+@router.get("/{invoice_id}", response_model=InvoiceDetailOut, summary="An invoice with its lines")
 def get_invoice(invoice_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession):
     return serialise_detail(_get_invoice_or_404(db, practitioner.firm_id, invoice_id))
 
 
-@router.patch("/{invoice_id}", response_model=InvoiceDetailOut)
+@router.patch("/{invoice_id}", response_model=InvoiceDetailOut, summary="Update a draft invoice")
 def update_invoice(
     invoice_id: uuid.UUID,
     payload: InvoiceUpdate,
@@ -294,7 +307,11 @@ def update_invoice(
     return serialise_detail(invoice)
 
 
-@router.post("/{invoice_id}/send", response_model=InvoiceDetailOut)
+@router.post(
+    "/{invoice_id}/send",
+    response_model=InvoiceDetailOut,
+    summary="Issue an invoice to the client",
+)
 def send_invoice(invoice_id: uuid.UUID, practitioner: Manager, db: DbSession):
     """Move a draft to sent, which is what starts the payment clock."""
     invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id)
@@ -332,7 +349,7 @@ def send_invoice(invoice_id: uuid.UUID, practitioner: Manager, db: DbSession):
     return serialise_detail(invoice)
 
 
-@router.post("/{invoice_id}/payments", response_model=InvoiceDetailOut)
+@router.post("/{invoice_id}/payments", response_model=InvoiceDetailOut, summary="Record a payment")
 def record_payment(
     invoice_id: uuid.UUID,
     payload: PaymentCreate,
@@ -369,7 +386,7 @@ def record_payment(
     return serialise_detail(invoice)
 
 
-@router.post("/{invoice_id}/cancel", response_model=InvoiceDetailOut)
+@router.post("/{invoice_id}/cancel", response_model=InvoiceDetailOut, summary="Cancel an invoice")
 def cancel_invoice(invoice_id: uuid.UUID, practitioner: Manager, db: DbSession):
     """Cancel an invoice and release its filings back to the billable pool."""
     invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id)

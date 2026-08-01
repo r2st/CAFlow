@@ -17,7 +17,28 @@ from app.models.client import Client
 from app.models.firm import Firm, Practitioner
 from app.services.portal import issued_at_ms, token_is_current
 
-bearer_scheme = HTTPBearer(auto_error=False)
+# Two schemes over the same header, so the reference shows which token each
+# endpoint wants. auto_error is off because a missing header should produce
+# our own error envelope rather than Starlette's bare 403.
+bearer_scheme = HTTPBearer(
+    scheme_name="PractitionerToken",
+    bearerFormat="JWT",
+    description=(
+        "A practitioner access token from `POST /auth/login` or "
+        "`POST /auth/register`. Scoped to the practitioner's firm."
+    ),
+    auto_error=False,
+)
+
+portal_scheme = HTTPBearer(
+    scheme_name="PortalMagicLink",
+    bearerFormat="JWT",
+    description=(
+        "A client magic-link token from `POST /clients/{client_id}/portal-link`. "
+        "Reaches only `/portal/*`, and only for the one client it was issued for."
+    ),
+    auto_error=False,
+)
 
 CREDENTIALS_EXCEPTION = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -67,7 +88,7 @@ CurrentFirm = Annotated[Firm, Depends(get_current_firm)]
 
 
 def get_portal_client(
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(portal_scheme)],
     db: Annotated[Session, Depends(get_db)],
 ) -> Client:
     """Resolve the client behind a magic-link token.

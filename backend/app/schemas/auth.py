@@ -5,13 +5,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import EmailStr, Field, field_validator
 
 from app.models.base import FirmPlan, PractitionerRole
-from app.schemas.common import ORMModel, validate_gstin, validate_pan
+from app.schemas.common import ORMModel, SanitizedModel, validate_gstin, validate_pan
 
 
-class FirmRegisterRequest(BaseModel):
+class FirmRegisterRequest(SanitizedModel):
     firm_name: str = Field(min_length=2, max_length=255)
     icai_registration_number: str | None = Field(default=None, max_length=64)
     firm_email: EmailStr
@@ -32,12 +32,12 @@ class FirmRegisterRequest(BaseModel):
     _validate_gstin = field_validator("gstin")(validate_gstin)
 
 
-class LoginRequest(BaseModel):
+class LoginRequest(SanitizedModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=72)
 
 
-class PractitionerCreate(BaseModel):
+class PractitionerCreate(SanitizedModel):
     full_name: str = Field(min_length=2, max_length=255)
     email: EmailStr
     password: str = Field(min_length=8, max_length=72)
@@ -46,7 +46,7 @@ class PractitionerCreate(BaseModel):
     membership_number: str | None = Field(default=None, max_length=32)
 
 
-class PractitionerUpdate(BaseModel):
+class PractitionerUpdate(SanitizedModel):
     full_name: str | None = Field(default=None, min_length=2, max_length=255)
     role: PractitionerRole | None = None
     phone: str | None = Field(default=None, max_length=20)
@@ -82,7 +82,7 @@ class FirmOut(ORMModel):
     created_at: datetime
 
 
-class TokenResponse(BaseModel):
+class TokenResponse(SanitizedModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int

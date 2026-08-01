@@ -5,10 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from app.models.base import ComplianceCategory, ComplianceStatus, Frequency
-from app.schemas.common import ORMModel
+from app.schemas.common import ORMModel, SanitizedModel
 
 
 class ComplianceTypeOut(ORMModel):
@@ -57,7 +57,7 @@ class ComplianceItemOut(ORMModel):
     days_remaining: int | None = None
 
 
-class ComplianceItemUpdate(BaseModel):
+class ComplianceItemUpdate(SanitizedModel):
     status: ComplianceStatus | None = None
     filed_on: date | None = None
     acknowledgement_number: str | None = Field(default=None, max_length=128)
@@ -67,19 +67,19 @@ class ComplianceItemUpdate(BaseModel):
     notes: str | None = None
 
 
-class BulkStatusUpdate(BaseModel):
+class BulkStatusUpdate(SanitizedModel):
     item_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
     status: ComplianceStatus
     filed_on: date | None = None
     acknowledgement_number: str | None = Field(default=None, max_length=128)
 
 
-class BulkStatusUpdateResult(BaseModel):
+class BulkStatusUpdateResult(SanitizedModel):
     updated: int
     skipped: int
 
 
-class ComplianceCalendarBucket(BaseModel):
+class ComplianceCalendarBucket(SanitizedModel):
     """Counts for one period column of the calendar."""
 
     period_label: str
@@ -90,7 +90,7 @@ class ComplianceCalendarBucket(BaseModel):
     filed: int
 
 
-class ComplianceCalendarResponse(BaseModel):
+class ComplianceCalendarResponse(SanitizedModel):
     from_date: date
     to_date: date
     total: int
@@ -101,19 +101,19 @@ class ComplianceCalendarResponse(BaseModel):
     items: list[ComplianceItemOut]
 
 
-class ComplianceGenerateRequest(BaseModel):
+class ComplianceGenerateRequest(SanitizedModel):
     window_start: date | None = None
     window_end: date | None = None
 
 
-class ComplianceGenerateResponse(BaseModel):
+class ComplianceGenerateResponse(SanitizedModel):
     created: int
     skipped_existing: int
     window_start: date
     window_end: date
 
 
-class DashboardStats(BaseModel):
+class DashboardStats(SanitizedModel):
     total_clients: int
     active_clients: int
     total_items: int

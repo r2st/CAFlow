@@ -26,6 +26,10 @@ class Task(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         Index("ix_task_firm_status", "firm_id", "status"),
         Index("ix_task_assignee_due", "assignee_id", "due_date"),
+        # The task list sorts by due date inside a firm.
+        Index("ix_task_firm_due", "firm_id", "due_date"),
+        # Per-client task views, which always narrow by status too.
+        Index("ix_task_firm_client_status", "firm_id", "client_id", "status"),
     )
 
     firm_id: Mapped[uuid.UUID] = mapped_column(

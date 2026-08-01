@@ -60,7 +60,7 @@ def _tally(bucket: ComplianceCalendarBucket, state: str) -> None:
         setattr(bucket, state, getattr(bucket, state) + 1)
 
 
-@router.get("/types", response_model=list[ComplianceTypeOut])
+@router.get("/types", response_model=list[ComplianceTypeOut], summary="List compliance types")
 def list_compliance_types(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -81,7 +81,11 @@ def list_compliance_types(
     return list(db.scalars(stmt).all())
 
 
-@router.get("/calendar", response_model=ComplianceCalendarResponse)
+@router.get(
+    "/calendar",
+    response_model=ComplianceCalendarResponse,
+    summary="The filing calendar for a period",
+)
 def compliance_calendar(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -169,7 +173,7 @@ def compliance_calendar(
     )
 
 
-@router.get("/items/{item_id}", response_model=ComplianceItemOut)
+@router.get("/items/{item_id}", response_model=ComplianceItemOut, summary="A single filing")
 def get_compliance_item(
     item_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
 ):
@@ -177,7 +181,7 @@ def get_compliance_item(
     return _serialise(item, date.today())
 
 
-@router.patch("/items/{item_id}", response_model=ComplianceItemOut)
+@router.patch("/items/{item_id}", response_model=ComplianceItemOut, summary="Update a filing")
 def update_compliance_item(
     item_id: uuid.UUID,
     payload: ComplianceItemUpdate,
@@ -215,7 +219,11 @@ def update_compliance_item(
     return _serialise(item, date.today())
 
 
-@router.post("/items/bulk-status", response_model=BulkStatusUpdateResult)
+@router.post(
+    "/items/bulk-status",
+    response_model=BulkStatusUpdateResult,
+    summary="Update the status of many filings",
+)
 def bulk_update_status(
     payload: BulkStatusUpdate, practitioner: CurrentPractitioner, db: DbSession
 ):
@@ -252,7 +260,7 @@ def bulk_update_status(
     )
 
 
-@router.get("/dashboard", response_model=DashboardStats)
+@router.get("/dashboard", response_model=DashboardStats, summary="Firm dashboard counters")
 def dashboard(practitioner: CurrentPractitioner, db: DbSession):
     """Practice-wide compliance status at a glance."""
     today = date.today()

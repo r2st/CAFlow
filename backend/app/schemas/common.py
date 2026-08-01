@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import Generic, TypeVar
+import unicodedata
+from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 T = TypeVar("T")
 
@@ -13,8 +14,49 @@ PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$")
 TAN_RE = re.compile(r"^[A-Z]{4}[0-9]{5}[A-Z]$")
 
+# C0/C1 controls except tab and newline, plus DEL. These have no business in a
+# client name or an invoice note: they corrupt log lines, CSV exports and
+# terminal output, and a stray NUL byte is rejected outright by PostgreSQL's
+# text type. Newline and tab survive because notes and addresses are multiline.
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
-class ORMModel(BaseModel):
+# Zero-width and bidirectional-override characters: invisible in a UI, but
+# they let one string render as another (the "Trojan Source" trick).
+INVISIBLE_CHARS = re.compile(r"[​-‏‪-‮⁦-⁩﻿]")
+
+# Whitespace is meaningful in a secret, so these are passed through untouched.
+UNSANITISED_FIELDS = frozenset({"password", "owner_password", "new_password", "token"})
+
+
+def sanitize_text(value: str) -> str:
+    """Strip characters that are invisible, control, or display-spoofing.
+
+    Applied to every inbound string field. Unicode is normalised to NFC first
+    so visually identical inputs compare and store identically.
+    """
+    cleaned = unicodedata.normalize("NFC", value)
+    cleaned = CONTROL_CHARS.sub("", cleaned)
+    cleaned = INVISIBLE_CHARS.sub("", cleaned)
+    return cleaned.strip()
+
+
+class SanitizedModel(BaseModel):
+    """Base for every schema: cleans string input before field validation.
+
+    ``mode="before"`` matters — the sanitised value is what length limits and
+    the PAN/GSTIN patterns then see, so " AAACS1234F\\u200b" is accepted as the
+    PAN it looks like rather than rejected for characters nobody can see.
+    """
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _sanitize_strings(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, str) and info.field_name not in UNSANITISED_FIELDS:
+            return sanitize_text(value)
+        return value
+
+
+class ORMModel(SanitizedModel):
     model_config = ConfigDict(from_attributes=True)
 
 

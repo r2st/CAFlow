@@ -5,10 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from app.models.base import ReminderChannel, ReminderStatus, ReminderType
-from app.schemas.common import ORMModel
+from app.schemas.common import ORMModel, SanitizedModel
 
 
 class ReminderOut(ORMModel):
@@ -33,7 +33,7 @@ class ReminderOut(ORMModel):
     client_name: str | None = None
 
 
-class ReminderCreate(BaseModel):
+class ReminderCreate(SanitizedModel):
     client_id: uuid.UUID
     reminder_type: ReminderType = ReminderType.CUSTOM
     channel: ReminderChannel | None = None
@@ -44,7 +44,7 @@ class ReminderCreate(BaseModel):
     invoice_id: uuid.UUID | None = None
 
 
-class ReminderDraftRequest(BaseModel):
+class ReminderDraftRequest(SanitizedModel):
     """Ask the AI to draft a message; nothing is queued until it is created."""
 
     client_id: uuid.UUID
@@ -54,24 +54,24 @@ class ReminderDraftRequest(BaseModel):
     extra_context: dict = Field(default_factory=dict)
 
 
-class ReminderDraftOut(BaseModel):
+class ReminderDraftOut(SanitizedModel):
     subject: str
     body: str
     channel: ReminderChannel
     recipient: str | None
 
 
-class ReminderQueueRequest(BaseModel):
+class ReminderQueueRequest(SanitizedModel):
     """Run the automated sweeps on demand rather than waiting for the beat."""
 
     kind: str = Field(default="document", pattern="^(document|payment)$")
 
 
-class ReminderQueueResponse(BaseModel):
+class ReminderQueueResponse(SanitizedModel):
     kind: str
     queued: int
     reminders: list[ReminderOut]
 
 
-class ReminderCancelResponse(BaseModel):
+class ReminderCancelResponse(SanitizedModel):
     cancelled: int

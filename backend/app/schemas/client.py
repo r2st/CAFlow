@@ -5,13 +5,13 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import EmailStr, Field, field_validator
 
 from app.models.base import EntityType, GSTFilingFrequency
-from app.schemas.common import ORMModel, validate_gstin, validate_pan, validate_tan
+from app.schemas.common import ORMModel, SanitizedModel, validate_gstin, validate_pan, validate_tan
 
 
-class ClientBase(BaseModel):
+class ClientBase(SanitizedModel):
     name: str = Field(min_length=2, max_length=255)
     entity_type: EntityType = EntityType.INDIVIDUAL
     pan: str | None = None
@@ -49,7 +49,7 @@ class ClientCreate(ClientBase):
     generate_compliance_items: bool = True
 
 
-class ClientUpdate(BaseModel):
+class ClientUpdate(SanitizedModel):
     name: str | None = Field(default=None, min_length=2, max_length=255)
     entity_type: EntityType | None = None
     pan: str | None = None
@@ -113,12 +113,12 @@ class ClientOut(ORMModel):
     updated_at: datetime
 
 
-class ClientCreateResponse(BaseModel):
+class ClientCreateResponse(SanitizedModel):
     client: ClientOut
     compliance_items_created: int
 
 
-class ClientComplianceSummary(BaseModel):
+class ClientComplianceSummary(SanitizedModel):
     total: int
     pending: int
     overdue: int

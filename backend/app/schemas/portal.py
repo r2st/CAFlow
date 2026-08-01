@@ -9,12 +9,13 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import EmailStr, Field
 
+from app.schemas.common import SanitizedModel
 from app.schemas.document import ChecklistOut, SharedDocumentOut
 
 
-class MagicLinkRequest(BaseModel):
+class MagicLinkRequest(SanitizedModel):
     # Optional override — otherwise the link is addressed to the client's
     # email on file. The link itself is returned to the practitioner either
     # way; delivery is a separate, explicit step.
@@ -22,7 +23,7 @@ class MagicLinkRequest(BaseModel):
     note: str | None = Field(default=None, max_length=500)
 
 
-class MagicLinkOut(BaseModel):
+class MagicLinkOut(SanitizedModel):
     client_id: uuid.UUID
     client_name: str
     url: str
@@ -31,14 +32,14 @@ class MagicLinkOut(BaseModel):
     delivered_to: str | None = None
 
 
-class PortalAccessOut(BaseModel):
+class PortalAccessOut(SanitizedModel):
     client_id: uuid.UUID
     portal_enabled: bool
     portal_token_valid_from: datetime | None
     portal_last_seen_at: datetime | None
 
 
-class PortalFilingOut(BaseModel):
+class PortalFilingOut(SanitizedModel):
     """One filing as the client sees it — status, not fees."""
 
     id: uuid.UUID
@@ -54,7 +55,7 @@ class PortalFilingOut(BaseModel):
     missing_documents: list[str]
 
 
-class PortalSummary(BaseModel):
+class PortalSummary(SanitizedModel):
     total: int
     overdue: int
     due_soon: int
@@ -63,7 +64,7 @@ class PortalSummary(BaseModel):
     documents_outstanding: int
 
 
-class PortalOverview(BaseModel):
+class PortalOverview(SanitizedModel):
     client_id: uuid.UUID
     client_name: str
     firm_name: str

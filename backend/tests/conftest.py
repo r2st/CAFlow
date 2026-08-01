@@ -20,6 +20,14 @@ os.environ["OPENROUTER_API_KEY"] = ""
 # Uploads must never land in the working tree.
 os.environ["STORAGE_DIR"] = str(_TEST_ROOT / "documents")
 os.environ["PORTAL_BASE_URL"] = "https://portal.example.test/portal"
+# The suite drives the same endpoints hundreds of times; rate limiting is
+# switched on explicitly by the tests that cover it (see test_middleware.py).
+os.environ["RATE_LIMIT_ENABLED"] = "false"
+# No Redis in CI: rate-limit counters stay in-process and the broker health
+# check reports reachable without dialling anything.
+os.environ["REDIS_URL"] = "memory://"
+os.environ["CELERY_BROKER_URL"] = "memory://"
+os.environ["CELERY_RESULT_BACKEND"] = "memory://"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

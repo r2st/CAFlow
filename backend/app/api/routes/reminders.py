@@ -49,7 +49,11 @@ def serialise(reminder: Reminder) -> ReminderOut:
 # ------------------------------------------------------------------ drafting --
 
 
-@router.post("/draft", response_model=ReminderDraftOut)
+@router.post(
+    "/draft",
+    response_model=ReminderDraftOut,
+    summary="Draft reminder copy without sending it",
+)
 def draft_reminder(
     payload: ReminderDraftRequest, practitioner: CurrentPractitioner, db: DbSession
 ):
@@ -111,7 +115,11 @@ def draft_reminder(
     )
 
 
-@router.post("/queue", response_model=ReminderQueueResponse)
+@router.post(
+    "/queue",
+    response_model=ReminderQueueResponse,
+    summary="Queue the reminders due today",
+)
 def queue_automated_reminders(
     payload: ReminderQueueRequest, practitioner: Manager, db: DbSession
 ):
@@ -141,7 +149,12 @@ def queue_automated_reminders(
 # --------------------------------------------------------------------- CRUD --
 
 
-@router.post("", response_model=ReminderOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=ReminderOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Schedule a reminder",
+)
 def create_reminder(
     payload: ReminderCreate, practitioner: CurrentPractitioner, db: DbSession
 ):
@@ -177,7 +190,7 @@ def create_reminder(
     return serialise(reminder)
 
 
-@router.get("", response_model=Page[ReminderOut])
+@router.get("", response_model=Page[ReminderOut], summary="List reminders")
 def list_reminders(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -212,7 +225,11 @@ def list_reminders(
     )
 
 
-@router.post("/{reminder_id}/cancel", response_model=ReminderOut)
+@router.post(
+    "/{reminder_id}/cancel",
+    response_model=ReminderOut,
+    summary="Cancel a scheduled reminder",
+)
 def cancel_reminder(
     reminder_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
 ):
@@ -239,7 +256,11 @@ def cancel_reminder(
     return serialise(reminder)
 
 
-@router.post("/cancel-scheduled", response_model=ReminderCancelResponse)
+@router.post(
+    "/cancel-scheduled",
+    response_model=ReminderCancelResponse,
+    summary="Cancel every scheduled reminder for a client",
+)
 def cancel_scheduled_for_client(
     practitioner: Manager,
     db: DbSession,
@@ -271,7 +292,7 @@ def cancel_scheduled_for_client(
     return ReminderCancelResponse(cancelled=len(pending))
 
 
-@router.get("/pending-count")
+@router.get("/pending-count", summary="How many reminders are waiting to go out")
 def pending_count(practitioner: CurrentPractitioner, db: DbSession) -> dict[str, int]:
     """Badge counts for the reminders nav item."""
     now = datetime.now(UTC)

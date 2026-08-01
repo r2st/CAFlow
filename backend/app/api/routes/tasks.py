@@ -100,7 +100,7 @@ def _apply_status(task: Task, new_status: TaskStatus) -> None:
 # Before /{task_id} so the literal path wins.
 
 
-@router.get("/workload", response_model=WorkloadResponse)
+@router.get("/workload", response_model=WorkloadResponse, summary="Open work per team member")
 def team_workload(practitioner: CurrentPractitioner, db: DbSession):
     """Open work per team member — who is drowning and who is free."""
     today = date.today()
@@ -128,7 +128,11 @@ def team_workload(practitioner: CurrentPractitioner, db: DbSession):
     )
 
 
-@router.post("/generate", response_model=TaskGenerateResponse)
+@router.post(
+    "/generate",
+    response_model=TaskGenerateResponse,
+    summary="Create tasks from upcoming filings",
+)
 def generate_tasks(
     payload: TaskGenerateRequest, practitioner: Manager, db: DbSession
 ):
@@ -158,7 +162,7 @@ def generate_tasks(
     )
 
 
-@router.post("/bulk", response_model=BulkTaskUpdateResult)
+@router.post("/bulk", response_model=BulkTaskUpdateResult, summary="Update many tasks at once")
 def bulk_update_tasks(
     payload: BulkTaskUpdate, practitioner: CurrentPractitioner, db: DbSession
 ):
@@ -206,7 +210,12 @@ def bulk_update_tasks(
 # --------------------------------------------------------------------- CRUD --
 
 
-@router.post("", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=TaskOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a task",
+)
 def create_task(payload: TaskCreate, practitioner: CurrentPractitioner, db: DbSession):
     _validate_assignee(db, practitioner.firm_id, payload.assignee_id)
 
@@ -245,7 +254,7 @@ def create_task(payload: TaskCreate, practitioner: CurrentPractitioner, db: DbSe
     return serialise(task, _client_names(db, [task]), date.today())
 
 
-@router.get("", response_model=Page[TaskOut])
+@router.get("", response_model=Page[TaskOut], summary="List tasks")
 def list_tasks(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -303,13 +312,13 @@ def list_tasks(
     )
 
 
-@router.get("/{task_id}", response_model=TaskOut)
+@router.get("/{task_id}", response_model=TaskOut, summary="A single task")
 def get_task(task_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession):
     task = _get_task_or_404(db, practitioner.firm_id, task_id)
     return serialise(task, _client_names(db, [task]), date.today())
 
 
-@router.patch("/{task_id}", response_model=TaskOut)
+@router.patch("/{task_id}", response_model=TaskOut, summary="Update a task")
 def update_task(
     task_id: uuid.UUID,
     payload: TaskUpdate,
@@ -342,7 +351,7 @@ def update_task(
     return serialise(task, _client_names(db, [task]), date.today())
 
 
-@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a task")
 def delete_task(task_id: uuid.UUID, practitioner: Manager, db: DbSession):
     task = _get_task_or_404(db, practitioner.firm_id, task_id)
     title = task.title

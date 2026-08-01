@@ -81,7 +81,12 @@ def _compliance_summary(db: Session, client_id: uuid.UUID) -> ClientComplianceSu
     return summary
 
 
-@router.post("", response_model=ClientCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=ClientCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a client and generate its calendar",
+)
 def create_client(
     payload: ClientCreate, practitioner: Manager, firm: CurrentFirm, db: DbSession
 ):
@@ -144,7 +149,7 @@ def create_client(
     )
 
 
-@router.get("", response_model=Page[ClientOut])
+@router.get("", response_model=Page[ClientOut], summary="List clients")
 def list_clients(
     practitioner: CurrentPractitioner,
     db: DbSession,
@@ -185,7 +190,11 @@ def list_clients(
     )
 
 
-@router.get("/{client_id}", response_model=ClientDetailOut)
+@router.get(
+    "/{client_id}",
+    response_model=ClientDetailOut,
+    summary="A client with its filings and documents",
+)
 def get_client(client_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession):
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
     assignee = (
@@ -200,7 +209,7 @@ def get_client(client_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSe
     )
 
 
-@router.patch("/{client_id}", response_model=ClientCreateResponse)
+@router.patch("/{client_id}", response_model=ClientCreateResponse, summary="Update a client")
 def update_client(
     client_id: uuid.UUID, payload: ClientUpdate, practitioner: Manager, db: DbSession
 ):
@@ -253,7 +262,11 @@ def update_client(
     )
 
 
-@router.post("/{client_id}/compliance-items", response_model=ComplianceGenerateResponse)
+@router.post(
+    "/{client_id}/compliance-items",
+    response_model=ComplianceGenerateResponse,
+    summary="Top up a client's compliance calendar",
+)
 def generate_items(
     client_id: uuid.UUID,
     payload: ComplianceGenerateRequest,
@@ -282,7 +295,11 @@ def generate_items(
     )
 
 
-@router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{client_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Deactivate a client",
+)
 def deactivate_client(client_id: uuid.UUID, practitioner: Manager, db: DbSession):
     """Soft-delete: clients are deactivated, never destroyed (audit trail)."""
     client = _get_client_or_404(db, practitioner.firm_id, client_id)

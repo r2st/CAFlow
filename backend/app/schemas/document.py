@@ -5,10 +5,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from app.models.base import DocumentCategory, DocumentStatus
-from app.schemas.common import ORMModel
+from app.schemas.common import ORMModel, SanitizedModel
 
 
 class DocumentOut(ORMModel):
@@ -37,7 +37,7 @@ class DocumentOut(ORMModel):
     compliance_label: str | None = None
 
 
-class DocumentUpdate(BaseModel):
+class DocumentUpdate(SanitizedModel):
     category: DocumentCategory | None = None
     compliance_item_id: uuid.UUID | None = None
     satisfies_requirements: list[str] | None = None
@@ -46,14 +46,14 @@ class DocumentUpdate(BaseModel):
     is_category_confirmed: bool | None = None
 
 
-class RequirementStateOut(BaseModel):
+class RequirementStateOut(SanitizedModel):
     requirement: str
     label: str
     satisfied: bool
     document_ids: list[uuid.UUID]
 
 
-class ChecklistOut(BaseModel):
+class ChecklistOut(SanitizedModel):
     compliance_item_id: uuid.UUID
     compliance_type_name: str | None = None
     period_label: str | None = None
@@ -65,7 +65,7 @@ class ChecklistOut(BaseModel):
     is_complete: bool
 
 
-class OutstandingDocumentsResponse(BaseModel):
+class OutstandingDocumentsResponse(SanitizedModel):
     """Everything the practice is still waiting on, deadline-first."""
 
     from_date: str
@@ -75,12 +75,12 @@ class OutstandingDocumentsResponse(BaseModel):
     checklists: list[ChecklistOut]
 
 
-class DocumentUploadResponse(BaseModel):
+class DocumentUploadResponse(SanitizedModel):
     document: DocumentOut
     checklist: ChecklistOut | None = None
 
 
-class SharedDocumentOut(BaseModel):
+class SharedDocumentOut(SanitizedModel):
     """Trimmed view for the client portal — no firm-internal fields."""
 
     id: uuid.UUID
@@ -92,7 +92,7 @@ class SharedDocumentOut(BaseModel):
     compliance_label: str | None = None
 
 
-class PractitionerUploadRequest(BaseModel):
+class PractitionerUploadRequest(SanitizedModel):
     """Multipart form fields accepted alongside the file itself."""
 
     compliance_item_id: uuid.UUID | None = None
