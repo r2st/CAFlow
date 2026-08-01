@@ -50,13 +50,89 @@ export function formatDaysRemaining(days) {
   return `${late} day${late === 1 ? '' : 's'} ago`
 }
 
-export function Alert({ kind = 'error', children }) {
+export function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined) return '—'
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
+}
+
+/**
+ * Hand a fetched Blob to the browser's downloader.
+ *
+ * Downloads go through fetch rather than a plain link because they need the
+ * Authorization header, so the response has to be turned back into a file the
+ * browser will save.
+ */
+export function saveBlob(blob, filename) {
+  // jsdom has no object-URL support; tests exercise the fetch, not the save.
+  if (typeof URL.createObjectURL !== 'function') return
+  const href = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = href
+  link.download = filename || 'download'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(href)
+}
+
+export function Alert({ kind = 'error', children, onDismiss }) {
   if (!children) return null
-  return <div className={`alert ${kind}`}>{children}</div>
+  return (
+    <div className={`alert ${kind}`} role={kind === 'error' ? 'alert' : 'status'}>
+      <span>{children}</span>
+      {onDismiss && (
+        <button type="button" className="alert-close" aria-label="Dismiss" onClick={onDismiss}>
+          ×
+        </button>
+      )}
+    </div>
+  )
 }
 
 export function Loading({ label = 'Loading…' }) {
-  return <div className="loading">{label}</div>
+  return (
+    <div className="loading" role="status">
+      <span className="spinner" aria-hidden="true" />
+      {label}
+    </div>
+  )
+}
+
+/**
+ * Grey placeholder blocks for a first paint.
+ *
+ * A skeleton beats a spinner where the shape of the answer is already known —
+ * the page stops jumping once the data lands.
+ */
+export function Skeleton({ rows = 3, className = '' }) {
+  return (
+    <div className={`skeleton ${className}`} role="status" aria-label="Loading">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index} className="skeleton-row" />
+      ))}
+    </div>
+  )
+}
+
+export function SkeletonStats({ count = 4 }) {
+  return (
+    <div className="stat-grid" aria-hidden="true">
+      {Array.from({ length: count }, (_, index) => (
+        <div key={index} className="stat">
+          <div className="skeleton-row short" />
+          <div className="skeleton-row wide" />
+        </div>
+      ))}
+    </div>
+  )
 }
 
 export function EmptyState({ title, children }) {

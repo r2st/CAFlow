@@ -186,6 +186,13 @@ describe('Client detail', () => {
     setToken('jwt-token')
     vi.spyOn(api, 'me').mockResolvedValue(PRACTITIONER)
     vi.spyOn(api, 'firm').mockResolvedValue(FIRM)
+    // The portal card loads its own state; PortalAccessCard has its own tests.
+    vi.spyOn(api, 'portalAccess').mockResolvedValue({
+      client_id: 'c-1',
+      portal_enabled: true,
+      portal_token_valid_from: null,
+      portal_last_seen_at: null,
+    })
   })
 
   function renderDetail() {

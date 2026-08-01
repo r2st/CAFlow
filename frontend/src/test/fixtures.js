@@ -121,6 +121,110 @@ export function calendarResponse(items) {
   }
 }
 
+export function sharedDocument(overrides = {}) {
+  return {
+    id: 'd-1',
+    original_filename: 'GSTR-3B-July.pdf',
+    category: 'gst_return',
+    size_bytes: 184320,
+    uploaded_via_portal: false,
+    created_at: '2026-08-01T09:00:00Z',
+    compliance_label: 'GSTR-3B · 2026-07',
+    ...overrides,
+  }
+}
+
+/** The `/portal/me` payload, as a client with one outstanding checklist sees it. */
+export function portalOverview(overrides = {}) {
+  return {
+    client_id: 'c-1',
+    client_name: 'Nimbus Textiles Pvt Ltd',
+    firm_name: 'Sharma & Associates',
+    firm_email: 'office@sharma-ca.in',
+    firm_phone: '+912041234567',
+    contact_person: 'Rohit Nair',
+    summary: {
+      total: 2,
+      overdue: 1,
+      due_soon: 1,
+      upcoming: 0,
+      filed: 0,
+      documents_outstanding: 2,
+    },
+    filings: [
+      {
+        id: 'ci-1',
+        compliance_type_name: 'GSTR-3B (Monthly) — Summary return & tax payment',
+        form_number: 'GSTR-3B',
+        period_label: '2026-07',
+        due_date: '2026-08-20',
+        display_status: 'due_soon',
+        status: 'pending',
+        filed_on: null,
+        acknowledgement_number: null,
+        days_remaining: 5,
+        missing_documents: ['Sales register', 'Purchase register'],
+      },
+      {
+        id: 'ci-2',
+        compliance_type_name: 'TDS Return (Q1)',
+        form_number: '24Q',
+        period_label: '2026-Q1',
+        due_date: '2026-07-31',
+        display_status: 'overdue',
+        status: 'pending',
+        filed_on: null,
+        acknowledgement_number: null,
+        days_remaining: -5,
+        missing_documents: [],
+      },
+    ],
+    checklists: [
+      {
+        compliance_item_id: 'ci-1',
+        compliance_type_name: 'GSTR-3B (Monthly) — Summary return & tax payment',
+        period_label: '2026-07',
+        due_date: '2026-08-20',
+        client_id: 'c-1',
+        client_name: 'Nimbus Textiles Pvt Ltd',
+        requirements: [
+          {
+            requirement: 'sales_register',
+            label: 'Sales register',
+            satisfied: false,
+            document_ids: [],
+          },
+          {
+            requirement: 'purchase_register',
+            label: 'Purchase register',
+            satisfied: false,
+            document_ids: [],
+          },
+          {
+            requirement: 'bank_statement',
+            label: 'Bank statement',
+            satisfied: true,
+            document_ids: ['d-2'],
+          },
+        ],
+        missing: ['sales_register', 'purchase_register'],
+        is_complete: false,
+      },
+    ],
+    shared_documents: [sharedDocument()],
+    my_uploads: [
+      sharedDocument({
+        id: 'd-2',
+        original_filename: 'bank-statement-july.pdf',
+        category: 'bank_statement',
+        uploaded_via_portal: true,
+        compliance_label: null,
+      }),
+    ],
+    ...overrides,
+  }
+}
+
 export const DASHBOARD_STATS = {
   total_clients: 3,
   active_clients: 3,

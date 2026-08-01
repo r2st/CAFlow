@@ -13,10 +13,6 @@ export default defineConfig({
       },
     },
   },
-  test: {
-    environment: 'jsdom',
-    globals: true,
-    setupFiles: './src/test/setup.js',
-    css: false,
-  },
+  // Test settings live in vitest.config.js, which takes precedence over this
+  // file — keeping a second copy here would only drift out of step.
 })

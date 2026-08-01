@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import api from '../api/client'
 import ComplianceTable from '../components/ComplianceTable'
+import PortalAccessCard from '../components/PortalAccessCard'
 import {
   Alert,
   DetailItem,
@@ -152,6 +153,8 @@ export default function ClientDetail() {
           )}
         </div>
       </div>
+
+      <PortalAccessCard clientId={clientId} />
 
       <div className="card">
         <div className="card-header">
