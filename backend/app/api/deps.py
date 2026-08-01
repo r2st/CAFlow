@@ -13,13 +13,21 @@ from sqlalchemy.orm import Session
 from app.core.security import TokenError, decode_token
 from app.database import get_db
 from app.models.base import PractitionerRole
+from app.models.client import Client
 from app.models.firm import Firm, Practitioner
+from app.services.portal import issued_at_ms, token_is_current
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
 CREDENTIALS_EXCEPTION = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
     detail="Could not validate credentials",
+    headers={"WWW-Authenticate": "Bearer"},
+)
+
+PORTAL_LINK_EXCEPTION = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="This portal link is invalid or has expired. Ask your CA for a new one.",
     headers={"WWW-Authenticate": "Bearer"},
 )
 
@@ -56,6 +64,37 @@ def get_current_firm(practitioner: CurrentPractitioner, db: DbSession) -> Firm:
 
 
 CurrentFirm = Annotated[Firm, Depends(get_current_firm)]
+
+
+def get_portal_client(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Client:
+    """Resolve the client behind a magic-link token.
+
+    Deliberately separate from ``get_current_practitioner``: a portal token
+    grants access to exactly one client's own records and nothing else, so it
+    must never satisfy a practitioner-scoped dependency.
+    """
+    if credentials is None:
+        raise PORTAL_LINK_EXCEPTION
+    try:
+        payload = decode_token(credentials.credentials, expected_type="magic_link")
+        client_id = uuid.UUID(payload["sub"])
+    except (TokenError, KeyError, ValueError) as exc:
+        raise PORTAL_LINK_EXCEPTION from exc
+
+    client = db.get(Client, client_id)
+    if client is None or not client.is_active or not client.portal_enabled:
+        raise PORTAL_LINK_EXCEPTION
+    if str(client.firm_id) != payload.get("firm_id"):
+        raise PORTAL_LINK_EXCEPTION
+    if not token_is_current(client, issued_at_ms(payload)):
+        raise PORTAL_LINK_EXCEPTION
+    return client
+
+
+PortalClient = Annotated[Client, Depends(get_portal_client)]
 
 
 def require_roles(*roles: PractitionerRole) -> Callable[[Practitioner], Practitioner]:

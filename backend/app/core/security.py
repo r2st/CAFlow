@@ -54,7 +54,12 @@ def create_access_token(
 
 
 def create_magic_link_token(*, client_id: uuid.UUID | str, firm_id: uuid.UUID | str) -> str:
-    """Passwordless token for the client portal (no login required)."""
+    """Passwordless token for the client portal (no login required).
+
+    Carries ``iat_ms`` alongside the standard ``iat``: revocation compares the
+    issue time against a cut-off instant, and one-second resolution would let a
+    link minted in the same second as the revocation survive it.
+    """
     now = datetime.now(UTC)
     expire = now + timedelta(minutes=settings.magic_link_expire_minutes)
     payload = {
@@ -62,6 +67,7 @@ def create_magic_link_token(*, client_id: uuid.UUID | str, firm_id: uuid.UUID | 
         "firm_id": str(firm_id),
         "type": "magic_link",
         "iat": int(now.timestamp()),
+        "iat_ms": int(now.timestamp() * 1000),
         "exp": int(expire.timestamp()),
     }
     return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)

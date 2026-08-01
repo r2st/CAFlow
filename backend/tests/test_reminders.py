@@ -1,0 +1,501 @@
+"""Automated document-collection and payment reminders, plus manual sends."""
+
+from __future__ import annotations
+
+import io
+import uuid
+from datetime import UTC, date, datetime, timedelta
+
+import pytest
+from sqlalchemy import select
+
+from app.models.base import ReminderChannel, ReminderStatus, ReminderType
+from app.models.client import Client
+from app.models.reminder import Reminder
+from app.services import reminders as reminder_service
+from app.worker import tasks as worker_tasks
+from tests.conftest import first_item_of_type
+
+PDF_BYTES = b"%PDF-1.4\n% ledger\n"
+
+
+def days_before_due(client, auth_headers, item_id: str, days: int) -> date:
+    """The run date that puts ``item_id`` exactly ``days`` from its deadline."""
+    item = client.get(
+        f"/api/v1/compliance/items/{item_id}", headers=auth_headers
+    ).json()
+    return date.fromisoformat(item["due_date"]) - timedelta(days=days)
+
+
+class TestChannelSelection:
+    def test_whatsapp_wins_when_available(self):
+        client = Client(whatsapp="+919900112233", email="a@b.in", phone="+919000000000")
+        assert reminder_service.preferred_channel(client) == ReminderChannel.WHATSAPP
+        assert reminder_service.recipient_for(client, ReminderChannel.WHATSAPP) == (
+            "+919900112233"
+        )
+
+    def test_email_is_the_fallback(self):
+        client = Client(whatsapp=None, email="a@b.in", phone="+919000000000")
+        assert reminder_service.preferred_channel(client) == ReminderChannel.EMAIL
+
+    def test_sms_when_only_a_phone_is_on_file(self):
+        client = Client(whatsapp=None, email=None, phone="+919000000000")
+        assert reminder_service.preferred_channel(client) == ReminderChannel.SMS
+
+    def test_nine_am_ist_converts_to_utc(self):
+        # IST is UTC+5:30, so 09:00 IST is 03:30 UTC the same morning.
+        moment = reminder_service.ist_morning(date(2026, 7, 1))
+        assert moment == datetime(2026, 7, 1, 3, 30, tzinfo=UTC)
+
+
+class TestDocumentReminders:
+    def test_queues_a_reminder_when_documents_are_missing(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        db.commit()
+
+        assert len(queued) >= 1
+        reminder = next(r for r in queued if str(r.compliance_item_id) == item["id"])
+        assert reminder.reminder_type == ReminderType.DOCUMENT
+        assert reminder.status == ReminderStatus.SCHEDULED
+        assert reminder.extra["offset_days"] == 10
+        assert set(reminder.extra["missing"]) == {
+            "sales_invoice",
+            "purchase_invoice",
+            "bank_statement",
+        }
+
+    def test_the_body_names_the_missing_documents(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        reminder = next(r for r in queued if str(r.compliance_item_id) == item["id"])
+        assert "Bank statement" in reminder.body
+        assert "Sales invoice" in reminder.body
+
+    def test_nothing_is_queued_once_every_document_has_arrived(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        for requirement in ("sales_invoice", "purchase_invoice", "bank_statement"):
+            client.post(
+                "/api/v1/documents/upload",
+                files={"file": (f"{requirement}.pdf", io.BytesIO(PDF_BYTES),
+                                "application/pdf")},
+                data={
+                    "client_id": client_id,
+                    "compliance_item_id": item["id"],
+                    "requirement": requirement,
+                },
+                headers=auth_headers,
+            )
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        assert item["id"] not in [str(r.compliance_item_id) for r in queued]
+
+    def test_a_partial_upload_still_triggers_a_chase(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("bank.pdf", io.BytesIO(PDF_BYTES), "application/pdf")},
+            data={
+                "client_id": client_id,
+                "compliance_item_id": item["id"],
+                "requirement": "bank_statement",
+            },
+            headers=auth_headers,
+        )
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        reminder = next(r for r in queued if str(r.compliance_item_id) == item["id"])
+        assert set(reminder.extra["missing"]) == {"sales_invoice", "purchase_invoice"}
+
+    def test_running_twice_on_the_same_offset_does_not_double_chase(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+
+        first = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        db.commit()
+        second = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        db.commit()
+        assert first
+        assert second == []
+
+    def test_each_offset_fires_once_as_the_deadline_approaches(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        offsets = [15, 5]
+        for offset in offsets:
+            run_date = days_before_due(client, auth_headers, item["id"], offset)
+            reminder_service.queue_document_reminders(
+                db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=offsets
+            )
+            db.commit()
+
+        fired = db.scalars(
+            select(Reminder).where(
+                Reminder.compliance_item_id == uuid.UUID(item["id"]),
+                Reminder.reminder_type == ReminderType.DOCUMENT,
+            )
+        ).all()
+        assert sorted(r.extra["offset_days"] for r in fired) == [5, 15]
+
+    def test_a_day_that_is_not_an_offset_queues_nothing(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 9)
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10, 5]
+        )
+        assert item["id"] not in [str(r.compliance_item_id) for r in queued]
+
+    def test_a_filed_item_is_never_chased(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        client.patch(
+            f"/api/v1/compliance/items/{item['id']}",
+            json={"status": "filed"},
+            headers=auth_headers,
+        )
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        assert item["id"] not in [str(r.compliance_item_id) for r in queued]
+
+    def test_a_deactivated_client_is_skipped(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        assert queued == []
+
+    def test_whatsapp_is_used_when_the_client_has_a_number(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"whatsapp": "+919900112233"},
+            headers=auth_headers,
+        )
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        assert queued[0].channel == ReminderChannel.WHATSAPP
+        assert queued[0].recipient == "+919900112233"
+
+    def test_an_empty_offset_list_is_a_no_op(self, db, firm_id):
+        assert reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[]
+        ) == []
+
+
+class TestPaymentReminders:
+    @pytest.fixture
+    def sent_invoice(self, client, auth_headers, client_id) -> dict:
+        invoice = client.post(
+            "/api/v1/invoices",
+            json={
+                "client_id": client_id,
+                "due_date": (date.today() - timedelta(days=7)).isoformat(),
+                "lines": [
+                    {"description": "GSTR-3B", "quantity": 1, "unit_price_paise": 200_000}
+                ],
+            },
+            headers=auth_headers,
+        ).json()
+        return client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+
+    def test_chases_an_overdue_invoice(self, db, firm_id, sent_invoice):
+        queued = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        db.commit()
+
+        assert len(queued) == 1
+        assert queued[0].reminder_type == ReminderType.PAYMENT
+        assert queued[0].extra["offset_days"] == 7
+        assert sent_invoice["invoice_number"] in queued[0].subject
+
+    def test_the_body_quotes_the_outstanding_balance(self, db, firm_id, sent_invoice):
+        queued = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        assert "2,360.00" in queued[0].body
+
+    def test_running_twice_does_not_double_chase(self, db, firm_id, sent_invoice):
+        reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        db.commit()
+        again = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        assert again == []
+
+    def test_a_paid_invoice_is_not_chased(
+        self, client, auth_headers, db, firm_id, sent_invoice
+    ):
+        client.post(
+            f"/api/v1/invoices/{sent_invoice['id']}/payments",
+            json={"amount_paise": sent_invoice["total_paise"]},
+            headers=auth_headers,
+        )
+        queued = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        assert queued == []
+
+    def test_a_draft_invoice_is_not_chased(self, client, auth_headers, client_id, db, firm_id):
+        client.post(
+            "/api/v1/invoices",
+            json={
+                "client_id": client_id,
+                "due_date": (date.today() - timedelta(days=7)).isoformat(),
+                "lines": [{"description": "x", "quantity": 1, "unit_price_paise": 1000}],
+            },
+            headers=auth_headers,
+        )
+        queued = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        assert queued == []
+
+    def test_a_non_offset_day_queues_nothing(self, db, firm_id, sent_invoice):
+        queued = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[15, 30]
+        )
+        assert queued == []
+
+
+class TestReminderApi:
+    def test_drafts_a_document_request(self, client, auth_headers, client_id):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        response = client.post(
+            "/api/v1/reminders/draft",
+            json={
+                "client_id": client_id,
+                "purpose": "document_request",
+                "compliance_item_id": item["id"],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+        body = response.json()
+        assert body["subject"].startswith("GSTR-3B")
+        assert "Nimbus Textiles Pvt Ltd" in body["body"]
+        assert "Bank statement" in body["body"]
+        assert body["recipient"] == "accounts@nimbustextiles.in"
+
+    def test_drafting_does_not_queue_anything(self, client, auth_headers, client_id, db):
+        client.post(
+            "/api/v1/reminders/draft",
+            json={"client_id": client_id, "purpose": "document_request"},
+            headers=auth_headers,
+        )
+        assert db.query(Reminder).count() == 0
+
+    def test_queues_a_manual_reminder(self, client, auth_headers, client_id):
+        response = client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "reminder_type": "custom",
+                "subject": "Please call us",
+                "body": "We need to discuss your audit.",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["status"] == "scheduled"
+        assert response.json()["client_name"] == "Nimbus Textiles Pvt Ltd"
+
+    def test_a_client_with_no_address_cannot_be_reminded(
+        self, client, auth_headers, client_id
+    ):
+        client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"email": None, "phone": None, "whatsapp": None},
+            headers=auth_headers,
+        )
+        response = client.post(
+            "/api/v1/reminders",
+            json={"client_id": client_id, "subject": "Hello", "body": "Hi"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+        assert "no email address on file" in response.json()["detail"]
+
+    def test_runs_the_document_sweep_on_demand(self, client, auth_headers, client_id):
+        response = client.post(
+            "/api/v1/reminders/queue", json={"kind": "document"}, headers=auth_headers
+        )
+        assert response.status_code == 200
+        assert response.json()["kind"] == "document"
+        assert response.json()["queued"] >= 0
+
+    def test_an_unknown_sweep_kind_is_rejected(self, client, auth_headers):
+        response = client.post(
+            "/api/v1/reminders/queue", json={"kind": "carrier-pigeon"}, headers=auth_headers
+        )
+        assert response.status_code == 422
+
+    def test_cancels_a_scheduled_reminder(self, client, auth_headers, client_id):
+        reminder = client.post(
+            "/api/v1/reminders",
+            json={"client_id": client_id, "subject": "s", "body": "b"},
+            headers=auth_headers,
+        ).json()
+
+        response = client.post(
+            f"/api/v1/reminders/{reminder['id']}/cancel", headers=auth_headers
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "cancelled"
+
+    def test_a_cancelled_reminder_cannot_be_cancelled_again(
+        self, client, auth_headers, client_id
+    ):
+        reminder = client.post(
+            "/api/v1/reminders",
+            json={"client_id": client_id, "subject": "s", "body": "b"},
+            headers=auth_headers,
+        ).json()
+        client.post(f"/api/v1/reminders/{reminder['id']}/cancel", headers=auth_headers)
+        again = client.post(
+            f"/api/v1/reminders/{reminder['id']}/cancel", headers=auth_headers
+        )
+        assert again.status_code == 409
+
+    def test_stops_chasing_a_client_entirely(self, client, auth_headers, client_id):
+        for subject in ("one", "two"):
+            client.post(
+                "/api/v1/reminders",
+                json={"client_id": client_id, "subject": subject, "body": "b"},
+                headers=auth_headers,
+            )
+        response = client.post(
+            "/api/v1/reminders/cancel-scheduled",
+            params={"client_id": client_id},
+            headers=auth_headers,
+        )
+        assert response.json() == {"cancelled": 2}
+
+    def test_pending_counts_drive_the_nav_badge(self, client, auth_headers, client_id):
+        client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "subject": "later",
+                "body": "b",
+                "scheduled_for": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
+            },
+            headers=auth_headers,
+        )
+        client.post(
+            "/api/v1/reminders",
+            json={"client_id": client_id, "subject": "now", "body": "b"},
+            headers=auth_headers,
+        )
+        counts = client.get("/api/v1/reminders/pending-count", headers=auth_headers).json()
+        assert counts["scheduled"] == 2
+        assert counts["due_now"] == 1
+
+    def test_reminders_require_authentication(self, client):
+        assert client.get("/api/v1/reminders").status_code == 401
+
+
+class TestWorkerTasks:
+    def test_the_document_sweep_task_runs(self, client, auth_headers, client_id, db):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 15)
+        result = worker_tasks.queue_document_reminders_task(run_date.isoformat())
+        assert result["queued"] >= 1
+
+    def test_the_task_generation_task_runs(self, client, auth_headers, client_id, db):
+        result = worker_tasks.generate_tasks_task(horizon_days=30)
+        assert result["firms"] == 1
+        assert result["created"] > 0
+
+    def test_the_invoice_refresh_task_flips_overdue(
+        self, client, auth_headers, client_id, db
+    ):
+        invoice = client.post(
+            "/api/v1/invoices",
+            json={
+                "client_id": client_id,
+                "due_date": (date.today() + timedelta(days=1)).isoformat(),
+                "lines": [{"description": "x", "quantity": 1, "unit_price_paise": 1000}],
+            },
+            headers=auth_headers,
+        ).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+
+        result = worker_tasks.refresh_invoice_statuses_task(
+            (date.today() + timedelta(days=5)).isoformat()
+        )
+        assert result["updated"] == 1
+
+        refreshed = client.get(
+            f"/api/v1/invoices/{invoice['id']}", headers=auth_headers
+        ).json()
+        assert refreshed["status"] == "overdue"
+
+    def test_document_reminders_dispatch_like_any_other(
+        self, client, auth_headers, client_id, db
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 15)
+        worker_tasks.queue_document_reminders_task(run_date.isoformat())
+
+        # Reminders are queued for 09:00 IST on the run date, which is past.
+        db.query(Reminder).update({Reminder.scheduled_for: datetime(2020, 1, 1)})
+        db.commit()
+
+        result = worker_tasks.dispatch_due_reminders_task()
+        assert result["sent"] >= 1
+
+    def test_compliance_items_still_top_up(self, db):
+        result = worker_tasks.generate_compliance_items_task()
+        assert "created" in result

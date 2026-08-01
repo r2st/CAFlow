@@ -11,11 +11,15 @@ import os
 import tempfile
 from pathlib import Path
 
-_TEST_DB = Path(tempfile.mkdtemp(prefix="caflow-tests-")) / "test.db"
+_TEST_ROOT = Path(tempfile.mkdtemp(prefix="caflow-tests-"))
+_TEST_DB = _TEST_ROOT / "test.db"
 os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{_TEST_DB}"
 # At least 32 bytes, or PyJWT warns on every signature.
 os.environ["SECRET_KEY"] = "caflow-test-secret-key-not-for-production-use"
 os.environ["OPENROUTER_API_KEY"] = ""
+# Uploads must never land in the working tree.
+os.environ["STORAGE_DIR"] = str(_TEST_ROOT / "documents")
+os.environ["PORTAL_BASE_URL"] = "https://portal.example.test/portal"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -85,6 +89,42 @@ def auth_headers(registered_firm: dict) -> dict[str, str]:
 @pytest.fixture
 def firm_id(registered_firm: dict) -> str:
     return registered_firm["firm"]["id"]
+
+
+@pytest.fixture
+def created_client(client: TestClient, auth_headers: dict[str, str]) -> dict:
+    """A client with compliance items already generated."""
+    response = client.post(
+        "/api/v1/clients", json=make_client_payload(), headers=auth_headers
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["client"]
+
+
+@pytest.fixture
+def client_id(created_client: dict) -> str:
+    return created_client["id"]
+
+
+def first_item_of_type(
+    client: TestClient, auth_headers: dict[str, str], code: str
+) -> dict:
+    """The earliest generated compliance item for a given compliance-type code.
+
+    Tests need a real item id, and which ones exist depends on today's date, so
+    they are looked up rather than hard-coded.
+    """
+    response = client.get(
+        "/api/v1/compliance/calendar",
+        params={"from_date": "2020-01-01", "to_date": "2035-12-31", "limit": 1000},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    matches = [
+        item for item in response.json()["items"] if item["compliance_type_code"] == code
+    ]
+    assert matches, f"No compliance item generated for {code}"
+    return matches[0]
 
 
 def make_client_payload(**overrides) -> dict:

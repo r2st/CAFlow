@@ -18,16 +18,21 @@ def record(
     entity_type: str,
     entity_id: uuid.UUID | None = None,
     actor: Practitioner | None = None,
+    actor_label: str | None = None,
     firm_id: uuid.UUID | None = None,
     summary: str | None = None,
     changes: dict[str, Any] | None = None,
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> AuditLog:
+    """Append one entry. ``actor_label`` names a non-practitioner actor —
+    a client acting through the portal, or a background job."""
     entry = AuditLog(
         firm_id=firm_id or (actor.firm_id if actor else None),
         actor_practitioner_id=actor.id if actor else None,
-        actor_label=f"{actor.full_name} <{actor.email}>" if actor else None,
+        actor_label=(
+            f"{actor.full_name} <{actor.email}>" if actor else actor_label
+        ),
         action=action,
         entity_type=entity_type,
         entity_id=entity_id,

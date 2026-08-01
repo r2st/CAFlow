@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, Date, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -75,6 +84,14 @@ class Client(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     notes: Mapped[str | None] = mapped_column(Text)
     # Per-service fee overrides: {"<compliance_type_code>": <paise>}
     service_fees: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
+
+    # --- Client portal (passwordless magic-link access) ---
+    portal_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Revocation cut-off: a magic link issued before this instant is refused.
+    # Set (not cleared) when the firm revokes access, so links already emailed
+    # die without needing a token blacklist.
+    portal_token_valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    portal_last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     firm: Mapped[Firm] = relationship(back_populates="clients")
     assigned_practitioner: Mapped[Practitioner | None] = relationship()

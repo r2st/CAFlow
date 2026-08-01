@@ -36,6 +36,26 @@ celery_app.conf.beat_schedule = {
         "task": "caflow.schedule_compliance_reminders",
         "schedule": crontab(hour=7, minute=0),
     },
+    # Chase clients for documents their upcoming filings still need.
+    "queue-document-reminders": {
+        "task": "caflow.queue_document_reminders",
+        "schedule": crontab(hour=7, minute=15),
+    },
+    # Chase unpaid invoices.
+    "queue-payment-reminders": {
+        "task": "caflow.queue_payment_reminders",
+        "schedule": crontab(hour=7, minute=30),
+    },
+    # Turn approaching deadlines into assignable work.
+    "generate-tasks-nightly": {
+        "task": "caflow.generate_tasks",
+        "schedule": crontab(hour=2, minute=0),
+    },
+    # Move sent invoices to overdue once their due date passes.
+    "refresh-invoice-statuses": {
+        "task": "caflow.refresh_invoice_statuses",
+        "schedule": crontab(hour=2, minute=30),
+    },
     # Deliver anything due to go out.
     "dispatch-due-reminders": {
         "task": "caflow.dispatch_due_reminders",

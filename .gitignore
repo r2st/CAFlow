@@ -27,6 +27,9 @@ dist/
 *.db
 *.sqlite3
 
+# --- Uploaded client documents (STORAGE_DIR) ---
+backend/var/
+
 # --- Editors / OS ---
 .DS_Store
 .idea/

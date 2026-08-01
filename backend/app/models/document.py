@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -58,6 +58,15 @@ class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     extracted_data: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
     processing_error: Mapped[str | None] = mapped_column(Text)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Requirement labels from ``ComplianceType.required_documents`` that this
+    # upload answers. Most requirements are satisfied by a category match; this
+    # covers the ones that have no category of their own ("export_invoices").
+    satisfies_requirements: Mapped[list] = mapped_column(JSONType, default=list, nullable=False)
+    # True when the client uploaded it through the portal rather than the firm.
+    uploaded_via_portal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Firm → client sharing: reports and computation sheets the client may download.
+    is_shared_with_client: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     client: Mapped[Client] = relationship()
     compliance_item: Mapped[ComplianceItem | None] = relationship()

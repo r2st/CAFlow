@@ -324,7 +324,7 @@ class TestDispatchDueReminders:
         make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 1, "failed": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 1, "failed": 0, "retrying": 0}
 
         db.expire_all()
         reminder = db.scalars(select(Reminder)).one()
@@ -338,7 +338,7 @@ class TestDispatchDueReminders:
         make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) + timedelta(hours=2))
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
 
         db.expire_all()
         assert db.scalars(select(Reminder)).one().status is ReminderStatus.SCHEDULED
@@ -355,7 +355,7 @@ class TestDispatchDueReminders:
         )
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 1}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 1, "retrying": 0}
 
         db.expire_all()
         reminder = db.scalars(select(Reminder)).one()
@@ -375,7 +375,7 @@ class TestDispatchDueReminders:
         )
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
 
     def test_cancelled_reminders_are_not_sent(self, db):
         firm = make_firm(db)
@@ -389,7 +389,7 @@ class TestDispatchDueReminders:
         )
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
 
     def test_batch_limit_is_respected(self, db):
         firm = make_firm(db)
@@ -399,7 +399,11 @@ class TestDispatchDueReminders:
             make_reminder(db, firm, client, scheduled_for=past)
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task(limit=2) == {"sent": 2, "failed": 0}
+        assert tasks.dispatch_due_reminders_task(limit=2) == {
+            "sent": 2,
+            "failed": 0,
+            "retrying": 0,
+        }
 
         db.expire_all()
         remaining = [
