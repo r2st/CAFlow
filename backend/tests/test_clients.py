@@ -1,0 +1,510 @@
+"""Client CRUD and the compliance items generated from a client's registrations."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import date
+
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.base import ComplianceStatus, EntityType, GSTFilingFrequency
+from app.models.client import Client as ClientModel
+from app.models.compliance import ComplianceItem, ComplianceType
+from app.services.applicability import applies_to
+from app.services.compliance_generator import applicable_types, generate_compliance_items
+from tests.conftest import make_client_payload
+
+API = "/api/v1"
+
+
+def codes_generated(db: Session, client_id: str) -> set[str]:
+    rows = db.execute(
+        select(ComplianceType.code)
+        .join(ComplianceItem, ComplianceItem.compliance_type_id == ComplianceType.id)
+        .where(ComplianceItem.client_id == uuid.UUID(client_id))
+        .distinct()
+    ).all()
+    return {row[0] for row in rows}
+
+
+def make_model_client(**overrides) -> ClientModel:
+    """An unsaved client used to exercise the applicability predicates."""
+    defaults = {
+        "name": "Test Co",
+        "entity_type": EntityType.INDIVIDUAL,
+        "gst_registered": False,
+        "gst_filing_frequency": GSTFilingFrequency.MONTHLY,
+        "tds_applicable": False,
+        "income_tax_applicable": True,
+        "tax_audit_applicable": False,
+        "roc_applicable": False,
+        "payroll_applicable": False,
+    }
+    return ClientModel(**(defaults | overrides))
+
+
+class TestApplicabilityRules:
+    def test_gst_rules_follow_the_filing_frequency(self):
+        monthly = make_model_client(gst_registered=True)
+        quarterly = make_model_client(
+            gst_registered=True, gst_filing_frequency=GSTFilingFrequency.QUARTERLY
+        )
+        unregistered = make_model_client()
+
+        assert applies_to("gst_monthly", monthly)
+        assert not applies_to("gst_quarterly", monthly)
+        assert applies_to("gst_quarterly", quarterly)
+        assert not applies_to("gst_monthly", quarterly)
+        assert not applies_to("gst_registered", unregistered)
+
+    def test_audit_and_non_audit_are_mutually_exclusive(self):
+        audited = make_model_client(tax_audit_applicable=True)
+        plain = make_model_client()
+        assert applies_to("income_tax_audit", audited)
+        assert not applies_to("income_tax_non_audit", audited)
+        assert applies_to("income_tax_non_audit", plain)
+
+    def test_roc_is_implied_by_entity_type(self):
+        company = make_model_client(entity_type=EntityType.PRIVATE_LIMITED)
+        llp = make_model_client(entity_type=EntityType.LLP)
+        individual = make_model_client()
+
+        assert applies_to("roc_company", company)
+        assert not applies_to("roc_company", llp)
+        assert applies_to("roc_llp", llp)
+        assert not applies_to("roc", individual)
+
+    def test_unknown_rule_is_not_applicable(self):
+        assert not applies_to("no_such_rule", make_model_client())
+
+
+class TestClientCreation:
+    def test_create_returns_client_and_item_count(self, client: TestClient, auth_headers: dict):
+        response = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["client"]["name"] == "Nimbus Textiles Pvt Ltd"
+        assert body["client"]["gstin"] == "27AABCN2345P1Z5"
+        assert body["compliance_items_created"] > 0
+
+    def test_pan_and_gstin_are_normalised_and_validated(
+        self, client: TestClient, auth_headers: dict
+    ):
+        ok = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(pan="aabcn2345p", gstin="27aabcn2345p1z5"),
+        )
+        assert ok.status_code == 201
+        assert ok.json()["client"]["pan"] == "AABCN2345P"
+
+        bad = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(pan="INVALID", name="Other Co"),
+        )
+        assert bad.status_code == 422
+
+    def test_duplicate_pan_in_firm_conflicts(self, client: TestClient, auth_headers: dict):
+        client.post(f"{API}/clients", headers=auth_headers, json=make_client_payload())
+        response = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(name="Different Name", gstin=None),
+        )
+        assert response.status_code == 409
+
+    def test_generation_can_be_skipped(self, client: TestClient, auth_headers: dict):
+        response = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(generate_compliance_items=False),
+        )
+        assert response.status_code == 201
+        assert response.json()["compliance_items_created"] == 0
+
+    def test_assignee_must_belong_to_the_firm(self, client: TestClient, auth_headers: dict):
+        response = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                assigned_practitioner_id="99999999-9999-9999-9999-999999999999"
+            ),
+        )
+        assert response.status_code == 400
+
+    def test_creation_requires_authentication(self, client: TestClient):
+        assert client.post(f"{API}/clients", json=make_client_payload()).status_code == 401
+
+
+class TestComplianceGeneration:
+    """The core rule: registrations in, the right filings out."""
+
+    def test_gst_monthly_client_gets_gstr1_and_gstr3b(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                gst_registered=True,
+                gst_filing_frequency="monthly",
+                tds_applicable=False,
+                tax_audit_applicable=False,
+                roc_applicable=False,
+                entity_type="proprietorship",
+            ),
+        ).json()
+
+        codes = codes_generated(db, created["client"]["id"])
+        assert "GSTR1_MONTHLY" in codes
+        assert "GSTR3B_MONTHLY" in codes
+        assert "GSTR1_QUARTERLY" not in codes
+        assert "TDS_RETURN_24Q" not in codes
+
+    def test_qrmp_client_gets_quarterly_gst_only(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                gst_filing_frequency="quarterly", tds_applicable=False, roc_applicable=False
+            ),
+        ).json()
+
+        codes = codes_generated(db, created["client"]["id"])
+        assert "GSTR1_QUARTERLY" in codes
+        assert "GSTR3B_QUARTERLY" in codes
+        assert "GSTR1_MONTHLY" not in codes
+
+    def test_non_gst_client_gets_no_gst_items(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                name="Salaried Individual",
+                entity_type="individual",
+                pan="AAAPI1234Q",
+                gstin=None,
+                gst_registered=False,
+                tds_applicable=False,
+                tax_audit_applicable=False,
+                roc_applicable=False,
+            ),
+        ).json()
+
+        codes = codes_generated(db, created["client"]["id"])
+        assert not any(code.startswith("GSTR") for code in codes)
+        assert "ITR_NON_AUDIT" in codes
+
+    def test_company_gets_roc_filings(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        codes = codes_generated(db, created["client"]["id"])
+        assert "ROC_AOC4" in codes
+        assert "ROC_MGT7" in codes
+        assert "ROC_LLP_FORM11" not in codes
+
+    def test_llp_gets_llp_forms_not_company_forms(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                name="Meridian Consulting LLP", entity_type="llp", pan="AABFM5678L", gstin=None
+            ),
+        ).json()
+        codes = codes_generated(db, created["client"]["id"])
+        assert "ROC_LLP_FORM11" in codes
+        assert "ROC_LLP_FORM8" in codes
+        assert "ROC_AOC4" not in codes
+
+    def test_tds_deductor_gets_quarterly_returns(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload(tds_applicable=True)
+        ).json()
+        codes = codes_generated(db, created["client"]["id"])
+        assert "TDS_RETURN_24Q" in codes
+        assert "TDS_RETURN_26Q" in codes
+        assert "TDS_PAYMENT_MONTHLY" in codes
+
+    def test_audit_client_gets_audit_dated_itr(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        codes = codes_generated(db, created["client"]["id"])
+        assert "ITR_AUDIT" in codes
+        assert "TAX_AUDIT_3CD" in codes
+        assert "ITR_NON_AUDIT" not in codes
+
+    def test_generated_items_carry_the_default_fee(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        item = db.scalars(
+            select(ComplianceItem)
+            .join(ComplianceType)
+            .where(
+                ComplianceItem.client_id == uuid.UUID(created["client"]["id"]),
+                ComplianceType.code == "GSTR3B_MONTHLY",
+            )
+        ).first()
+        assert item is not None
+        assert item.fee_paise == 200_000
+        assert item.status == ComplianceStatus.PENDING
+
+    def test_service_fee_override_wins(self, client: TestClient, auth_headers: dict, db: Session):
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(service_fees={"GSTR3B_MONTHLY": 999_00}),
+        ).json()
+        item = db.scalars(
+            select(ComplianceItem)
+            .join(ComplianceType)
+            .where(
+                ComplianceItem.client_id == uuid.UUID(created["client"]["id"]),
+                ComplianceType.code == "GSTR3B_MONTHLY",
+            )
+        ).first()
+        assert item.fee_paise == 99_900
+
+    def test_generation_is_idempotent(self, client: TestClient, auth_headers: dict, db: Session):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        first_count = created["compliance_items_created"]
+
+        again = client.post(
+            f"{API}/clients/{created['client']['id']}/compliance-items",
+            headers=auth_headers,
+            json={},
+        ).json()
+        assert again["created"] == 0
+        assert again["skipped_existing"] == first_count
+
+    def test_explicit_window_generates_known_periods(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(generate_compliance_items=False),
+        ).json()
+        client_id = created["client"]["id"]
+
+        response = client.post(
+            f"{API}/clients/{client_id}/compliance-items",
+            headers=auth_headers,
+            json={"window_start": "2026-04-01", "window_end": "2026-06-30"},
+        )
+        assert response.status_code == 200
+        assert response.json()["created"] > 0
+
+        gstr3b = db.scalars(
+            select(ComplianceItem)
+            .join(ComplianceType)
+            .where(
+                ComplianceItem.client_id == uuid.UUID(client_id),
+                ComplianceType.code == "GSTR3B_MONTHLY",
+            )
+            .order_by(ComplianceItem.due_date)
+        ).all()
+        # Periods 2026-03..2026-05 have due dates 20 Apr / 20 May / 20 Jun.
+        assert [i.due_date for i in gstr3b] == [
+            date(2026, 4, 20),
+            date(2026, 5, 20),
+            date(2026, 6, 20),
+        ]
+
+    def test_enabling_gst_later_backfills_items(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                name="Late Registrant",
+                pan="AAACL9876R",
+                gstin=None,
+                gst_registered=False,
+                tds_applicable=False,
+                tax_audit_applicable=False,
+                roc_applicable=False,
+                entity_type="proprietorship",
+            ),
+        ).json()
+        client_id = created["client"]["id"]
+        assert "GSTR3B_MONTHLY" not in codes_generated(db, client_id)
+
+        patched = client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": True, "gstin": "27AAACL9876R1Z1"},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["compliance_items_created"] > 0
+        assert "GSTR3B_MONTHLY" in codes_generated(db, client_id)
+
+    def test_applicable_types_respects_flags(self, db: Session, registered_firm: dict):
+        firm_id = registered_firm["firm"]["id"]
+        model_client = make_model_client(gst_registered=True, firm_id=uuid.UUID(firm_id))
+        rules = {ct.applicability_rule for ct in applicable_types(db, model_client)}
+        assert "gst_monthly" in rules
+        assert "tds_applicable" not in rules
+
+    def test_generator_skips_periods_outside_the_window(self, db: Session, registered_firm: dict):
+        firm_id = registered_firm["firm"]["id"]
+        model_client = make_model_client(
+            firm_id=uuid.UUID(firm_id), gst_registered=True, onboarded_on=date(2026, 4, 1)
+        )
+        db.add(model_client)
+        db.flush()
+
+        result = generate_compliance_items(
+            db,
+            model_client,
+            window_start=date(2026, 4, 1),
+            window_end=date(2026, 4, 30),
+        )
+        due_dates = [item.due_date for item in result.created]
+        assert due_dates, "expected at least one item in April"
+        assert all(date(2026, 4, 1) <= d <= date(2026, 4, 30) for d in due_dates)
+
+
+class TestClientListingAndDetail:
+    def test_list_is_scoped_paginated_and_searchable(
+        self, client: TestClient, auth_headers: dict
+    ):
+        client.post(f"{API}/clients", headers=auth_headers, json=make_client_payload())
+        client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                name="Aurora Foods LLP", entity_type="llp", pan="AABFA1111K", gstin=None
+            ),
+        )
+
+        listing = client.get(f"{API}/clients", headers=auth_headers).json()
+        assert listing["total"] == 2
+        assert [c["name"] for c in listing["items"]] == ["Aurora Foods LLP", "Nimbus Textiles Pvt Ltd"]
+
+        found = client.get(f"{API}/clients?search=Aurora", headers=auth_headers).json()
+        assert found["total"] == 1
+
+        page = client.get(f"{API}/clients?limit=1&offset=1", headers=auth_headers).json()
+        assert len(page["items"]) == 1
+        assert page["total"] == 2
+
+    def test_filter_by_gst_registration(self, client: TestClient, auth_headers: dict):
+        client.post(f"{API}/clients", headers=auth_headers, json=make_client_payload())
+        client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                name="No GST Co", pan="AAAPN2222B", gstin=None, gst_registered=False
+            ),
+        )
+        result = client.get(f"{API}/clients?gst_registered=false", headers=auth_headers).json()
+        assert result["total"] == 1
+        assert result["items"][0]["name"] == "No GST Co"
+
+    def test_detail_includes_compliance_summary(self, client: TestClient, auth_headers: dict):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        detail = client.get(
+            f"{API}/clients/{created['client']['id']}", headers=auth_headers
+        ).json()
+        assert detail["name"] == "Nimbus Textiles Pvt Ltd"
+        summary = detail["compliance_summary"]
+        assert summary["total"] == created["compliance_items_created"]
+        assert summary["filed"] == 0
+
+    def test_missing_client_is_404(self, client: TestClient, auth_headers: dict):
+        response = client.get(
+            f"{API}/clients/99999999-9999-9999-9999-999999999999", headers=auth_headers
+        )
+        assert response.status_code == 404
+
+    def test_deactivate_marks_open_items_not_applicable(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        client_id = created["client"]["id"]
+
+        assert client.delete(f"{API}/clients/{client_id}", headers=auth_headers).status_code == 204
+
+        detail = client.get(f"{API}/clients/{client_id}", headers=auth_headers).json()
+        assert detail["is_active"] is False
+
+        statuses = {
+            item.status
+            for item in db.scalars(
+                select(ComplianceItem).where(ComplianceItem.client_id == uuid.UUID(client_id))
+            ).all()
+        }
+        assert statuses == {ComplianceStatus.NOT_APPLICABLE}
+
+
+class TestTenantIsolation:
+    def test_a_firm_cannot_see_another_firms_clients(
+        self, client: TestClient, auth_headers: dict
+    ):
+        client.post(f"{API}/clients", headers=auth_headers, json=make_client_payload())
+
+        other = client.post(
+            f"{API}/auth/register",
+            json={
+                "firm_name": "Iyer & Co",
+                "firm_email": "office@iyer-ca.in",
+                "owner_full_name": "Suresh Iyer",
+                "owner_email": "suresh@iyer-ca.in",
+                "owner_password": "another-strong-password",
+            },
+        ).json()
+        other_headers = {"Authorization": f"Bearer {other['access_token']}"}
+
+        listing = client.get(f"{API}/clients", headers=other_headers).json()
+        assert listing["total"] == 0
+
+    def test_cross_firm_client_fetch_is_404(self, client: TestClient, auth_headers: dict):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+
+        other = client.post(
+            f"{API}/auth/register",
+            json={
+                "firm_name": "Iyer & Co",
+                "firm_email": "office@iyer-ca.in",
+                "owner_full_name": "Suresh Iyer",
+                "owner_email": "suresh@iyer-ca.in",
+                "owner_password": "another-strong-password",
+            },
+        ).json()
+        other_headers = {"Authorization": f"Bearer {other['access_token']}"}
+
+        response = client.get(
+            f"{API}/clients/{created['client']['id']}", headers=other_headers
+        )
+        assert response.status_code == 404

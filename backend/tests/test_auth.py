@@ -1,0 +1,254 @@
+"""Registration, login, JWT and role enforcement."""
+
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.core.security import (
+    TokenError,
+    create_access_token,
+    decode_token,
+    hash_password,
+    verify_password,
+)
+from tests.conftest import FIRM_REGISTRATION
+
+API = "/api/v1"
+
+
+class TestPasswordHashing:
+    def test_round_trip(self):
+        digest = hash_password("correct-horse-battery")
+        assert digest != "correct-horse-battery"
+        assert verify_password("correct-horse-battery", digest)
+        assert not verify_password("wrong-password", digest)
+
+    def test_rejects_overlong_password(self):
+        with pytest.raises(ValueError, match="at most 72 bytes"):
+            hash_password("x" * 73)
+
+    def test_malformed_hash_is_not_a_match(self):
+        assert not verify_password("anything", "not-a-bcrypt-hash")
+
+
+class TestTokens:
+    def test_decode_round_trip(self):
+        token = create_access_token(
+            practitioner_id="11111111-1111-1111-1111-111111111111",
+            firm_id="22222222-2222-2222-2222-222222222222",
+            role="owner",
+        )
+        payload = decode_token(token)
+        assert payload["sub"] == "11111111-1111-1111-1111-111111111111"
+        assert payload["role"] == "owner"
+
+    def test_expired_token_rejected(self):
+        token = create_access_token(
+            practitioner_id="1", firm_id="2", role="owner", expires_minutes=-1
+        )
+        with pytest.raises(TokenError, match="expired"):
+            decode_token(token)
+
+    def test_wrong_token_type_rejected(self):
+        token = create_access_token(practitioner_id="1", firm_id="2", role="owner")
+        with pytest.raises(TokenError, match="Unexpected token type"):
+            decode_token(token, expected_type="magic_link")
+
+    def test_tampered_token_rejected(self):
+        token = create_access_token(practitioner_id="1", firm_id="2", role="owner")
+        with pytest.raises(TokenError):
+            decode_token(token[:-3] + "abc")
+
+
+class TestRegistration:
+    def test_register_creates_firm_and_owner(self, registered_firm: dict):
+        assert registered_firm["token_type"] == "bearer"
+        assert registered_firm["firm"]["name"] == "Sharma & Associates"
+        assert registered_firm["firm"]["plan"] == "practice"
+        assert registered_firm["practitioner"]["role"] == "owner"
+        assert registered_firm["practitioner"]["email"] == "anita@sharma-ca.in"
+        assert "password" not in registered_firm["practitioner"]
+
+    def test_duplicate_owner_email_conflicts(self, client: TestClient, registered_firm: dict):
+        response = client.post(f"{API}/auth/register", json=FIRM_REGISTRATION)
+        assert response.status_code == 409
+
+    def test_invalid_pan_rejected(self, client: TestClient):
+        payload = FIRM_REGISTRATION | {"pan": "NOTAPAN", "owner_email": "x@y.in"}
+        response = client.post(f"{API}/auth/register", json=payload)
+        assert response.status_code == 422
+
+    def test_short_password_rejected(self, client: TestClient):
+        payload = FIRM_REGISTRATION | {"owner_password": "short", "owner_email": "x@y.in"}
+        response = client.post(f"{API}/auth/register", json=payload)
+        assert response.status_code == 422
+
+
+class TestLogin:
+    def test_login_succeeds(self, client: TestClient, registered_firm: dict):
+        response = client.post(
+            f"{API}/auth/login",
+            json={"email": "anita@sharma-ca.in", "password": "correct-horse-battery"},
+        )
+        assert response.status_code == 200
+        assert response.json()["access_token"]
+
+    def test_login_is_case_insensitive_on_email(self, client: TestClient, registered_firm: dict):
+        response = client.post(
+            f"{API}/auth/login",
+            json={"email": "ANITA@Sharma-CA.in", "password": "correct-horse-battery"},
+        )
+        assert response.status_code == 200
+
+    def test_wrong_password_rejected(self, client: TestClient, registered_firm: dict):
+        response = client.post(
+            f"{API}/auth/login",
+            json={"email": "anita@sharma-ca.in", "password": "nope-nope-nope"},
+        )
+        assert response.status_code == 401
+
+    def test_unknown_email_gives_same_error(self, client: TestClient, registered_firm: dict):
+        response = client.post(
+            f"{API}/auth/login",
+            json={"email": "ghost@nowhere.in", "password": "correct-horse-battery"},
+        )
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Incorrect email or password"
+
+
+class TestProtectedRoutes:
+    def test_me_requires_a_token(self, client: TestClient):
+        assert client.get(f"{API}/auth/me").status_code == 401
+
+    def test_me_rejects_garbage_token(self, client: TestClient):
+        response = client.get(f"{API}/auth/me", headers={"Authorization": "Bearer nonsense"})
+        assert response.status_code == 401
+
+    def test_me_returns_the_practitioner(self, client: TestClient, auth_headers: dict):
+        response = client.get(f"{API}/auth/me", headers=auth_headers)
+        assert response.status_code == 200
+        assert response.json()["email"] == "anita@sharma-ca.in"
+
+
+class TestPractitioners:
+    def test_owner_can_add_a_practitioner(self, client: TestClient, auth_headers: dict):
+        response = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Vikram Rao",
+                "email": "vikram@sharma-ca.in",
+                "password": "another-good-password",
+                "role": "manager",
+            },
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["role"] == "manager"
+
+        listing = client.get(f"{API}/auth/practitioners", headers=auth_headers).json()
+        assert {p["email"] for p in listing} == {"anita@sharma-ca.in", "vikram@sharma-ca.in"}
+
+    def test_cannot_create_a_second_owner(self, client: TestClient, auth_headers: dict):
+        response = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Second Owner",
+                "email": "second@sharma-ca.in",
+                "password": "another-good-password",
+                "role": "owner",
+            },
+        )
+        assert response.status_code == 400
+
+    def test_duplicate_email_in_firm_conflicts(self, client: TestClient, auth_headers: dict):
+        body = {
+            "full_name": "Vikram Rao",
+            "email": "vikram@sharma-ca.in",
+            "password": "another-good-password",
+            "role": "junior",
+        }
+        assert client.post(f"{API}/auth/practitioners", headers=auth_headers, json=body).status_code == 201
+        assert client.post(f"{API}/auth/practitioners", headers=auth_headers, json=body).status_code == 409
+
+    def test_junior_cannot_add_practitioners(self, client: TestClient, auth_headers: dict):
+        client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Junior Jain",
+                "email": "junior@sharma-ca.in",
+                "password": "junior-password-1",
+                "role": "junior",
+            },
+        )
+        junior_token = client.post(
+            f"{API}/auth/login",
+            json={"email": "junior@sharma-ca.in", "password": "junior-password-1"},
+        ).json()["access_token"]
+
+        response = client.post(
+            f"{API}/auth/practitioners",
+            headers={"Authorization": f"Bearer {junior_token}"},
+            json={
+                "full_name": "Someone Else",
+                "email": "else@sharma-ca.in",
+                "password": "yet-another-password",
+                "role": "junior",
+            },
+        )
+        assert response.status_code == 403
+
+    def test_plan_user_limit_enforced(self, client: TestClient, auth_headers: dict):
+        # The "practice" plan allows 5 users; the owner is already one of them.
+        for index in range(4):
+            created = client.post(
+                f"{API}/auth/practitioners",
+                headers=auth_headers,
+                json={
+                    "full_name": f"Staff {index}",
+                    "email": f"staff{index}@sharma-ca.in",
+                    "password": "staff-password-123",
+                    "role": "junior",
+                },
+            )
+            assert created.status_code == 201, created.text
+
+        overflow = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "One Too Many",
+                "email": "toomany@sharma-ca.in",
+                "password": "staff-password-123",
+                "role": "junior",
+            },
+        )
+        assert overflow.status_code == 402
+
+    def test_deactivated_practitioner_cannot_log_in(self, client: TestClient, auth_headers: dict):
+        created = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Temp Staff",
+                "email": "temp@sharma-ca.in",
+                "password": "temp-password-123",
+                "role": "junior",
+            },
+        ).json()
+
+        patched = client.patch(
+            f"{API}/auth/practitioners/{created['id']}",
+            headers=auth_headers,
+            json={"is_active": False},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["is_active"] is False
+
+        response = client.post(
+            f"{API}/auth/login",
+            json={"email": "temp@sharma-ca.in", "password": "temp-password-123"},
+        )
+        assert response.status_code == 403

@@ -1,0 +1,28 @@
+# --- Web framework ---
+fastapi==0.121.2
+uvicorn[standard]==0.41.0
+python-multipart==0.0.20
+
+# --- Data / validation ---
+pydantic==2.13.1
+pydantic-settings==2.13.0
+email-validator==2.3.0
+
+# --- Database ---
+SQLAlchemy==2.0.45
+alembic==1.17.2
+psycopg[binary]==3.2.13
+
+# --- Auth ---
+PyJWT==2.11.0
+bcrypt==5.0.0
+
+# --- Queue / cache ---
+celery==5.6.0
+redis==7.1.0
+
+# --- AI (OpenRouter) + HTTP ---
+httpx==0.28.1
+
+# --- Testing ---
+pytest==9.1.1

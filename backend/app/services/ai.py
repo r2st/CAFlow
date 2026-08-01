@@ -1,0 +1,267 @@
+"""OpenRouter client for the AI features (free models only).
+
+Used for document categorisation, field extraction and drafting client
+messages. Every call degrades gracefully: if no API key is configured or the
+model is unavailable, callers fall back to deterministic heuristics rather than
+failing the request.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+
+from app.config import settings
+from app.models.base import DocumentCategory
+
+logger = logging.getLogger(__name__)
+
+# Filename hints used both as a fallback and as a prior for the LLM.
+FILENAME_HINTS: dict[str, DocumentCategory] = {
+    "bank": DocumentCategory.BANK_STATEMENT,
+    "statement": DocumentCategory.BANK_STATEMENT,
+    "form16": DocumentCategory.FORM_16,
+    "form_16": DocumentCategory.FORM_16,
+    "26as": DocumentCategory.FORM_26AS,
+    "ais": DocumentCategory.AIS_TIS,
+    "salary": DocumentCategory.SALARY_REGISTER,
+    "payroll": DocumentCategory.SALARY_REGISTER,
+    "purchase": DocumentCategory.PURCHASE_INVOICE,
+    "sales": DocumentCategory.SALES_INVOICE,
+    "invoice": DocumentCategory.SALES_INVOICE,
+    "gstr": DocumentCategory.GST_RETURN,
+    "challan": DocumentCategory.TDS_CHALLAN,
+    "balance": DocumentCategory.BALANCE_SHEET,
+    "p&l": DocumentCategory.PROFIT_AND_LOSS,
+    "profit": DocumentCategory.PROFIT_AND_LOSS,
+    "pan": DocumentCategory.PAN_CARD,
+    "aadhaar": DocumentCategory.AADHAAR,
+    "moa": DocumentCategory.INCORPORATION_DOC,
+    "incorporation": DocumentCategory.INCORPORATION_DOC,
+}
+
+PAN_PATTERN = re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b")
+GSTIN_PATTERN = re.compile(r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]\b")
+TAN_PATTERN = re.compile(r"\b[A-Z]{4}[0-9]{5}[A-Z]\b")
+
+
+@dataclass
+class CategorisationResult:
+    category: DocumentCategory
+    confidence: float
+    extracted: dict[str, Any] = field(default_factory=dict)
+    source: str = "heuristic"  # "llm" when the model answered
+
+
+class OpenRouterError(RuntimeError):
+    pass
+
+
+class OpenRouterClient:
+    """Thin wrapper over the OpenRouter chat-completions endpoint."""
+
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+        self.api_key = api_key if api_key is not None else settings.openrouter_api_key
+        self.model = model or settings.openrouter_model
+        self.fallback_model = settings.openrouter_fallback_model
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+    def complete(self, system: str, user: str, *, max_tokens: int = 700) -> str:
+        if not self.enabled:
+            raise OpenRouterError("OPENROUTER_API_KEY is not configured")
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://caflow.aiknol.com",
+            "X-Title": "CAFlow",
+        }
+
+        last_error: Exception | None = None
+        for model in (self.model, self.fallback_model):
+            payload["model"] = model
+            try:
+                response = httpx.post(
+                    f"{settings.openrouter_base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=settings.openrouter_timeout_seconds,
+                )
+                response.raise_for_status()
+                return response.json()["choices"][0]["message"]["content"]
+            except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+                logger.warning("OpenRouter call failed on model %s: %s", model, exc)
+                last_error = exc
+        raise OpenRouterError(f"All OpenRouter models failed: {last_error}")
+
+
+def extract_json(text: str) -> dict[str, Any]:
+    """Pull the first JSON object out of an LLM response (which may be fenced)."""
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidate = fenced.group(1) if fenced else None
+    if candidate is None:
+        brace = re.search(r"\{.*\}", text, re.DOTALL)
+        candidate = brace.group(0) if brace else None
+    if candidate is None:
+        raise ValueError("No JSON object found in model response")
+    return json.loads(candidate)
+
+
+def heuristic_category(filename: str) -> tuple[DocumentCategory, float]:
+    lowered = filename.lower()
+    for hint, category in FILENAME_HINTS.items():
+        if hint in lowered:
+            return category, 0.55
+    return DocumentCategory.OTHER, 0.2
+
+
+def regex_extract(text: str) -> dict[str, Any]:
+    """Cheap, deterministic extraction of the identifiers CAs care about."""
+    upper = text.upper()
+    found: dict[str, Any] = {}
+    if gstins := GSTIN_PATTERN.findall(upper):
+        found["gstin"] = gstins[0]
+        found["gstins"] = sorted(set(gstins))
+    # A GSTIN embeds a PAN, so blank the GSTINs out before looking for one:
+    # a PAN is only reported when it is stated somewhere outside a GSTIN.
+    # (Filtering on substring instead would drop the PAN of every GST-registered
+    # client, since their documents quote both.)
+    if pans := PAN_PATTERN.findall(GSTIN_PATTERN.sub(" ", upper)):
+        found["pan"] = pans[0]
+    if tans := TAN_PATTERN.findall(upper):
+        found["tan"] = tans[0]
+    return found
+
+
+CATEGORISE_SYSTEM = (
+    "You are a document classifier for an Indian chartered accountancy practice. "
+    "Reply with a single JSON object and nothing else."
+)
+
+CATEGORISE_TEMPLATE = """Classify this document into exactly one category.
+
+Categories: {categories}
+
+Filename: {filename}
+Extract of contents:
+---
+{excerpt}
+---
+
+Respond with JSON:
+{{"category": "<one category>", "confidence": <0-1>, "pan": "<or null>",
+  "gstin": "<or null>", "period": "<or null>", "total_amount_inr": <number or null>}}"""
+
+
+def categorise_document(
+    filename: str, text_excerpt: str = "", client: OpenRouterClient | None = None
+) -> CategorisationResult:
+    """Categorise a document, using the LLM when available and heuristics otherwise."""
+    fallback_category, fallback_confidence = heuristic_category(filename)
+    extracted = regex_extract(text_excerpt) if text_excerpt else {}
+
+    client = client or OpenRouterClient()
+    if not client.enabled:
+        return CategorisationResult(fallback_category, fallback_confidence, extracted)
+
+    prompt = CATEGORISE_TEMPLATE.format(
+        categories=", ".join(c.value for c in DocumentCategory),
+        filename=filename,
+        excerpt=text_excerpt[:4000] or "(no text extracted)",
+    )
+    try:
+        raw = client.complete(CATEGORISE_SYSTEM, prompt)
+        data = extract_json(raw)
+        category = DocumentCategory(data["category"])
+    except (OpenRouterError, ValueError, KeyError) as exc:
+        logger.info("Falling back to heuristic categorisation: %s", exc)
+        return CategorisationResult(fallback_category, fallback_confidence, extracted)
+
+    for key in ("pan", "gstin", "period", "total_amount_inr"):
+        if data.get(key) not in (None, "", "null"):
+            extracted.setdefault(key, data[key])
+
+    confidence = float(data.get("confidence") or 0.6)
+    return CategorisationResult(category, min(max(confidence, 0.0), 1.0), extracted, source="llm")
+
+
+DRAFT_SYSTEM = (
+    "You draft short, polite, professional messages from an Indian CA firm to its clients. "
+    "Use Indian business English. Never invent figures or dates that were not supplied."
+)
+
+
+def draft_client_message(
+    *,
+    purpose: str,
+    client_name: str,
+    context: dict[str, Any],
+    channel: str = "email",
+    llm: OpenRouterClient | None = None,
+) -> str:
+    """Draft a reminder/confirmation message. Falls back to a template offline."""
+    llm = llm or OpenRouterClient()
+    if not llm.enabled:
+        return _template_message(purpose, client_name, context)
+
+    details = "\n".join(f"- {key}: {value}" for key, value in context.items())
+    prompt = (
+        f"Draft a {channel} message to {client_name}.\n"
+        f"Purpose: {purpose}\n"
+        f"Details:\n{details}\n\n"
+        "Keep it under 120 words. Return only the message body."
+    )
+    try:
+        return llm.complete(DRAFT_SYSTEM, prompt, max_tokens=400).strip()
+    except OpenRouterError as exc:
+        logger.info("Falling back to template message: %s", exc)
+        return _template_message(purpose, client_name, context)
+
+
+def _template_message(purpose: str, client_name: str, context: dict[str, Any]) -> str:
+    lines = [f"Dear {client_name},", ""]
+    match purpose:
+        case "document_request":
+            lines.append(
+                "We need a few documents to proceed with your upcoming filing"
+                f" ({context.get('compliance', 'compliance')})."
+            )
+            if documents := context.get("documents"):
+                lines.append("")
+                lines.extend(f"  • {doc}" for doc in documents)
+        case "filing_confirmation":
+            lines.append(
+                f"Your {context.get('compliance', 'return')} for"
+                f" {context.get('period', 'the period')} has been filed successfully."
+            )
+            if ack := context.get("acknowledgement_number"):
+                lines.append(f"Acknowledgement number: {ack}")
+        case "fee_reminder":
+            lines.append(
+                f"This is a gentle reminder about invoice {context.get('invoice_number', '')}"
+                f" for ₹{context.get('amount_inr', '—')}, which is now due."
+            )
+        case _:
+            lines.append(
+                f"This is a reminder regarding {context.get('compliance', 'your compliance')}"
+                f" due on {context.get('due_date', 'the upcoming deadline')}."
+            )
+    lines += ["", "Please share them at your earliest convenience.", "", "Regards,", "CAFlow"]
+    return "\n".join(lines)
