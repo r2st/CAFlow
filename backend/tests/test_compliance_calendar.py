@@ -360,6 +360,112 @@ class TestFilingUpdates:
         ).json()
         assert corrected["status"] == "filed"
 
+    def test_extending_the_due_date_clears_a_filing_that_is_no_longer_late(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A deadline extension is the other half of the same derivation.
+
+        CBIC and CBDT extend due dates routinely — the seeded calendar carries
+        the ordinary dates precisely so a firm can move them. Only ``filed_on``
+        re-derived the split, so a return lodged on the 25th against an
+        extension to the 30th kept the ``delayed_filed`` it was stamped with
+        while the due date still said the 20th: the firm's own record calling a
+        filing late that was five days inside the window.
+        """
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        statutory = item.due_date
+        filed_on = statutory + timedelta(days=5)
+        extended = statutory + timedelta(days=10)
+
+        delayed = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": filed_on.isoformat()},
+        ).json()
+        assert delayed["status"] == "delayed_filed"
+
+        after = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"due_date": extended.isoformat()},
+        ).json()
+        assert after["due_date"] == extended.isoformat()
+        assert after["filed_on"] == filed_on.isoformat()
+        assert after["status"] == "filed"
+
+    def test_pulling_the_due_date_in_marks_the_filing_delayed(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The direction that costs the client: an on-time filing turned late.
+
+        A due date corrected *earlier* than the filing date left the item
+        reading ``filed`` — the record understating a late filing, which is the
+        worse way for it to be wrong.
+        """
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        filed_on = item.due_date - timedelta(days=1)
+        corrected_due = filed_on - timedelta(days=2)
+
+        filed = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": filed_on.isoformat()},
+        ).json()
+        assert filed["status"] == "filed"
+
+        after = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"due_date": corrected_due.isoformat()},
+        ).json()
+        assert after["status"] == "delayed_filed"
+        assert after["filed_on"] == filed_on.isoformat()
+
+    def test_a_due_date_change_records_the_status_it_moved(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The re-derived status is the half of the change the trail most needs."""
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        filed_on = item.due_date + timedelta(days=5)
+
+        client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": filed_on.isoformat()},
+        )
+        client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"due_date": (item.due_date + timedelta(days=10)).isoformat()},
+        )
+
+        entries = client.get(
+            f"{API}/audit",
+            headers=auth_headers,
+            params={"action": "compliance_item.update", "entity_id": str(item.id)},
+        ).json()["items"]
+        latest = entries[0]["changes"]
+        assert latest["before"]["status"] == "delayed_filed"
+        assert latest["after"]["status"] == "filed"
+
+    def test_a_due_date_change_leaves_an_unfiled_item_alone(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Re-deriving must not invent a filing for work nobody has done."""
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+
+        after = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"due_date": (item.due_date + timedelta(days=10)).isoformat()},
+        ).json()
+        assert after["status"] == "pending"
+        assert after["filed_on"] is None
+
     def test_a_filing_date_on_an_item_that_was_never_filed_is_refused(
         self, client: TestClient, auth_headers: dict, db: Session
     ):

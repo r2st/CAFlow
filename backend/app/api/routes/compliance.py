@@ -232,7 +232,18 @@ def update_compliance_item(
     # date, so a correction to the date has to re-derive it. Nothing re-ran
     # when the status was left out of the patch, and an item stayed `filed`
     # while carrying a date after its own deadline.
-    if "status" in updates or "filed_on" in updates:
+    #
+    # ``due_date`` is the other half of that comparison and moves for a reason
+    # this system exists to track: CBIC and CBDT extend deadlines routinely,
+    # and the seeded calendar carries the ordinary dates precisely so a firm
+    # can move them. Only ``filed_on`` re-derived, so a GSTR-3B lodged on the
+    # 25th against an extension to the 30th kept the ``delayed_filed`` it was
+    # given while the due date still said the 20th — the firm's own record
+    # calling a return late that was filed five days inside the window, and the
+    # same record it would show an assessing officer disputing a late fee. The
+    # opposite direction is worse: a deadline corrected *earlier* than the
+    # filing date left the item reading ``filed``.
+    if {"status", "filed_on", "due_date"} & updates.keys():
         _normalise_filing(
             item,
             filed_on=updates.get("filed_on"),
