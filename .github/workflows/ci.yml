@@ -1,0 +1,233 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend — lint & tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # The suite runs on SQLite, but the app ships on PostgreSQL: a service
+    # container means the migrations are exercised against the real thing.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: caflow
+          POSTGRES_PASSWORD: caflow
+          POSTGRES_DB: caflow_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ENVIRONMENT: ci
+      SECRET_KEY: ci-secret-not-used-in-production-0123456789
+      DATABASE_URL: postgresql+psycopg://caflow:caflow@localhost:5432/caflow_ci
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/1
+      CELERY_RESULT_BACKEND: redis://localhost:6379/2
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff==0.16.1
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Tests
+        run: pytest -q
+
+      - name: Migrations apply to a real PostgreSQL
+        run: alembic upgrade head
+
+      - name: Migrations are reversible
+        # A migration that cannot be rolled back is a deploy that cannot be
+        # rolled back. Down to base and back up proves both directions.
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Seed data loads
+        run: python -m app.cli seed
+
+      - name: Production config refuses to boot on placeholders
+        # The guard that keeps a placeholder signing key out of production is
+        # only worth having if something checks it still fires. Every other
+        # setting here is valid, so SECRET_KEY is the only thing under test.
+        run: |
+          set +e
+          output=$(ENVIRONMENT=production DEBUG=false \
+            SECRET_KEY=change-me-in-production \
+            PORTAL_BASE_URL=https://portal.example.in/portal \
+            CORS_ORIGINS=https://app.example.in \
+            python -c "import app.config" 2>&1)
+          status=$?
+          set -e
+          if [ $status -eq 0 ]; then
+            echo "::error::A placeholder SECRET_KEY was accepted in production"
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "SECRET_KEY is still a placeholder"; then
+            echo "::error::Config was rejected, but not for the reason under test"
+            echo "$output"
+            exit 1
+          fi
+          echo "Rejected as expected."
+
+  frontend:
+    name: Frontend — lint, tests & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npx eslint .
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  images:
+    name: Container images build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # No point building images for a tree that does not pass its own tests.
+    needs: [backend, frontend]
+
+    strategy:
+      matrix:
+        include:
+          - name: backend
+            context: ./backend
+          - name: web
+            context: ./frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.name }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          load: true
+          tags: caflow-${{ matrix.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+      - name: Image starts and answers its liveness probe
+        if: matrix.name == 'backend'
+        run: |
+          docker run -d --name caflow-api-smoke -p 8000:8000 \
+            -e ENVIRONMENT=ci \
+            -e SECRET_KEY=ci-secret-not-used-in-production-0123456789 \
+            -e DATABASE_URL=postgresql+psycopg://nobody:nobody@127.0.0.1:5432/none \
+            caflow-backend:ci
+          # Liveness must answer even with no database behind it — that is the
+          # whole point of separating it from readiness.
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health/live > /dev/null; then
+              echo "Liveness OK after ${attempt}s"
+              docker rm -f caflow-api-smoke
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::The API image never became live"
+          docker logs caflow-api-smoke
+          exit 1
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Advisory: a new advisory against a dependency should be visible without
+    # blocking an unrelated change from merging.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: npm audit
+        working-directory: frontend
+        # Known and accepted: react-router >=7.12 carries an RSC-mode CSRF
+        # advisory. This is a client-rendered SPA with no RSC and no server
+        # actions, and every 6.x release plus 7.11 carries the open-redirect
+        # advisory against <Link>/useNavigate, which the app does use.
+        run: npm audit --audit-level=high || true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.txt || true
