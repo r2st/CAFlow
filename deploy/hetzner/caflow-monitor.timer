@@ -1,0 +1,26 @@
+# Every five minutes.
+#
+# Chosen against what is being detected rather than by taste. The slowest thing
+# in the file is the backup-freshness check, which cares about a full day; the
+# fastest is the readiness probe, where five minutes is roughly the longest a
+# CA firm would want the site down before someone knows. Two consecutive
+# failures are required before anyone is told, so an outage reaches a person in
+# about ten minutes and a `systemctl restart` during a deploy reaches nobody.
+
+[Unit]
+Description=CAFlow — health check every five minutes
+
+[Timer]
+# ...relative to when the previous run finished, not to a wall clock. A run
+# that takes its full timeout cannot then be immediately followed by the next.
+OnBootSec=3min
+OnUnitInactiveSec=5min
+# Not on the exact minute: eight applications share this box, and a monitoring
+# spike they all take together is worse for each of them than one taken alone.
+RandomizedDelaySec=30
+AccuracySec=30s
+# Deliberately not Persistent=true. Catching up on missed health checks after a
+# reboot would alert about a box that is demonstrably back up.
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,37 @@
+# One monitoring pass. Started by caflow-monitor.timer.
+#
+#   install -m 0755 deploy/hetzner/caflow-monitor.sh /usr/local/bin/caflow-monitor
+#   install -m 0644 deploy/hetzner/caflow-monitor.{service,timer} /etc/systemd/system/
+#   install -d -m 0700 /etc/caflow && install -m 0600 /dev/null /etc/caflow/monitor.env
+#   systemctl daemon-reload && systemctl enable --now caflow-monitor.timer
+#
+# A failed run here means CAFlow is unhealthy, not that the monitor is broken —
+# `systemctl status caflow-monitor` showing failed is the intended way to see
+# that from a shell, alongside the alert that went to a person.
+
+[Unit]
+Description=CAFlow — health, service and backup-freshness check
+Documentation=https://github.com/r2st/CAFlow
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# ALERT_EMAIL_TO, SENDGRID_API_KEY and ALERT_WEBHOOK live here. Not in
+# /opt/CAFlow/.env: that file belongs to the caflow user and is read by four
+# application services with no business holding the alerting credentials.
+# Optional, because a monitor that logs to the journal and nowhere else is
+# still better than no monitor — it says so on every alert.
+EnvironmentFile=-/etc/caflow/monitor.env
+# Remembers the previous verdict, which is what makes this alert on a change
+# rather than every five minutes forever. systemd creates it as 0700 root.
+StateDirectory=caflow
+Environment=STATE_FILE=/var/lib/caflow/monitor.state
+ExecStart=/usr/local/bin/caflow-monitor
+# Five checks, each with its own ten-second ceiling, plus two alert deliveries.
+# Well under the timer's interval, so a hung run cannot overlap the next.
+TimeoutStartSec=120
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=caflow-monitor
