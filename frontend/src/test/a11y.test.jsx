@@ -295,6 +295,24 @@ describe('the screens with no app shell', () => {
     expect(within(main).queryByRole('contentinfo')).not.toBeInTheDocument()
   })
 
+  it('gives the cannot-reach-the-server screen a main landmark and a name', async () => {
+    // It stands in for the whole app when a stored session cannot be checked,
+    // so it is the only thing on screen — and the only thing to navigate.
+    window.localStorage.setItem('caflow.token', 'perfectly-good-token')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+
+    render(
+      <MemoryRouter initialEntries={['/clients']}>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+
+    const main = await screen.findByRole('main')
+    expect(within(main).getByRole('heading', { name: /Can't reach CAFlow/i })).toBeInTheDocument()
+  })
+
   it('gives the expired-link notice a main landmark too', async () => {
     // No token at all: the client gets the dead-end screen, which still has
     // to be a page a screen reader can navigate.

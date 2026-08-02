@@ -209,6 +209,95 @@ describe('a stored token that no longer works', () => {
   })
 })
 
+/**
+ * The app opening while the server cannot be reached.
+ *
+ * A stored token has to be checked before it is trusted, and the check is a
+ * request like any other — it fails when a deploy is mid-flight, when a laptop
+ * is opened before the Wi-Fi is back, when a lift takes the signal. None of
+ * those say anything about the token.
+ */
+describe('a session that could not be confirmed', () => {
+  /** Every request fails the way a dropped connection does: no reply at all. */
+  function unreachable() {
+    const spy = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    vi.stubGlobal('fetch', spy)
+    return spy
+  }
+
+  beforeEach(() => {
+    setToken('perfectly-good-token')
+    unreachable()
+  })
+
+  it('keeps the token instead of throwing away a session that was never refused', async () => {
+    renderApp('/clients')
+
+    await screen.findByRole('button', { name: 'Try again' })
+    expect(getToken()).toBe('perfectly-good-token')
+  })
+
+  it('says the connection failed, rather than showing a sign-in form', async () => {
+    renderApp('/clients')
+
+    expect(await screen.findByText(/Could not reach CAFlow/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
+  })
+
+  it('never claims the session expired, which would not be known to be true', async () => {
+    renderApp('/clients')
+
+    await screen.findByRole('button', { name: 'Try again' })
+    expect(screen.queryByText(/Your session has expired/i)).not.toBeInTheDocument()
+  })
+
+  it('picks up where it left off when the retry succeeds', async () => {
+    const user = userEvent.setup()
+    renderApp('/clients')
+    await screen.findByRole('button', { name: 'Try again' })
+
+    routeFetch({ ...SIGNED_IN, '/clients': [200, { items: [], total: 0, limit: 25, offset: 0 }] })
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+
+    // Back on the page they asked for, with no password typed.
+    expect(await screen.findByRole('heading', { name: 'Clients' })).toBeInTheDocument()
+  })
+
+  it('offers the retry again when the second attempt fails too', async () => {
+    const user = userEvent.setup()
+    renderApp('/clients')
+    await screen.findByRole('button', { name: 'Try again' })
+
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+
+    // An outage that outlasts one click is the common case, not a dead end.
+    expect(await screen.findByRole('button', { name: 'Try again' })).toBeInTheDocument()
+  })
+
+  it('falls through to sign-in once the server answers and refuses the token', async () => {
+    const user = userEvent.setup()
+    renderApp('/clients')
+    await screen.findByRole('button', { name: 'Try again' })
+
+    // The connection comes back and the token turns out to be spent after all.
+    routeFetch({})
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+
+    expect(await screen.findByText(/Your session has expired/i)).toBeInTheDocument()
+    expect(getToken()).toBeNull()
+  })
+
+  it('does not offer a retry to someone who was never signed in', async () => {
+    setToken(null)
+    renderApp('/clients')
+
+    // With no stored token there is nothing to restore and nothing to retry;
+    // the sign-in form is the honest answer.
+    expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
+  })
+})
+
 describe('signing out deliberately', () => {
   beforeEach(() => {
     setToken('jwt-token')

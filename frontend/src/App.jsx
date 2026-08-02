@@ -2,7 +2,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout'
 import RouteAnnouncer from './components/RouteAnnouncer'
-import { Loading } from './components/ui'
+import { Loading, ServerUnreachable } from './components/ui'
 import { useAuth } from './context/AuthContext'
 import AuditLog from './pages/AuditLog'
 import Billing from './pages/Billing'
@@ -21,14 +21,17 @@ import Tasks from './pages/Tasks'
 import Team from './pages/Team'
 
 function RequireAuth({ children }) {
-  const { isAuthenticated, loading } = useAuth()
+  const { isAuthenticated, loading, unreachable, retryRestore } = useAuth()
   const location = useLocation()
 
   if (loading) return <Loading label="Restoring your session…" />
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />
-  }
-  return children
+  // Checked before the outage screen, so signing in by hand while the retry is
+  // still on offer takes precedence over it.
+  if (isAuthenticated) return children
+  // A session we could not check is not a session we know has ended, and
+  // sending someone to the login form would say that it had.
+  if (unreachable) return <ServerUnreachable message={unreachable} onRetry={retryRestore} />
+  return <Navigate to="/login" replace state={{ from: location.pathname }} />
 }
 
 export default function App() {

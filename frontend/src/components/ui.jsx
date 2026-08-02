@@ -183,6 +183,43 @@ export function SkeletonStats({ count = 4 }) {
   )
 }
 
+/**
+ * Shown when a stored session could not be confirmed because nothing answered.
+ *
+ * "We do not know yet" is the honest state here, and it earns its own screen.
+ * The alternative — bouncing to the sign-in form — states as fact something
+ * the app is only guessing: that the practitioner is signed out. The guess is
+ * wrong whenever the outage is the passing kind, and undoing it costs them
+ * their password and their place. A retry costs a click.
+ *
+ * The wording comes from the API client, which knows whether the browser
+ * reported itself offline or the server simply never replied.
+ */
+export function ServerUnreachable({ message, onRetry }) {
+  return (
+    <div className="auth-shell">
+      <main className="auth-card">
+        <div className="auth-head">
+          <div className="brand">
+            <span className="brand-mark">CA</span>
+            CAFlow
+          </div>
+        </div>
+
+        <h1>Can&apos;t reach CAFlow</h1>
+        <Alert kind="warning">{message}</Alert>
+        <p className="small muted">
+          You are still signed in. Nothing has been lost — this will pick up where you left off.
+        </p>
+
+        <button type="button" className="full-width" onClick={onRetry}>
+          Try again
+        </button>
+      </main>
+    </div>
+  )
+}
+
 export function EmptyState({ title, children }) {
   return (
     <div className="empty">

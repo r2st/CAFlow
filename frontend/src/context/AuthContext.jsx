@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
-import api, { getToken, onCredentialLost, setToken } from '../api/client'
+import api, { NETWORK_ERROR_STATUS, getToken, onCredentialLost, setToken } from '../api/client'
 
 const AuthContext = createContext(null)
 
@@ -22,6 +22,12 @@ export function AuthProvider({ children }) {
   // Distinguishes "signed out because the token ran out" from "signed out
   // because you clicked sign out" — only the first needs explaining.
   const [sessionExpired, setSessionExpired] = useState(false)
+  // Set when a stored token could not be checked because nothing answered.
+  // Holds the message to show, so the offline and server-down wordings the
+  // API client picks between both reach the screen.
+  const [unreachable, setUnreachable] = useState('')
+  // Bumped to re-run the restore below; a retry is all a passing outage needs.
+  const [attempt, setAttempt] = useState(0)
 
   /**
    * A token has a lifetime, and it will run out while someone is mid-sentence
@@ -41,25 +47,46 @@ export function AuthProvider({ children }) {
     [],
   )
 
-  // Restore the session on reload: a stored token is only trusted once /me confirms it.
+  /**
+   * Restore the session on reload: a stored token is only trusted once /me
+   * confirms it.
+   *
+   * Not confirming it is not the same as it being refused. The check used to
+   * treat every failure as a bad token and throw it away, so a reload during a
+   * deploy, a flaky lift, or a laptop opened before the Wi-Fi reconnects cost
+   * the practitioner a session that was never actually wrong — and cost them
+   * their password to get back. Only a server that answered is evidence about
+   * the credential; silence is evidence about the connection.
+   */
   useEffect(() => {
     if (!getToken()) {
       setLoading(false)
-      return
+      return undefined
     }
     let cancelled = false
+    setLoading(true)
+    setUnreachable('')
     Promise.all([api.me(), api.firm()])
       .then(([me, theFirm]) => {
         if (cancelled) return
         setPractitioner(me)
         setFirm(theFirm)
       })
-      .catch(() => setToken(null))
+      .catch((err) => {
+        if (cancelled) return
+        if (err.status === NETWORK_ERROR_STATUS) setUnreachable(err.message)
+        // A refusal is the server's word on the token, and it is final. The
+        // 401 path in the API client has already dropped it; this covers the
+        // rest, including a firm whose account no longer resolves.
+        else setToken(null)
+      })
       .finally(() => !cancelled && setLoading(false))
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [attempt])
+
+  const retryRestore = useCallback(() => setAttempt((n) => n + 1), [])
 
   const login = useCallback(async (email, password) => {
     const result = await api.login(email, password)
@@ -67,6 +94,7 @@ export function AuthProvider({ children }) {
     setPractitioner(result.practitioner)
     setFirm(result.firm)
     setSessionExpired(false)
+    setUnreachable('')
     return result
   }, [])
 
@@ -76,6 +104,7 @@ export function AuthProvider({ children }) {
     setPractitioner(result.practitioner)
     setFirm(result.firm)
     setSessionExpired(false)
+    setUnreachable('')
     return result
   }, [])
 
@@ -85,6 +114,7 @@ export function AuthProvider({ children }) {
     setPractitioner(null)
     setFirm(null)
     setSessionExpired(false)
+    setUnreachable('')
   }, [])
 
   const value = useMemo(
@@ -93,6 +123,8 @@ export function AuthProvider({ children }) {
       firm,
       loading,
       sessionExpired,
+      unreachable,
+      retryRestore,
       isAuthenticated: Boolean(practitioner),
       isFirmAdmin: FIRM_ADMIN_ROLES.has(practitioner?.role),
       canManageClients: CLIENT_MANAGER_ROLES.has(practitioner?.role),
@@ -100,7 +132,17 @@ export function AuthProvider({ children }) {
       register,
       logout,
     }),
-    [practitioner, firm, loading, sessionExpired, login, register, logout],
+    [
+      practitioner,
+      firm,
+      loading,
+      sessionExpired,
+      unreachable,
+      retryRestore,
+      login,
+      register,
+      logout,
+    ],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
