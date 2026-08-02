@@ -119,19 +119,18 @@ describe('Portal landing', () => {
     expect(upload).not.toHaveBeenCalled()
   })
 
-  it('does not offer the legacy Office formats the server always refuses', async () => {
+  it('offers the legacy Office formats a CA client actually sends', async () => {
     vi.spyOn(api, 'portalOverview').mockResolvedValue(portalOverview())
 
     renderPortal('/portal?token=magic-token-123')
     await screen.findByText('Nimbus Textiles Pvt Ltd')
 
-    // .doc and .xls are OLE containers, which the server refuses on their
-    // leading bytes whatever content type the browser puts on them. Offering
-    // them here invited a client to pick the one file that could not be sent —
-    // and a CA's client has plenty of both.
+    // Tally exports .xls and every pre-2007 letter is .doc, so a client with
+    // one in hand should find it in the dialog rather than be sent away to
+    // convert it. The server takes both under those extensions.
     const accept = screen.getByLabelText('Upload Sales register').getAttribute('accept')
-    expect(accept).not.toMatch(/\.xls(,|$)/)
-    expect(accept).not.toMatch(/\.doc(,|$)/)
+    expect(accept).toMatch(/\.xls(,|$)/)
+    expect(accept).toMatch(/\.doc(,|$)/)
     expect(accept).toContain('.xlsx')
     expect(accept).toContain('.docx')
     expect(accept).toContain('.pdf')

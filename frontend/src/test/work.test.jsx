@@ -341,12 +341,14 @@ describe('Documents', () => {
     // The picker used to offer everything, so a practitioner could choose an
     // executable, wait for it to upload, and be handed a 415 for it. The
     // server's allow-list is the same on both routes, so the picker should be
-    // too — including leaving out .doc and .xls, which it always refuses.
+    // too — down to the legacy .xls and .doc the server now takes.
     const accept = (await screen.findByLabelText('File')).getAttribute('accept')
     expect(accept).toBe(ACCEPTED_FILE_TYPES)
     expect(accept).toContain('.pdf')
-    expect(accept).not.toMatch(/\.xls(,|$)/)
-    expect(accept).not.toMatch(/\.doc(,|$)/)
+    expect(accept).toMatch(/\.xls(,|$)/)
+    expect(accept).toMatch(/\.doc(,|$)/)
+    // An executable is still not on offer.
+    expect(accept).not.toMatch(/\.exe/)
   })
 
   it('flags a low-confidence AI guess as unconfirmed', async () => {

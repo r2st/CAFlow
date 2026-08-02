@@ -155,11 +155,16 @@ recorded against a client label rather than a practitioner id.
 (`STORAGE_DIR`). The storage module is the only thing that touches the
 filesystem, so swapping it for S3-compatible object storage is a single-file
 change. Content types are checked against the leading bytes, not the declared
-type — an executable is an executable whatever the upload claims. Archives and
-the legacy Office formats are refused on the same evidence: `.doc` and `.xls`
-are OLE containers and can carry macros, so the refusal names both formats and
-asks for `.docx`, `.xlsx` or PDF instead. The portal's file picker offers only
-what the server will take, so a client cannot pick a file that cannot be sent.
+type — an executable is an executable whatever the upload claims. Archives are
+refused on the same evidence. `.doc` and `.xls` are accepted, because Tally
+exports one and a decade of Indian correspondence is the other; they are OLE
+compound files, a container they share with `.ppt` and with `.msi` installers,
+and the header cannot tell those apart, so the extension decides and an OLE
+file under any other name is refused with somewhere to go. Downloads are served
+`Content-Disposition: attachment` under `X-Content-Type-Options: nosniff`, so
+nothing stored is ever rendered by a browser. The portal's file picker offers
+only what the server will take, so a client cannot pick a file that cannot be
+sent.
 
 **Dependency advisories.** `npm audit` reports an RSC-mode CSRF advisory against
 `react-router >= 7.12`. This app is a client-rendered SPA with no RSC and no

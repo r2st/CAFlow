@@ -36,14 +36,25 @@ ALLOWED_CONTENT_TYPES = frozenset(
         "application/json",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        # No application/msword or application/vnd.ms-excel: .doc and .xls are
-        # OLE containers, refused below whatever they are declared as, and
-        # listing them here promised an acceptance the signature check never
-        # honoured.
+        # Tally and every Excel before 2007 emit these, and a CA's clients send
+        # them constantly. Accepted only under a .xls/.doc name — see
+        # LEGACY_OFFICE_TYPES.
+        "application/msword",
+        "application/vnd.ms-excel",
         "application/zip",  # some browsers send this for .xlsx/.docx
         "application/octet-stream",
     }
 )
+
+# The leading bytes of an OLE compound file: .doc and .xls, but also .ppt and
+# — the reason this is not simply allowed — .msi, a Windows installer. Nothing
+# in the header distinguishes them, so the filename is what decides, and only
+# these two extensions get in.
+OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+LEGACY_OFFICE_TYPES: dict[str, str] = {
+    ".doc": "application/msword",
+    ".xls": "application/vnd.ms-excel",
+}
 
 # Formats we can pull text out of without an OCR/PDF dependency. PDFs and
 # images fall back to filename-based categorisation until OCR is wired up.
@@ -64,11 +75,6 @@ REFUSED_SIGNATURES: tuple[tuple[bytes, str, str], ...] = (
     (b"\xcf\xfa\xed\xfe", "a Mach-O binary", ""),
     (b"\xce\xfa\xed\xfe", "a Mach-O binary", ""),
     (b"#!", "a shell script", ""),
-    (
-        b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1\x00",
-        "a legacy Word or Excel file (.doc or .xls)",
-        "Those can carry macros. Save it as .docx, .xlsx or PDF and upload that.",
-    ),
     (b"Rar!", "a RAR archive", "Upload the documents themselves rather than an archive."),
     (
         b"\x37\x7a\xbc\xaf\x27\x1c",
@@ -117,8 +123,20 @@ def safe_filename(filename: str) -> str:
     return cleaned[-MAX_STORED_NAME:]
 
 
-def sniff_content_type(data: bytes) -> str | None:
-    """The content type implied by the leading bytes, or None if unrecognised."""
+def legacy_office_type(filename: str) -> str | None:
+    """The content type a ``.doc``/``.xls`` name claims, or None for anything else."""
+    return LEGACY_OFFICE_TYPES.get(Path(filename or "").suffix.lower())
+
+
+def sniff_content_type(data: bytes, filename: str = "") -> str | None:
+    """The content type implied by the leading bytes, or None if unrecognised.
+
+    ``filename`` only matters for OLE compound files, where the bytes say
+    "legacy Office container" and the extension is the only thing that says
+    which one.
+    """
+    if data.startswith(OLE_SIGNATURE):
+        return legacy_office_type(filename)
     for signature, content_type in CONTENT_SIGNATURES:
         if not data.startswith(signature):
             continue
@@ -129,7 +147,12 @@ def sniff_content_type(data: bytes) -> str | None:
     return None
 
 
-def validate_upload(content_type: str | None, size_bytes: int, data: bytes = b"") -> None:
+def validate_upload(
+    content_type: str | None,
+    size_bytes: int,
+    data: bytes = b"",
+    filename: str = "",
+) -> None:
     """Reject uploads that are too large, the wrong type, or not what they claim.
 
     ``data`` is optional so the size/type checks can run before a body is
@@ -145,13 +168,23 @@ def validate_upload(content_type: str | None, size_bytes: int, data: bytes = b""
 
     # The signature is read before the declared type, because it is evidence
     # and the declaration is only a claim. It also gives the better message: a
-    # .xls is turned away as a legacy Excel file with somewhere to go, rather
-    # than as a MIME type the sender never chose and cannot change.
+    # renamed executable is turned away as an executable, rather than as a MIME
+    # type the sender never chose and cannot change.
     head = data[:32]
     for signature, description, advice in REFUSED_SIGNATURES:
         if head.startswith(signature):
             refusal = f"This file looks like {description}, which cannot be accepted"
             raise UnsupportedFileType(f"{refusal}. {advice}" if advice else refusal)
+
+    # .doc and .xls are welcome; the container they share with .ppt and with
+    # .msi installers is not. The extension is all there is to tell them apart,
+    # so an OLE file that is not named like legacy Word or Excel stops here.
+    if head.startswith(OLE_SIGNATURE) and legacy_office_type(filename) is None:
+        raise UnsupportedFileType(
+            "This file is a legacy Office container, and only .doc and .xls files "
+            "are accepted in that format. Save it as .docx, .xlsx or PDF and "
+            "upload that."
+        )
 
     # A missing content type is treated as octet-stream rather than rejected;
     # browsers omit it for unusual extensions.
@@ -159,7 +192,7 @@ def validate_upload(content_type: str | None, size_bytes: int, data: bytes = b""
         raise UnsupportedFileType(f"Files of type {content_type} are not accepted")
 
 
-def effective_content_type(declared: str | None, data: bytes) -> str | None:
+def effective_content_type(declared: str | None, data: bytes, filename: str = "") -> str | None:
     """What to record as the document's type.
 
     The signature wins when there is one: a browser that mislabels a PDF as
@@ -167,7 +200,7 @@ def effective_content_type(declared: str | None, data: bytes) -> str | None:
     it, and a caller that labels a JPEG as ``text/csv`` should not get it
     handed to the text extractor.
     """
-    return sniff_content_type(data) or declared
+    return sniff_content_type(data, filename) or declared
 
 
 def save_upload(
@@ -179,7 +212,7 @@ def save_upload(
     content_type: str | None = None,
 ) -> StoredFile:
     """Write ``data`` to the storage volume and describe where it went."""
-    validate_upload(content_type, len(data), data)
+    validate_upload(content_type, len(data), data, filename)
 
     name = safe_filename(filename)
     relative = Path(str(firm_id)) / str(client_id) / f"{uuid.uuid4().hex}__{name}"

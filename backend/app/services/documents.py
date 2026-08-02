@@ -157,7 +157,7 @@ def ingest_upload(
     # Record what the bytes actually are, not what the upload claimed. A
     # browser that sends application/octet-stream for a PDF would otherwise
     # keep that PDF out of the text extractor for good.
-    content_type = storage.effective_content_type(content_type, data)
+    content_type = storage.effective_content_type(content_type, data, filename)
 
     document = Document(
         firm_id=client.firm_id,

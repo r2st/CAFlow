@@ -77,16 +77,16 @@ export function statusLabel(status) {
  * storage service. Used by both the client portal and the practitioner's own
  * upload form, which is why it lives here rather than beside either one.
  *
- * No .xls or .doc. Those are OLE containers, which the server refuses on their
- * leading bytes whatever content type the browser puts on them, so offering
- * them only invited someone to pick the one file that could not be sent. The
- * refusal names both formats and asks for .docx, .xlsx or PDF.
+ * .xls and .doc are here because a CA's clients live in them — Tally exports
+ * .xls, and anything written before 2007 is .doc. The server takes both under
+ * those two extensions; the OLE container they share with .msi installers is
+ * still refused under any other name.
  *
  * `accept` is a hint rather than a gate — "All files" is still in the dialog —
  * so this hides nothing that the server would have taken.
  */
 export const ACCEPTED_FILE_TYPES =
-  '.pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff,.txt,.csv,.json,.xlsx,.docx'
+  '.pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff,.txt,.csv,.json,.xlsx,.xls,.docx,.doc'
 
 /**
  * Paise are the storage unit everywhere; render them as rupees — exactly,
