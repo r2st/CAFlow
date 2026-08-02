@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import date, timedelta
 
@@ -25,6 +26,8 @@ from app.schemas.document import (
 )
 from app.services import audit, storage
 from app.services import documents as document_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -344,9 +347,18 @@ def update_document(
 def delete_document(
     document_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
 ):
+    """Delete a document, record first and bytes second.
+
+    Only one of the two stores can be rolled back. Unlinking before the commit
+    meant a commit that failed — a dropped connection, a statement timeout, a
+    deadlock — left the row describing a file that was already gone: still
+    listed, still offered to the client in the portal, downloading 410 for
+    ever, and no way to get the bytes back. Committing first inverts the
+    failure into an orphaned file, which costs disk and can be swept.
+    """
     document = _get_document_or_404(db, practitioner.firm_id, document_id)
     filename = document.original_filename
-    storage.delete_stored(document.storage_path)
+    storage_path = document.storage_path
     db.delete(document)
     audit.record(
         db,
@@ -357,3 +369,13 @@ def delete_document(
         summary=f"Deleted {filename}",
     )
     db.commit()
+
+    # Logged, not raised: the record is gone, which is what was asked for, and
+    # the caller has nothing left to retry — a second DELETE would only 404.
+    try:
+        storage.delete_stored(storage_path)
+    except OSError:
+        logger.warning(
+            "Deleted document %s but could not remove %s", document_id, storage_path,
+            exc_info=True,
+        )

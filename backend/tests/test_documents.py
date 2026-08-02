@@ -6,10 +6,13 @@ Uploads go to a throwaway storage directory configured in ``conftest``.
 from __future__ import annotations
 
 import io
+import logging
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.models.base import DocumentCategory
+from app.models.document import Document
 from app.services import documents as document_service
 from app.services import storage
 from tests.conftest import first_item_of_type
@@ -316,6 +319,107 @@ class TestDocumentCrud:
 
     def test_documents_require_authentication(self, client):
         assert client.get("/api/v1/documents").status_code == 401
+
+
+class TestDeletingADocumentCannotLoseTheFileAndKeepTheRow:
+    """Two stores, one of which does not roll back.
+
+    A delete removes a database row and a file on a volume. If the file goes
+    first and the transaction then fails — a dropped connection, a statement
+    timeout, a deadlock — the row survives describing bytes that no longer
+    exist: still listed, still offered to the client in the portal, and
+    downloading 410 for ever with nothing to restore. Committing the record
+    first turns that into an orphaned file, which costs disk and can be swept.
+    """
+
+    def stored_path(self, db) -> str:
+        return db.query(Document).one().storage_path
+
+    def drop_the_connection(self, monkeypatch, db) -> None:
+        """Make the commit fail the way a database restart makes it fail."""
+
+        def dropped(*args, **kwargs):
+            raise OperationalError("DELETE FROM documents", {}, Exception("server closed"))
+
+        monkeypatch.setattr(db, "commit", dropped)
+
+    def test_a_failed_commit_leaves_the_file_where_the_row_still_points(
+        self, client, auth_headers, client_id, db, monkeypatch
+    ):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        path = self.stored_path(db)
+        self.drop_the_connection(monkeypatch, db)
+
+        response = client.delete(
+            f"/api/v1/documents/{document['id']}", headers=auth_headers
+        )
+
+        assert response.status_code == 503
+        assert storage.resolve_stored(path).read_bytes() == PDF_BYTES
+
+    def test_a_failed_commit_keeps_the_row(
+        self, client, auth_headers, client_id, db, monkeypatch
+    ):
+        """The other half of the pair: neither store may move without the other."""
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        self.drop_the_connection(monkeypatch, db)
+
+        client.delete(f"/api/v1/documents/{document['id']}", headers=auth_headers)
+
+        db.rollback()
+        assert db.query(Document).count() == 1
+
+    def test_a_file_that_cannot_be_removed_does_not_fail_the_delete(
+        self, client, auth_headers, client_id, db, monkeypatch
+    ):
+        """The record is gone, which is what was asked for.
+
+        Reporting a failure here would be a lie the caller cannot act on: a
+        second DELETE only finds a 404, and the row is not coming back.
+        """
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+
+        def read_only_volume(storage_path):
+            raise PermissionError(f"Read-only file system: {storage_path}")
+
+        monkeypatch.setattr(storage, "delete_stored", read_only_volume)
+
+        response = client.delete(
+            f"/api/v1/documents/{document['id']}", headers=auth_headers
+        )
+
+        assert response.status_code == 204
+        assert db.query(Document).count() == 0
+
+    def test_the_orphan_it_leaves_behind_is_logged(
+        self, client, auth_headers, client_id, db, monkeypatch, caplog
+    ):
+        """Costing disk silently is how a volume fills up unexplained."""
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        path = self.stored_path(db)
+
+        monkeypatch.setattr(
+            storage,
+            "delete_stored",
+            lambda storage_path: (_ for _ in ()).throw(PermissionError("read-only")),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="app.api.routes.documents"):
+            client.delete(f"/api/v1/documents/{document['id']}", headers=auth_headers)
+
+        assert path in caplog.text
+        assert str(document["id"]) in caplog.text
+
+    def test_the_bytes_are_gone_once_the_delete_has_committed(
+        self, client, auth_headers, client_id, db
+    ):
+        """Ordering is the fix, not skipping the unlink."""
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        path = self.stored_path(db)
+
+        client.delete(f"/api/v1/documents/{document['id']}", headers=auth_headers)
+
+        assert not storage.resolve_stored(path).exists()
 
 
 class TestRequirementLabels:
