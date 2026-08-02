@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = True
     api_v1_prefix: str = "/api/v1"
+    # Swagger, ReDoc and the schema they are generated from. Unset means "on
+    # in development, off in production": the reference is a complete inventory
+    # of every route, every field name and every error code, and anonymous
+    # visitors to a production deployment have no use for it that an attacker
+    # does not have first. Set DOCS_ENABLED explicitly to override in either
+    # direction — true on a staging box someone is integrating against, false
+    # on a laptop that is briefly on a conference network.
+    docs_enabled: bool | None = None
     # Emit one JSON object per log line. Off in development, where the
     # human-readable format is easier to scan.
     log_json: bool = False
@@ -157,6 +165,17 @@ class Settings(BaseSettings):
     def _normalise_environment(cls, value: str) -> str:
         return value.strip().lower()
 
+    @field_validator("docs_enabled", mode="before")
+    @classmethod
+    def _blank_docs_enabled_means_default(cls, value: object) -> object:
+        """``DOCS_ENABLED=`` reads as unset, the way ``LOG_LEVEL=`` does.
+
+        Without this, the blank line .env.example ships refuses to boot: an
+        empty string is not a boolean pydantic will accept, so the file that
+        documents the setting would be the file that stops the process.
+        """
+        return None if isinstance(value, str) and not value.strip() else value
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
@@ -246,6 +265,18 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment in PRODUCTION_ENVIRONMENTS
+
+    @property
+    def serves_api_docs(self) -> bool:
+        """Whether /docs, /redoc and /openapi.json are routed at all.
+
+        The unset default is the interesting case: it follows the environment,
+        so a deployment that is production enough to refuse a placeholder
+        signing key is also production enough to stop publishing its own map.
+        """
+        if self.docs_enabled is None:
+            return not self.is_production
+        return self.docs_enabled
 
     @property
     def effective_log_level(self) -> str:

@@ -161,6 +161,46 @@ class TestDerivedValues:
         assert Settings(_env_file=None).trusts_every_proxy is False
 
 
+class TestTheApiReferenceFollowsTheEnvironment:
+    """Unset is the setting almost every deployment will run on.
+
+    So it is the one that has to be right on its own: production gets no
+    published inventory of its routes and fields without anyone remembering to
+    ask for that, and development keeps the reference the frontend is written
+    against. Both directions stay overridable, because a staging box someone is
+    integrating against is a real case and so is a laptop on a hostile network.
+    """
+
+    def test_unset_means_off_in_production(self):
+        assert production().docs_enabled is None
+        assert production().serves_api_docs is False
+
+    def test_unset_means_on_in_development(self):
+        assert Settings(_env_file=None).serves_api_docs is True
+
+    def test_production_can_ask_for_it_explicitly(self):
+        assert production(docs_enabled=True).serves_api_docs is True
+
+    def test_development_can_refuse_it_explicitly(self):
+        assert Settings(_env_file=None, docs_enabled=False).serves_api_docs is False
+
+    def test_a_blank_value_reads_as_unset_rather_than_refusing_to_boot(self):
+        """``DOCS_ENABLED=`` is what .env.example ships, next to ``LOG_LEVEL=``.
+
+        Without the coercion, the line documenting the setting is the line that
+        stops the process — an empty string is not a boolean, and the failure
+        arrives at import with a pydantic type error rather than anything that
+        names the file it came from.
+        """
+        assert Settings(_env_file=None, docs_enabled="").serves_api_docs is True
+        assert production(docs_enabled="   ").serves_api_docs is False
+
+    def test_a_value_that_is_neither_is_still_refused(self):
+        """Blank is deliberate; ``DOCS_ENABLED=maybe`` is a typo worth failing on."""
+        with pytest.raises(ValueError, match="boolean"):
+            Settings(_env_file=None, docs_enabled="maybe")
+
+
 class TestStartupFailure:
     def test_the_failure_message_points_at_env_example(self, monkeypatch):
         monkeypatch.setenv("JWT_ALGORITHM", "RS256")

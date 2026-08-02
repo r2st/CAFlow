@@ -127,6 +127,24 @@ class TestProductionSecrets:
         assert env["ENVIRONMENT"] == "production"
         assert str(env["DEBUG"]).lower() == "false"
 
+    def test_the_api_reference_is_not_switched_back_on(self, overlay, nginx_conf):
+        """``DOCS_ENABLED`` unset is what makes ENVIRONMENT=production mean anything.
+
+        The app decides whether to route /docs, /redoc and /openapi.json from
+        ``settings.serves_api_docs``, which follows the environment unless the
+        setting overrides it. nginx proxies the paths either way — deliberately,
+        so a laptop running ``docker compose up`` still gets the reference — so
+        the overlay putting ``DOCS_ENABLED: true`` back in the environment is
+        the one edit that would publish the full inventory of routes and fields
+        to caflow.aiknol.com with nothing else looking different.
+        """
+        env = overlay["services"]["api"]["environment"]
+
+        assert "DOCS_ENABLED" not in env or str(env["DOCS_ENABLED"]).lower() == "false"
+        # ...and the proxy really does still carry them, which is the reason
+        # the check above is the only thing standing between the two states.
+        assert re.search(r"location\s+~\s+\^/\(health\|docs\|redoc", nginx_conf)
+
     @pytest.mark.parametrize("variable", ["CORS_ORIGINS", "PORTAL_BASE_URL"])
     def test_the_public_urls_are_https(self, overlay, variable):
         """Magic links carry a session token, so the scheme is not cosmetic."""

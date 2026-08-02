@@ -145,6 +145,17 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Passing None for a docs URL is how FastAPI is told not to route it at
+    # all: the path 404s like any other unknown one, rather than answering
+    # with something that admits a reference exists here. /openapi.json goes
+    # with them — leaving the schema served while hiding the two renderers
+    # would publish exactly the same inventory in a form that is easier to
+    # script against. `app.openapi()` still builds it in-process, so the
+    # generated-client and contract checks are unaffected.
+    docs = settings.serves_api_docs
+    if not docs:
+        logger.info("API reference is not routed (ENVIRONMENT=%s)", settings.environment)
+
     app = FastAPI(
         title=settings.app_name,
         description=DESCRIPTION,
@@ -153,9 +164,9 @@ def create_app() -> FastAPI:
         openapi_tags=TAGS_METADATA,
         contact={"name": "CAFlow"},
         license_info={"name": "Proprietary"},
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
         responses=COMMON_RESPONSES,
         lifespan=lifespan,
     )

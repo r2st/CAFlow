@@ -124,18 +124,28 @@ docker exec knol-caddy caddy reload   --config /etc/caddy/Caddyfile --adapter ca
 header_up X-Forwarded-Proto"*. The header is set explicitly anyway so the block
 reads the same as the Compose variant's, which does need it.
 
-### `/docs` is deliberately not routed
+### `/docs` is off twice over
 
-Unlike Herald, CAFlow wires `/docs`, `/redoc` and `/openapi.json`
-unconditionally (`app/main.py`) — there is no `ENVIRONMENT` gate to turn them
-off. Routing them would publish a full inventory of every route and field to
-anonymous visitors, so the Caddy block simply has no handler for them and they
-fall through to the SPA. To read the schema:
+`app/main.py` routes `/docs`, `/redoc` and `/openapi.json` only when
+`settings.serves_api_docs` says so, which follows `ENVIRONMENT` unless
+`DOCS_ENABLED` overrides it — so on this box the app itself 404s all three.
+The Caddy block also has no handler for them, so they fall through to the SPA
+before they ever reach uvicorn.
+
+Either one alone would do; both is cheap, and they fail in different
+directions. A Caddyfile edit that adds a catch-all `/` handler to this vhost
+would route them, and an `.env` that lost its `ENVIRONMENT=production` line
+would serve them. Neither mistake publishes the schema on its own.
+
+To read the schema, tunnel to the API and ask an app that is *not* in
+production mode — which on this box means reading it from a checkout instead:
 
 ```bash
-ssh -L 8010:172.18.0.1:3010 -i <key> root@89.167.8.178
-open http://127.0.0.1:8010/docs
+cd backend && python -c "from app.main import app; import json; print(json.dumps(app.openapi()))"
 ```
+
+`app.openapi()` builds the schema in-process regardless of whether the route
+exists, so it is the same document either way.
 
 ## Environment
 
