@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentFirm, CurrentPractitioner, DbSession, FirmAdmin
 from app.config import settings
@@ -23,9 +24,24 @@ from app.schemas.auth import (
     RegisterResponse,
     TokenResponse,
 )
-from app.services import audit
+from app.services import audit, firms
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _claim_user_slot(db: Session, firm: Firm) -> None:
+    """Take a user slot, or answer 402.
+
+    Called from adding a member *and* from switching a deactivated one back on.
+    The plan caps how many practitioners a firm has active at once, and a
+    reactivation adds to that count exactly as an addition does.
+    """
+    try:
+        firms.claim_user_slot(db, firm)
+    except firms.PlanLimitReached as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)
+        ) from exc
 
 
 def _token_response(practitioner: Practitioner, firm: Firm) -> TokenResponse:
@@ -171,18 +187,7 @@ def add_practitioner(
             status_code=status.HTTP_400_BAD_REQUEST, detail="A firm can only have one owner"
         )
 
-    limit = firm.user_limit
-    if limit is not None:
-        current = db.scalar(
-            select(func.count(Practitioner.id)).where(
-                Practitioner.firm_id == firm.id, Practitioner.is_active.is_(True)
-            )
-        )
-        if current >= limit:
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail=f"The {firm.plan.value} plan allows {limit} user(s). Upgrade to add more.",
-            )
+    _claim_user_slot(db, firm)
 
     duplicate = db.scalar(
         select(Practitioner).where(
@@ -227,7 +232,11 @@ def add_practitioner(
     summary="Update a team member",
 )
 def update_practitioner(
-    practitioner_id: uuid.UUID, payload: PractitionerUpdate, admin: FirmAdmin, db: DbSession
+    practitioner_id: uuid.UUID,
+    payload: PractitionerUpdate,
+    admin: FirmAdmin,
+    firm: CurrentFirm,
+    db: DbSession,
 ):
     target = db.get(Practitioner, practitioner_id)
     if target is None or target.firm_id != admin.firm_id:
@@ -265,6 +274,12 @@ def update_practitioner(
                     "would be left without an administrator."
                 ),
             )
+
+    # Before the flag is applied, so the count is of what the firm holds
+    # without this one, and only on the transition — re-saving an already
+    # active member must not be charged a slot it already occupies.
+    if updates.get("is_active") is True and not target.is_active:
+        _claim_user_slot(db, firm)
 
     before = {key: getattr(target, key) for key in updates}
     for key, value in updates.items():

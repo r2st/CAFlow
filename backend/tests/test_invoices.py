@@ -6,13 +6,12 @@ import uuid
 from datetime import date, timedelta
 
 import pytest
-from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
 from app.models.base import InvoiceStatus
 from app.models.invoice import Invoice, InvoiceLine
 from app.schemas.common import MAX_AMOUNT_PAISE
-from app.services import billing
+from app.services import billing, firms
 from tests.conftest import make_client_payload
 
 
@@ -179,30 +178,16 @@ class TestTwoInvoicesAtOnce:
 
         return build
 
-    def test_the_lock_is_one_the_database_can_actually_honour(self, firm_id):
-        """Compiled for PostgreSQL, because SQLite has no row locks to assert on
-        and silently drops the clause — so running the suite proves nothing
-        about the statement unless the statement itself is inspected."""
-        statements = []
-
-        class Recorder:
-            def execute(self, statement):
-                statements.append(statement)
-
-        billing.lock_firm_numbering(Recorder(), uuid.UUID(firm_id))
-
-        sql = str(statements[0].compile(dialect=postgresql.dialect()))
-        assert "FROM firms" in sql
-        assert "FOR UPDATE" in sql
-
-    def test_creating_an_invoice_takes_that_lock(
+    def test_creating_an_invoice_holds_the_firm(
         self, client, auth_headers, client_id, firm_id, monkeypatch
     ):
-        """The statement above is worth nothing if the write path never runs it."""
+        """The lock is worth nothing if the write path never takes it.
+
+        That it is a lock the database honours is asserted in ``test_firms``;
+        this is only that numbering asks for it.
+        """
         locked = []
-        monkeypatch.setattr(
-            billing, "lock_firm_numbering", lambda db, fid: locked.append(fid)
-        )
+        monkeypatch.setattr(firms, "lock_firm", lambda db, fid: locked.append(fid))
 
         assert make_invoice(client, auth_headers, client_id).status_code == 201
         assert locked == [uuid.UUID(firm_id)]

@@ -24,8 +24,8 @@ from app.core.periods import fiscal_year_start, fy_label
 from app.models.base import ComplianceStatus, InvoiceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
-from app.models.firm import Firm
 from app.models.invoice import Invoice, InvoiceLine
+from app.services import firms
 
 FILED_STATUSES = (ComplianceStatus.FILED, ComplianceStatus.DELAYED_FILED)
 UNPAID_STATUSES = (
@@ -95,24 +95,6 @@ def number_collision(exc: IntegrityError) -> bool:
     return any(marker in message for marker in _NUMBER_TAKEN)
 
 
-def lock_firm_numbering(db: Session, firm_id: uuid.UUID) -> None:
-    """Serialise invoice numbering for one firm, for the rest of the transaction.
-
-    Two practitioners in the same firm pressing *Create invoice* together both
-    read the same set of used numbers and both pick the next one; one of them
-    then loses their whole request to a unique-constraint violation, and a
-    batch generate loses every draft in it, not just the one that clashed.
-    Holding the firm's own row is the cheapest thing that orders them, and it
-    is per firm, so nobody else's billing waits.
-
-    A plain ``SELECT`` is not blocked by this in PostgreSQL, so resolving the
-    firm on other requests carries on untouched. SQLite has no row locks and
-    ignores the clause — which is why :func:`insert_numbered` retries as well
-    as locks.
-    """
-    db.execute(select(Firm.id).where(Firm.id == firm_id).with_for_update())
-
-
 def insert_numbered(
     db: Session,
     *,
@@ -127,8 +109,13 @@ def insert_numbered(
     wholesale — the savepoint takes the invoice, its lines and the ``is_billed``
     flags it set back out — so a retry has to construct them again rather than
     re-submit rows the session has already discarded.
+
+    Two practitioners pressing *Create invoice* together both read the same set
+    of used numbers and both pick the next one; holding the firm's row is what
+    orders them, and the retry is what saves the loser on a backend that does
+    not honour the lock.
     """
-    lock_firm_numbering(db, firm_id)
+    firms.lock_firm(db, firm_id)
     for remaining in reversed(range(NUMBER_ATTEMPTS)):
         try:
             with db.begin_nested():

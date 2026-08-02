@@ -24,10 +24,27 @@ from app.schemas.client import (
 )
 from app.schemas.common import Page
 from app.schemas.compliance import ComplianceGenerateRequest, ComplianceGenerateResponse
-from app.services import audit
+from app.services import audit, firms
 from app.services.compliance_generator import generate_compliance_items
 
 router = APIRouter(prefix="/clients", tags=["clients"])
+
+
+def _claim_client_slot(db: Session, firm) -> None:
+    """Take a client slot, or answer 402.
+
+    Called from creation *and* from reactivation. The plan caps how many
+    clients a firm has active at once, and switching a deactivated one back on
+    adds to that count exactly as creating one does — so leaving it out of this
+    made the cap a formality: deactivate ten, create ten, switch the ten back
+    on, and a fifty-client plan holds sixty.
+    """
+    try:
+        firms.claim_client_slot(db, firm)
+    except firms.PlanLimitReached as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)
+        ) from exc
 
 # Flags that change which compliance types apply — a change means we re-generate.
 REGISTRATION_FLAGS = (
@@ -96,18 +113,7 @@ def create_client(
     GST-registered monthly filer gets GSTR-1 and GSTR-3B for every month,
     a TDS deductor gets quarterly returns, a company gets ROC filings, and so on.
     """
-    limit = firm.client_limit
-    if limit is not None:
-        current = db.scalar(
-            select(func.count(Client.id)).where(
-                Client.firm_id == firm.id, Client.is_active.is_(True)
-            )
-        )
-        if current >= limit:
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail=f"The {firm.plan.value} plan allows {limit} clients. Upgrade to add more.",
-            )
+    _claim_client_slot(db, firm)
 
     if payload.pan:
         duplicate = db.scalar(
@@ -211,11 +217,21 @@ def get_client(client_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSe
 
 @router.patch("/{client_id}", response_model=ClientCreateResponse, summary="Update a client")
 def update_client(
-    client_id: uuid.UUID, payload: ClientUpdate, practitioner: Manager, db: DbSession
+    client_id: uuid.UUID,
+    payload: ClientUpdate,
+    practitioner: Manager,
+    firm: CurrentFirm,
+    db: DbSession,
 ):
     """Update a client. Changing a registration flag tops up compliance items."""
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
     updates = payload.model_dump(exclude_unset=True)
+
+    # Before the flag is applied, so the count is of what the firm holds
+    # without this one. Only on the transition: re-saving an already-active
+    # client must not be charged a slot it is already occupying.
+    if updates.get("is_active") is True and not client.is_active:
+        _claim_client_slot(db, firm)
 
     if "assigned_practitioner_id" in updates:
         _validate_assignee(db, client.firm_id, updates["assigned_practitioner_id"])
