@@ -1,0 +1,28 @@
+[Unit]
+Description=CAFlow Web (static SPA server)
+Documentation=https://github.com/r2st/CAFlow
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=caflow
+Group=caflow
+WorkingDirectory=/opt/CAFlow
+ExecStart=/usr/bin/node /opt/CAFlow/deploy/hetzner/static-server.mjs \
+    --root /opt/CAFlow/frontend/dist --host 172.18.0.1 --port 3011
+Restart=always
+RestartSec=5
+
+# Hardening. Serving static files needs no write access at all.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=caflow-web
+
+[Install]
+WantedBy=multi-user.target

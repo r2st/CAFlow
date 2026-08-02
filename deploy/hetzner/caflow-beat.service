@@ -1,0 +1,33 @@
+[Unit]
+Description=CAFlow Celery beat (compliance sweep, reminder dispatch, invoice refresh)
+Documentation=https://github.com/r2st/CAFlow
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=caflow
+Group=caflow
+WorkingDirectory=/opt/CAFlow/backend
+EnvironmentFile=/opt/CAFlow/.env
+# The schedule file is pinned rather than left to default, because its default
+# location is the working directory — read-only under ProtectSystem=strict
+# unless it falls inside ReadWritePaths, which this path does.
+ExecStart=/opt/CAFlow/.venv/bin/celery -A app.worker.celery_app:celery_app beat \
+    --loglevel=info --schedule=/opt/CAFlow/backend/celerybeat-schedule
+Restart=always
+RestartSec=10
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/CAFlow
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=caflow-beat
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,104 @@
+# CAFlow — vhost block for the shared Caddy instance on the Hetzner box
+# (container `knol-caddy`, config at /opt/knol/Caddyfile). Append this block
+# there and `docker exec knol-caddy caddy reload --config /etc/caddy/Caddyfile`.
+#
+# /opt/knol/Caddyfile is a *file* bind-mount, so never edit it with `sed -i`,
+# `vim`, or anything else that writes-then-renames: those replace the inode and
+# the container stays pinned to the old one, so `caddy reload` reports success
+# while changing nothing. Append with `>>` or truncate in place with
+# `cat new > file`. Both preserve the inode.
+#
+# One origin, not two: the SPA calls the API at the relative path /api/v1
+# (frontend/src/api/client.js), so the API must be same-origin. A separate
+# api.caflow.aiknol.com would need CORS plus a rebuild to bake in the absolute
+# URL — this way neither is required.
+#
+# 172.18.0.1 is the knol_knol bridge gateway, i.e. the host as seen from inside
+# the Caddy container. CAFlow's services bind that address only, so they are
+# unreachable from the public internet. (The box has no host firewall, and the
+# older apps' 0.0.0.0 binds are in fact reachable on the open internet.)
+
+caflow.aiknol.com {
+	encode zstd gzip
+
+	# HSTS is set here rather than in the app, because this is where TLS
+	# actually terminates and the app cannot know whether it did. A year, and
+	# the subdomains too — nothing else is served under this name.
+	#
+	# The rest of the security headers are deliberately NOT here: the API sets
+	# its own (app/core/middleware.py) and the SPA server sets the CSP that
+	# matches the bundle it serves (deploy/hetzner/static-server.mjs). Adding
+	# them here would be a third place to keep in step, in a file shared with
+	# seven other sites.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# The app caps uploads at 20 MB and refuses a request body over 25 MB
+	# (MAX_REQUEST_BODY_BYTES). This turns an oversized body away at the edge,
+	# before it crosses the proxy at all. Keep it at or above that value, or
+	# the app's own limit — and the message it gives — is never reached.
+	request_body {
+		max_size 25MB
+	}
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy 172.18.0.1:3010 {
+			# Overwrite, not append. Caddy's default is to append the peer to
+			# whatever X-Forwarded-For the caller sent, which carries a forged
+			# prefix straight through. {remote_host} is the address Caddy
+			# actually accepted the connection from — the only address in this
+			# exchange that is not a claim.
+			#
+			# The app no longer depends on this alone: it reads the chain from
+			# the right and skips hops inside TRUSTED_PROXY_IPS, so a forged
+			# prefix is ignored even if this line goes. Keep it anyway.
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+
+			# Document uploads and AI categorisation outrun the default read
+			# timeout.
+			transport http {
+				read_timeout 150s
+				write_timeout 150s
+			}
+
+			# /health/ready probes Postgres and answers 503 when it is down, so
+			# a database outage takes this upstream out of the pool. With one
+			# upstream that means /api/* answers 502 rather than 500s from a
+			# process that cannot reach its database.
+			health_uri /health/ready
+			health_interval 30s
+		}
+	}
+
+	# The probes sit outside /api by design ("probes should not move when the
+	# API version does" — app/main.py). Routed so the deploy and any external
+	# monitor can reach them over TLS.
+	@health path /health /health/*
+	handle @health {
+		reverse_proxy 172.18.0.1:3010
+	}
+
+	# /docs, /redoc and /openapi.json are deliberately NOT routed. Unlike the
+	# other apps on this box, CAFlow does not gate them in the application
+	# (app/main.py wires them unconditionally), so routing them here would
+	# publish a full inventory of every route and field to anonymous visitors.
+	# They fall through to the SPA below, which answers with the app shell.
+	# To read the schema, tunnel to the API directly:
+	#     ssh -L 8010:172.18.0.1:3010 root@89.167.8.178
+	#     open http://127.0.0.1:8010/docs
+
+	handle {
+		reverse_proxy 172.18.0.1:3011
+	}
+
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}

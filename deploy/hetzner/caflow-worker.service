@@ -1,0 +1,33 @@
+[Unit]
+Description=CAFlow Celery worker (compliance generation, reminders, invoices)
+Documentation=https://github.com/r2st/CAFlow
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=caflow
+Group=caflow
+WorkingDirectory=/opt/CAFlow/backend
+EnvironmentFile=/opt/CAFlow/.env
+# --concurrency=2: the box has 4 GB shared with six other applications, and
+# this workload is IO-bound on SMTP and the OpenRouter API rather than CPU.
+ExecStart=/opt/CAFlow/.venv/bin/celery -A app.worker.celery_app:celery_app worker \
+    --loglevel=info --concurrency=2
+Restart=always
+RestartSec=10
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The document-categorisation tasks read and write STORAGE_DIR.
+ReadWritePaths=/opt/CAFlow
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=caflow-worker
+
+[Install]
+WantedBy=multi-user.target
