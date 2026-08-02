@@ -153,6 +153,14 @@ class Settings(BaseSettings):
     openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
     openrouter_fallback_model: str = "google/gemma-3-27b-it:free"
     openrouter_timeout_seconds: float = Field(default=45.0, gt=0)
+    # How long one batch job may spend asking the model to word its messages.
+    # The nightly queueing runs draft one message per reminder, and a firm's
+    # filings cluster on the same offset day, so the count is the firm's client
+    # list rather than a handful. Past this the deterministic template is used
+    # for the rest of the run: a plainly-worded reminder that goes out beats a
+    # well-worded one that was never queued, and Celery's ten-minute limit is
+    # what the run is really spending. See app.services.ai.DraftingBudget.
+    ai_draft_budget_seconds: float = Field(default=120.0, ge=0)
 
     # --- Compliance generation ---
     # How many financial years ahead of the client's onboarding to pre-generate.

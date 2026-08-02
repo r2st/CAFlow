@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql, sqlite
 
+from app.config import settings
 from app.models.base import (
     ComplianceStatus,
     EntityType,
@@ -32,6 +33,7 @@ from app.models.compliance import ComplianceItem, ComplianceType
 from app.models.firm import Firm
 from app.models.invoice import Invoice
 from app.models.reminder import Reminder
+from app.services import ai
 from app.services import reminders as reminder_service
 from app.worker import tasks
 from app.worker.celery_app import celery_app
@@ -941,6 +943,133 @@ class TestWorkerRuntimeLimits:
         assert schedule.minute == set(range(0, 60, 15))
 
         assert celery_app.conf.task_soft_time_limit <= 15 * 60
+
+
+class TestTheWordingNeverCostsTheRunItsReminders:
+    """A queueing run has ten minutes and drafts one message per reminder.
+
+    Each draft is a blocking HTTP call that can take the OpenRouter timeout
+    twice — the model, then the fallback. A firm's filings cluster on one
+    offset day, because every GST client is due on the 20th, so a run drafts
+    as many messages as the firm has clients rather than a handful.
+
+    Nothing bounded that, and the run is a single transaction, so a firm large
+    enough had the task killed at the soft limit and every reminder it had
+    already built rolled back. No rows, no error the firm would ever see, and
+    ``days_left in offsets`` matches one day exactly — so that reminder was not
+    late, it was never sent.
+    """
+
+    def _firm_with_clients(self, db, count: int):
+        firm = make_firm(db)
+        ctype = get_type(db, "GSTR3B_MONTHLY")
+        due = RUN_DATE + timedelta(days=ctype.reminder_offsets_days[0])
+        for index in range(count):
+            person = make_client(
+                db, firm, name=f"Client {index}", email=f"c{index}@nimbus.in"
+            )
+            make_item(
+                db, firm, person, ctype, due_date=due, period_label=f"2026-{index:02d}"
+            )
+        db.commit()
+        return firm
+
+    @pytest.fixture
+    def refuse_every_model_call(self, monkeypatch):
+        """A configured key, and a transport that fails the test if dialled."""
+        monkeypatch.setattr(ai.settings, "openrouter_api_key", "sk-or-test")
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("the run reached for the model past its allowance")
+
+        monkeypatch.setattr(ai.httpx, "post", forbidden)
+
+    def test_an_exhausted_allowance_still_queues_every_reminder(
+        self, db, monkeypatch, no_llm, refuse_every_model_call
+    ):
+        # The real drafting, not the module stub, so the allowance is what
+        # decides — otherwise this would pass with no budget at all.
+        monkeypatch.setattr(tasks, "draft_client_message", ai.draft_client_message)
+        monkeypatch.setattr(ai.settings, "ai_draft_budget_seconds", 0)
+        self._firm_with_clients(db, 5)
+
+        result = tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat())
+
+        assert result["queued"] == 5
+        db.rollback()
+        queued = db.scalars(select(Reminder)).all()
+        assert len(queued) == 5
+        # Plainly worded, and still carrying what the client has to act on.
+        for reminder in queued:
+            assert reminder.body.startswith("Dear Client")
+            assert "GSTR-3B" in reminder.subject
+
+    def test_the_document_chase_is_bounded_the_same_way(
+        self, db, monkeypatch, refuse_every_model_call
+    ):
+        monkeypatch.setattr(ai.settings, "ai_draft_budget_seconds", 0)
+        firm = make_firm(db)
+        ctype = get_type(db, "GSTR3B_MONTHLY")
+        for index in range(3):
+            person = make_client(
+                db, firm, name=f"Client {index}", email=f"d{index}@nimbus.in"
+            )
+            make_item(
+                db,
+                firm,
+                person,
+                ctype,
+                due_date=RUN_DATE + timedelta(days=max(settings.document_reminder_offsets)),
+                period_label=f"2026-{index:02d}",
+            )
+        db.commit()
+
+        result = tasks.queue_document_reminders_task(today=RUN_DATE.isoformat())
+
+        assert result["queued"] == 3
+
+    def test_the_payment_chase_is_bounded_the_same_way(
+        self, db, monkeypatch, refuse_every_model_call
+    ):
+        monkeypatch.setattr(ai.settings, "ai_draft_budget_seconds", 0)
+        firm = make_firm(db)
+        person = make_client(db, firm)
+        db.add(
+            Invoice(
+                firm_id=firm.id,
+                client_id=person.id,
+                invoice_number="INV/FY2026-27/0001",
+                issue_date=RUN_DATE - timedelta(days=30),
+                due_date=RUN_DATE,
+                subtotal_paise=100_000,
+                tax_paise=18_000,
+                total_paise=118_000,
+                status=InvoiceStatus.SENT,
+            )
+        )
+        db.commit()
+
+        result = tasks.queue_payment_reminders_task(today=RUN_DATE.isoformat())
+
+        assert result["queued"] == 1
+
+    def test_the_run_reports_how_the_allowance_went(
+        self, db, monkeypatch, no_llm, refuse_every_model_call, caplog
+    ):
+        """The log line is the only place the change in wording is visible.
+
+        Falling back is not a failure and must not read as one, but a run that
+        drafted nothing itself is worth being able to see — it is the symptom
+        of a provider that has stopped answering.
+        """
+        monkeypatch.setattr(tasks, "draft_client_message", ai.draft_client_message)
+        monkeypatch.setattr(ai.settings, "ai_draft_budget_seconds", 0)
+        self._firm_with_clients(db, 2)
+
+        with caplog.at_level(logging.INFO, logger="app.worker.tasks"):
+            tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat())
+
+        assert "0 message(s) drafted by the model, 2 from the template" in caplog.text
 
 
 # -------------------------------------------------------- generation & overdue --

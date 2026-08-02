@@ -27,7 +27,7 @@ from app.models.base import ReminderChannel, ReminderStatus, ReminderType
 from app.models.client import Client
 from app.models.reminder import Reminder
 from app.services import billing, documents, firms
-from app.services.ai import draft_client_message
+from app.services.ai import DraftingBudget, draft_client_message
 
 # Reminders go out at 09:00 IST on their offset day.
 REMINDER_HOUR_IST = 9
@@ -100,14 +100,21 @@ def queue_document_reminders(
     firm_id: uuid.UUID | None = None,
     today: date | None = None,
     offsets: list[int] | None = None,
+    budget: DraftingBudget | None = None,
 ) -> list[Reminder]:
     """Chase clients for the documents their upcoming filings still need.
 
     Unlike a filing reminder, this only fires when something is genuinely
     outstanding — a client who has already uploaded everything is left alone.
+
+    ``budget`` caps how long the whole sweep may spend on model-drafted
+    wording; see :class:`~app.services.ai.DraftingBudget`. One is made here
+    when the caller supplies none, so that reaching this directly cannot leave
+    the drafting unbounded by accident.
     """
     run_date = today or date.today()
     offsets = offsets if offsets is not None else settings.document_reminder_offsets
+    budget = budget if budget is not None else DraftingBudget()
     if not offsets:
         return []
 
@@ -153,6 +160,7 @@ def queue_document_reminders(
                     "documents": missing_labels,
                 },
                 channel=channel.value,
+                budget=budget,
             )
             reminder = Reminder(
                 firm_id=item.firm_id,
@@ -191,10 +199,16 @@ def queue_payment_reminders(
     firm_id: uuid.UUID | None = None,
     today: date | None = None,
     offsets: list[int] | None = None,
+    budget: DraftingBudget | None = None,
 ) -> list[Reminder]:
-    """Chase unpaid invoices at 0/7/15/30 days past the due date."""
+    """Chase unpaid invoices at 0/7/15/30 days past the due date.
+
+    ``budget`` bounds the model-drafted wording across the sweep, for the same
+    reason it does above.
+    """
     run_date = today or date.today()
     offsets = offsets if offsets is not None else settings.payment_reminder_offsets
+    budget = budget if budget is not None else DraftingBudget()
     if not offsets:
         return []
 
@@ -231,6 +245,7 @@ def queue_payment_reminders(
                 "days_overdue": days_overdue,
             },
             channel=channel.value,
+            budget=budget,
         )
         reminder = Reminder(
             firm_id=invoice.firm_id,

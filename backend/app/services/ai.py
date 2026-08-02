@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -267,6 +268,56 @@ DRAFT_SYSTEM = (
 )
 
 
+class DraftingBudget:
+    """A wall-clock allowance for model-drafted wording across one batch job.
+
+    The nightly queueing runs draft one message per reminder, over a blocking
+    HTTP call that can take the full ``openrouter_timeout_seconds`` twice —
+    once for the model and once for the fallback. A firm's filings cluster on
+    the same offset day (every GST client is due on the 20th), so a run drafts
+    as many messages as the firm has clients, not a handful.
+
+    Celery gives the task ten minutes. Nothing bounded the drafting against
+    that, and the whole run is one transaction, so a firm large enough to
+    exceed the limit had the task killed and *every* reminder it had built
+    thrown away — no rows, no error a firm would ever see, and the offset day
+    gone. ``days_left in offsets`` matches one day exactly, so the reminder for
+    that offset is not queued late; it is not queued at all.
+
+    So the wording gets an allowance and the reminder does not. Once the
+    allowance is spent the rest of the run uses the deterministic template,
+    which says the same things in plainer words. Checked before each call
+    rather than interrupting one in flight: the overrun is then at most one
+    request, and a message half-received is not a message.
+    """
+
+    def __init__(self, seconds: float | None = None) -> None:
+        self.seconds = settings.ai_draft_budget_seconds if seconds is None else seconds
+        self._started = time.monotonic()
+        self.drafted = 0
+        self.templated = 0
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self._started
+
+    @property
+    def exhausted(self) -> bool:
+        return self.elapsed >= self.seconds
+
+    def _record(self, *, drafted: bool) -> None:
+        if drafted:
+            self.drafted += 1
+        else:
+            self.templated += 1
+
+    def summary(self) -> str:
+        return (
+            f"{self.drafted} message(s) drafted by the model, "
+            f"{self.templated} from the template, in {self.elapsed:.1f}s"
+        )
+
+
 def draft_client_message(
     *,
     purpose: str,
@@ -274,10 +325,19 @@ def draft_client_message(
     context: dict[str, Any],
     channel: str = "email",
     llm: OpenRouterClient | None = None,
+    budget: DraftingBudget | None = None,
 ) -> str:
-    """Draft a reminder/confirmation message. Falls back to a template offline."""
+    """Draft a reminder/confirmation message. Falls back to a template offline.
+
+    ``budget`` bounds how long a batch of these may spend on the model in
+    total; see :class:`DraftingBudget`. Interactive callers drafting a single
+    message pass none, because there is nothing to run out of.
+    """
     llm = llm or OpenRouterClient()
     if not llm.enabled:
+        return _template_message(purpose, client_name, context)
+    if budget is not None and budget.exhausted:
+        budget._record(drafted=False)
         return _template_message(purpose, client_name, context)
 
     details = "\n".join(f"- {key}: {value}" for key, value in context.items())
@@ -288,10 +348,18 @@ def draft_client_message(
         "Keep it under 120 words. Return only the message body."
     )
     try:
-        return llm.complete(DRAFT_SYSTEM, prompt, max_tokens=400).strip()
+        message = llm.complete(DRAFT_SYSTEM, prompt, max_tokens=400).strip()
     except OpenRouterError as exc:
         logger.info("Falling back to template message: %s", exc)
+        if budget is not None:
+            # Counted against the run either way: the time was spent whether or
+            # not the model answered, and a provider that is timing out is
+            # exactly when the allowance has to stop the run reaching for it.
+            budget._record(drafted=False)
         return _template_message(purpose, client_name, context)
+    if budget is not None:
+        budget._record(drafted=True)
+    return message
 
 
 def _template_message(purpose: str, client_name: str, context: dict[str, Any]) -> str:

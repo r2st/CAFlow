@@ -24,7 +24,7 @@ from app.models.reminder import Reminder
 from app.services import billing, delivery, mailer
 from app.services import reminders as reminder_service
 from app.services import tasks as task_service
-from app.services.ai import draft_client_message
+from app.services.ai import DraftingBudget, draft_client_message
 from app.services.compliance_generator import regenerate_for_firm
 from app.services.reminders import IST_OFFSET, REMINDER_HOUR_IST
 from app.services.reminders import ist_morning as _ist_morning
@@ -70,6 +70,10 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
     """
     run_date = date.fromisoformat(today) if today else date.today()
     queued = 0
+    # One blocking model call per reminder, and this task has ten minutes. See
+    # DraftingBudget: past the allowance the wording comes from the template so
+    # that the run finishes and the reminders exist.
+    budget = DraftingBudget()
 
     with SessionLocal() as db:
         items = db.scalars(
@@ -118,6 +122,7 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
                     "due_date": item.due_date.isoformat(),
                     "documents": item.compliance_type.required_documents,
                 },
+                budget=budget,
             )
             db.add(
                 Reminder(
@@ -140,7 +145,7 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
             queued += 1
         db.commit()
 
-    logger.info("Queued %s reminder(s) for %s", queued, run_date)
+    logger.info("Queued %s reminder(s) for %s — %s", queued, run_date, budget.summary())
     return {"queued": queued}
 
 
@@ -358,11 +363,17 @@ def queue_document_reminders_task(today: str | None = None) -> dict[str, int]:
     already uploaded everything hears nothing.
     """
     run_date = date.fromisoformat(today) if today else date.today()
+    budget = DraftingBudget()
     with SessionLocal() as db:
-        queued = reminder_service.queue_document_reminders(db, today=run_date)
+        queued = reminder_service.queue_document_reminders(db, today=run_date, budget=budget)
         count = len(queued)
         db.commit()
-    logger.info("Queued %s document-collection reminder(s) for %s", count, run_date)
+    logger.info(
+        "Queued %s document-collection reminder(s) for %s — %s",
+        count,
+        run_date,
+        budget.summary(),
+    )
     return {"queued": count}
 
 
@@ -370,11 +381,14 @@ def queue_document_reminders_task(today: str | None = None) -> dict[str, int]:
 def queue_payment_reminders_task(today: str | None = None) -> dict[str, int]:
     """Chase unpaid invoices at each configured day past the due date."""
     run_date = date.fromisoformat(today) if today else date.today()
+    budget = DraftingBudget()
     with SessionLocal() as db:
-        queued = reminder_service.queue_payment_reminders(db, today=run_date)
+        queued = reminder_service.queue_payment_reminders(db, today=run_date, budget=budget)
         count = len(queued)
         db.commit()
-    logger.info("Queued %s payment reminder(s) for %s", count, run_date)
+    logger.info(
+        "Queued %s payment reminder(s) for %s — %s", count, run_date, budget.summary()
+    )
     return {"queued": count}
 
 

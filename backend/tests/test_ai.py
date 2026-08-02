@@ -537,3 +537,138 @@ class TestDraftClientMessage:
 
         assert "INV-0042" in message
         assert message.startswith("Dear Ravi Traders,")
+
+
+# ------------------------------------------------------------ drafting budget --
+
+
+class TestDraftingBudgetKeepsABatchInsideItsTimeLimit:
+    """A nightly run has ten minutes; the wording must not be what spends them.
+
+    Each reminder is drafted over a blocking HTTP call that can take the full
+    OpenRouter timeout twice — model, then fallback. A firm's filings cluster
+    on one offset day, so the run drafts as many messages as the firm has
+    clients. Nothing bounded that against Celery's limit, and the run is one
+    transaction: a firm large enough had the task killed and every reminder it
+    had built discarded. Nothing was queued, nothing was logged as failing, and
+    ``days_left in offsets`` matches a single day, so that reminder never went
+    out at all.
+    """
+
+    def test_wording_stops_at_the_allowance_and_the_message_still_arrives(
+        self, capture_posts
+    ):
+        calls, queue = capture_posts
+        queue.append(_StubResponse(_content("Kindly share the invoices.")))
+        budget = ai.DraftingBudget(seconds=0)
+
+        message = draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={"invoice_number": "INV-0042", "amount_inr": "25,000"},
+            llm=OpenRouterClient(api_key="sk-or-test"),
+            budget=budget,
+        )
+
+        # The model was never dialled...
+        assert calls == []
+        # ...and the client is still told what they owe and on which invoice.
+        assert "INV-0042" in message
+        assert "25,000" in message
+        assert budget.templated == 1
+        assert budget.drafted == 0
+
+    def test_an_allowance_with_time_left_still_uses_the_model(self, capture_posts):
+        calls, queue = capture_posts
+        queue.append(_StubResponse(_content("Kindly share the invoices.")))
+        budget = ai.DraftingBudget(seconds=600)
+
+        message = draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={"invoice_number": "INV-0042"},
+            llm=OpenRouterClient(api_key="sk-or-test"),
+            budget=budget,
+        )
+
+        assert message == "Kindly share the invoices."
+        assert len(calls) == 1
+        assert budget.drafted == 1
+
+    def test_the_time_a_failing_provider_burns_counts_against_the_run(
+        self, capture_posts
+    ):
+        """A provider that is timing out is when this matters most.
+
+        The fallback to the template already made a dead model harmless per
+        message. It is per *run* that it was not: two timed-out requests per
+        reminder is the slowest the drafting ever gets, which is exactly when
+        the allowance has to stop the run reaching for it again.
+        """
+        _, queue = capture_posts
+        queue.extend([httpx.ConnectError("down"), httpx.ConnectError("down")])
+        budget = ai.DraftingBudget(seconds=600)
+
+        draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={"invoice_number": "INV-0042"},
+            llm=OpenRouterClient(api_key="sk-or-test"),
+            budget=budget,
+        )
+
+        assert budget.templated == 1
+        assert budget.drafted == 0
+
+    def test_a_caller_with_no_allowance_is_unchanged(self, capture_posts):
+        """Interactive drafting of one message has nothing to run out of."""
+        calls, queue = capture_posts
+        queue.append(_StubResponse(_content("Kindly share the invoices.")))
+
+        message = draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={"invoice_number": "INV-0042"},
+            llm=OpenRouterClient(api_key="sk-or-test"),
+        )
+
+        assert message == "Kindly share the invoices."
+        assert len(calls) == 1
+
+    def test_an_unconfigured_key_never_consults_the_allowance(self):
+        """No key means the template regardless, and no clock to read."""
+        budget = ai.DraftingBudget(seconds=0)
+        message = draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={"invoice_number": "INV-0042"},
+            llm=OpenRouterClient(api_key=""),
+            budget=budget,
+        )
+        assert "INV-0042" in message
+        assert budget.templated == 0
+
+    def test_the_default_allowance_sits_well_inside_the_task_time_limit(self):
+        """The number only helps if it is smaller than the limit it guards.
+
+        Celery kills the queueing tasks at ten minutes. An allowance at or
+        above that would be a setting that reads like a guard and is not one.
+        """
+        from app.worker.celery_app import TASK_SOFT_TIME_LIMIT_SECONDS
+
+        budget = ai.DraftingBudget()
+        assert 0 < budget.seconds < TASK_SOFT_TIME_LIMIT_SECONDS
+        # And with room left for one request already in flight when it runs out,
+        # plus the database work the run still has to finish.
+        from app.config import settings
+
+        overrun = budget.seconds + 2 * settings.openrouter_timeout_seconds
+        assert overrun < TASK_SOFT_TIME_LIMIT_SECONDS
+
+    def test_the_summary_says_how_the_run_actually_went(self):
+        budget = ai.DraftingBudget(seconds=600)
+        budget._record(drafted=True)
+        budget._record(drafted=False)
+        summary = budget.summary()
+        assert "1 message(s) drafted by the model" in summary
+        assert "1 from the template" in summary
