@@ -79,6 +79,83 @@ class TestApplicabilityRules:
     def test_unknown_rule_is_not_applicable(self):
         assert not applies_to("no_such_rule", make_model_client())
 
+    def test_income_tax_audit_needs_both_flags(self):
+        """Not just the audit flag, which on its own says nothing about a return.
+
+        The two income-tax rules split one population in two, and the pair only
+        adds up if each turns on both flags. Reading `income_tax_audit` as
+        "audited *or* liable" hands the audit-season ITR — a 35,000 fee and a
+        different deadline — to every ordinary client the firm has.
+        """
+        liable_not_audited = make_model_client()
+        not_liable = make_model_client(income_tax_applicable=False, tax_audit_applicable=True)
+
+        assert not applies_to("income_tax_audit", liable_not_audited)
+        assert not applies_to("income_tax_audit", not_liable)
+        assert not applies_to("income_tax_non_audit", not_liable)
+
+
+class TestAdvanceTaxApplicability:
+    """Sec 211 instalments: who owes them, and who the code excuses.
+
+    Advance tax is the one rule with a shape of its own — a gate on income-tax
+    liability, then an exemption that an audit overrides — and none of it was
+    covered. The predicate survived being inverted at the gate, at the
+    exemption, and at the join, so each of those is checked here on its own.
+
+    It matters in both directions. Not generating the instalment leaves a
+    client to find out at assessment, with 234B/234C interest running from
+    April. Generating it for an exempt individual puts four deadlines and four
+    fees on a return that never owed them.
+    """
+
+    def test_a_company_owes_instalments(self):
+        company = make_model_client(entity_type=EntityType.PRIVATE_LIMITED)
+        assert applies_to("advance_tax", company)
+
+    def test_an_individual_without_a_tax_audit_is_exempt(self):
+        assert not applies_to("advance_tax", make_model_client())
+        assert not applies_to("advance_tax", make_model_client(entity_type=EntityType.HUF))
+
+    def test_a_tax_audit_overrides_the_exemption(self):
+        # An individual carrying on business past the audit threshold is back
+        # in: the exemption is for the salaried case, not for the entity type.
+        audited = make_model_client(tax_audit_applicable=True)
+        assert applies_to("advance_tax", audited)
+
+    def test_nothing_is_owed_where_income_tax_does_not_apply(self):
+        # The gate comes first. A client the firm does not file a return for
+        # owes no instalments against it, whatever else is flagged.
+        exempt_company = make_model_client(
+            entity_type=EntityType.PRIVATE_LIMITED, income_tax_applicable=False
+        )
+        assert not applies_to("advance_tax", exempt_company)
+
+
+class TestFixedApplicabilityRules:
+    """``always`` and ``never``, which no seeded type uses but a firm can.
+
+    They are in the table for firm-defined compliance types, which is exactly
+    why they go untested by anything that only exercises the seeds — and why
+    both survived being swapped for their opposite. A firm's own quarterly
+    review attached to `always` would silently apply to nobody.
+    """
+
+    def test_always_applies_to_a_client_that_qualifies_for_nothing_else(self):
+        bare = make_model_client(income_tax_applicable=False)
+        assert applies_to("always", bare) is True
+
+    def test_never_applies_to_a_client_that_qualifies_for_everything(self):
+        qualifies_for_everything = make_model_client(
+            entity_type=EntityType.PRIVATE_LIMITED,
+            gst_registered=True,
+            tds_applicable=True,
+            tax_audit_applicable=True,
+            roc_applicable=True,
+            payroll_applicable=True,
+        )
+        assert applies_to("never", qualifies_for_everything) is False
+
 
 class TestClientCreation:
     def test_create_returns_client_and_item_count(self, client: TestClient, auth_headers: dict):
