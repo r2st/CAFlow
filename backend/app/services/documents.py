@@ -26,16 +26,28 @@ from app.services.ai import categorise_document, regex_extract
 
 OPEN_STATUSES = (ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS)
 
-# Human labels for requirement keys that have no DocumentCategory of their own.
-EXTRA_REQUIREMENT_LABELS = {
+# Requirement keys are snake_case, but these labels are read by the client —
+# in the portal checklist and in the document-request emails. Naively
+# capitalising a key turns every statutory acronym into "Tds challan" or "Gst
+# return", so the ones a CA's client would recognise are spelled out here.
+REQUIREMENT_LABELS = {
+    "ais_tis": "AIS / TIS",
     "credit_debit_notes": "Credit / debit notes",
     "export_invoices": "Export invoices",
+    "form_16": "Form 16",
+    "form_26as": "Form 26AS",
+    "gst_return": "GST return",
+    "incorporation_doc": "Incorporation document",
+    "pan_card": "PAN card",
+    "profit_and_loss": "Profit & loss",
+    "tds_challan": "TDS challan",
 }
 
 
 def requirement_label(requirement: str) -> str:
-    if requirement in EXTRA_REQUIREMENT_LABELS:
-        return EXTRA_REQUIREMENT_LABELS[requirement]
+    """A label to show a client. Unknown keys degrade to readable title case."""
+    if requirement in REQUIREMENT_LABELS:
+        return REQUIREMENT_LABELS[requirement]
     return requirement.replace("_", " ").capitalize()
 
 

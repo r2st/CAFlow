@@ -326,10 +326,38 @@ class TestRequirementLabels:
             ("form_16", "Form 16"),
             ("export_invoices", "Export invoices"),
             ("credit_debit_notes", "Credit / debit notes"),
+            # Statutory acronyms a client would recognise. Capitalising the key
+            # would render these "Tds challan" and "Gst return" — in the portal
+            # checklist and in the document-request email.
+            ("tds_challan", "TDS challan"),
+            ("gst_return", "GST return"),
+            ("form_26as", "Form 26AS"),
+            ("ais_tis", "AIS / TIS"),
+            ("pan_card", "PAN card"),
         ],
     )
     def test_requirements_get_readable_labels(self, requirement, expected):
         assert document_service.requirement_label(requirement) == expected
+
+    def test_every_seeded_requirement_has_a_deliberate_label(self):
+        """No statutory requirement should reach a client as a mangled key."""
+        from app.seeds.compliance_types import COMPLIANCE_TYPE_SEEDS
+
+        seeded = {
+            requirement
+            for seed in COMPLIANCE_TYPE_SEEDS
+            for requirement in seed.get("required_documents", [])
+        }
+        assert seeded
+        mangled = {
+            requirement
+            for requirement in seeded
+            # A key of two or three letters before the first underscore is an
+            # acronym (tds, gst, ais); title case would be wrong for all of them.
+            if len(requirement.split("_")[0]) <= 3
+            and requirement not in document_service.REQUIREMENT_LABELS
+        }
+        assert mangled == set(), f"needs a spelled-out label: {sorted(mangled)}"
 
     def test_category_requirements_are_recognised(self):
         assert document_service.is_category_requirement("bank_statement") is True
