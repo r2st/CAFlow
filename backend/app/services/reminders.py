@@ -126,6 +126,7 @@ def queue_document_reminders(
 
     queued: list[Reminder] = []
     for current_firm_id in firm_ids:
+        firm_name = firms.name_of(db, current_firm_id)
         outstanding = documents.items_awaiting_documents(
             db, current_firm_id, from_date=run_date, to_date=horizon
         )
@@ -160,6 +161,7 @@ def queue_document_reminders(
                     "documents": missing_labels,
                 },
                 channel=channel.value,
+                firm_name=firm_name,
                 budget=budget,
             )
             reminder = Reminder(
@@ -213,6 +215,9 @@ def queue_payment_reminders(
         return []
 
     servable = firms.servable_firm_ids(db, firm_id)
+    # One list can span firms, and every message is signed by the one that
+    # raised the invoice.
+    firm_names: dict[uuid.UUID, str | None] = {}
     queued: list[Reminder] = []
     for invoice in billing.unpaid_invoices(db, firm_id, today=run_date):
         # A switched-off firm's debts are still owed; chasing them in its name
@@ -234,6 +239,9 @@ def queue_payment_reminders(
         if already_queued(existing, "payment", days_overdue):
             continue
 
+        if invoice.firm_id not in firm_names:
+            firm_names[invoice.firm_id] = firms.name_of(db, invoice.firm_id)
+
         channel = preferred_channel(client)
         body = draft_client_message(
             purpose="fee_reminder",
@@ -245,6 +253,7 @@ def queue_payment_reminders(
                 "days_overdue": days_overdue,
             },
             channel=channel.value,
+            firm_name=firm_names[invoice.firm_id],
             budget=budget,
         )
         reminder = Reminder(

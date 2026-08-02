@@ -672,3 +672,94 @@ class TestDraftingBudgetKeepsABatchInsideItsTimeLimit:
         summary = budget.summary()
         assert "1 message(s) drafted by the model" in summary
         assert "1 from the template" in summary
+
+
+class TestTheTemplateSaysTheRightThing:
+    """The deterministic wording is the ordinary path, not the exceptional one.
+
+    ``OPENROUTER_API_KEY`` is empty by default, so a deployment that has not
+    configured a model sends exactly this to every client, every time.
+    """
+
+    def _draft(self, purpose: str, context: dict, firm_name: str | None = None) -> str:
+        return draft_client_message(
+            purpose=purpose,
+            client_name="Ravi Traders",
+            context=context,
+            firm_name=firm_name,
+            llm=OpenRouterClient(api_key=""),
+        )
+
+    def test_a_fee_reminder_asks_for_payment_not_for_documents(self):
+        message = self._draft("fee_reminder", {"invoice_number": "INV-0042"})
+
+        assert "Please arrange payment" in message
+        # The document chase's closing, which used to end all four.
+        assert "share them" not in message
+
+    def test_a_filing_confirmation_does_not_then_ask_for_documents(self):
+        message = self._draft(
+            "filing_confirmation", {"compliance": "GSTR-1", "period": "2026-07"}
+        )
+
+        assert "filed successfully" in message
+        assert "No action is needed" in message
+        assert "share them" not in message
+
+    def test_a_document_request_still_asks_for_the_documents(self):
+        message = self._draft(
+            "document_request", {"compliance": "GSTR-3B", "documents": ["Bank statement"]}
+        )
+
+        assert "Please share them at your earliest convenience." in message
+
+    def test_a_deadline_reminder_offers_help_rather_than_asking_for_files(self):
+        message = self._draft("something_else", {"compliance": "TDS 26Q"})
+
+        assert "share them" not in message
+        assert "let us know" in message
+
+    @pytest.mark.parametrize(
+        "purpose", ["document_request", "fee_reminder", "filing_confirmation", "anything"]
+    )
+    def test_the_firm_signs_its_own_messages(self, purpose: str):
+        message = self._draft(purpose, {}, firm_name="Sharma & Associates")
+
+        assert message.endswith("Regards,\nSharma & Associates")
+        # The client is the CA's client and has never heard of the product.
+        assert "CAFlow" not in message
+
+    def test_without_a_firm_it_signs_generically_rather_than_as_the_product(self):
+        message = self._draft("fee_reminder", {})
+
+        assert message.endswith("Regards,\nYour Chartered Accountant")
+        assert "CAFlow" not in message
+
+    def test_the_model_is_told_who_it_is_writing_for(self, capture_posts):
+        calls, queue = capture_posts
+        queue.append(_StubResponse(_content("Dear Sir, kindly settle the invoice.")))
+
+        draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={"invoice_number": "INV-0042"},
+            firm_name="Sharma & Associates",
+            llm=OpenRouterClient(api_key="sk-or-test"),
+        )
+
+        prompt = calls[0]["json"]["messages"][1]["content"]
+        assert "Sharma & Associates" in prompt
+
+    def test_a_model_failure_falls_back_to_the_firms_own_signature(self, capture_posts):
+        _, queue = capture_posts
+        queue.extend([httpx.ConnectError("down"), httpx.ConnectError("down")])
+
+        message = draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={"invoice_number": "INV-0042"},
+            firm_name="Sharma & Associates",
+            llm=OpenRouterClient(api_key="sk-or-test"),
+        )
+
+        assert message.endswith("Regards,\nSharma & Associates")

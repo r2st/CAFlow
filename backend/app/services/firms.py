@@ -83,6 +83,16 @@ def servable_firm_ids(db: Session, firm_id: uuid.UUID | None = None) -> set[uuid
     return set(db.scalars(stmt).all())
 
 
+def name_of(db: Session, firm_id: uuid.UUID) -> str | None:
+    """The firm's name, for signing a message sent on its behalf.
+
+    A column read rather than the whole row: the background sweeps want the
+    name and nothing else, and loading the firm to get it would put a row in
+    the identity map that the dispatcher's own cache then has to reason about.
+    """
+    return db.scalar(select(Firm.name).where(Firm.id == firm_id))
+
+
 def active_client_count(db: Session, firm_id: uuid.UUID) -> int:
     return (
         db.scalar(

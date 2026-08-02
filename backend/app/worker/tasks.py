@@ -22,6 +22,7 @@ from app.models.compliance import ComplianceItem
 from app.models.firm import Firm
 from app.models.reminder import Reminder
 from app.services import billing, delivery, mailer
+from app.services import firms as firm_service  # `firms` is a local name below
 from app.services import reminders as reminder_service
 from app.services import tasks as task_service
 from app.services.ai import DraftingBudget, draft_client_message
@@ -74,6 +75,9 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
     # DraftingBudget: past the allowance the wording comes from the template so
     # that the run finishes and the reminders exist.
     budget = DraftingBudget()
+    # This sweeps every tenant at once, and each message is signed by the firm
+    # whose client is being written to.
+    firm_names: dict[uuid.UUID, str | None] = {}
 
     with SessionLocal() as db:
         items = db.scalars(
@@ -113,6 +117,9 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
             if reminder_service.already_queued(existing, "filing", days_left):
                 continue
 
+            if item.firm_id not in firm_names:
+                firm_names[item.firm_id] = firm_service.name_of(db, item.firm_id)
+
             body = draft_client_message(
                 purpose="document_request",
                 client_name=client.name,
@@ -122,6 +129,7 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
                     "due_date": item.due_date.isoformat(),
                     "documents": item.compliance_type.required_documents,
                 },
+                firm_name=firm_names[item.firm_id],
                 budget=budget,
             )
             db.add(

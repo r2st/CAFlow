@@ -25,7 +25,7 @@ from app.schemas.reminder import (
     ReminderQueueRequest,
     ReminderQueueResponse,
 )
-from app.services import audit
+from app.services import audit, firms
 from app.services import documents as document_service
 from app.services import reminders as reminder_service
 from app.services.ai import draft_client_message
@@ -106,6 +106,7 @@ def draft_reminder(
         client_name=client.name,
         context=context,
         channel=channel.value,
+        firm_name=firms.name_of(db, practitioner.firm_id),
     )
     return ReminderDraftOut(
         subject=subject,

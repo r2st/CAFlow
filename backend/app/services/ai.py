@@ -324,10 +324,15 @@ def draft_client_message(
     client_name: str,
     context: dict[str, Any],
     channel: str = "email",
+    firm_name: str | None = None,
     llm: OpenRouterClient | None = None,
     budget: DraftingBudget | None = None,
 ) -> str:
     """Draft a reminder/confirmation message. Falls back to a template offline.
+
+    ``firm_name`` is who the message is from. The client is the CA's client,
+    not ours — they are hearing from their accountant, and the mail already
+    carries the firm's sender name and reply-to, so the body has to agree.
 
     ``budget`` bounds how long a batch of these may spend on the model in
     total; see :class:`DraftingBudget`. Interactive callers drafting a single
@@ -335,17 +340,19 @@ def draft_client_message(
     """
     llm = llm or OpenRouterClient()
     if not llm.enabled:
-        return _template_message(purpose, client_name, context)
+        return _template_message(purpose, client_name, context, firm_name)
     if budget is not None and budget.exhausted:
         budget._record(drafted=False)
-        return _template_message(purpose, client_name, context)
+        return _template_message(purpose, client_name, context, firm_name)
 
+    sender = firm_name or DEFAULT_SIGNATORY
     details = "\n".join(f"- {key}: {value}" for key, value in context.items())
     prompt = (
-        f"Draft a {channel} message to {client_name}.\n"
+        f"Draft a {channel} message to {client_name}, from {sender}.\n"
         f"Purpose: {purpose}\n"
         f"Details:\n{details}\n\n"
-        "Keep it under 120 words. Return only the message body."
+        f"Sign off as {sender}. Keep it under 120 words. "
+        "Return only the message body."
     )
     try:
         message = llm.complete(DRAFT_SYSTEM, prompt, max_tokens=400).strip()
@@ -356,13 +363,35 @@ def draft_client_message(
             # not the model answered, and a provider that is timing out is
             # exactly when the allowance has to stop the run reaching for it.
             budget._record(drafted=False)
-        return _template_message(purpose, client_name, context)
+        return _template_message(purpose, client_name, context, firm_name)
     if budget is not None:
         budget._record(drafted=True)
     return message
 
 
-def _template_message(purpose: str, client_name: str, context: dict[str, Any]) -> str:
+# The signature on a message with no firm behind it. Never the product name:
+# this is a message from a CA to their own client, delivered under the firm's
+# sender name and reply-to, and a client has no idea what CAFlow is.
+DEFAULT_SIGNATORY = "Your Chartered Accountant"
+
+
+def _template_message(
+    purpose: str,
+    client_name: str,
+    context: dict[str, Any],
+    firm_name: str | None = None,
+) -> str:
+    """The deterministic wording, used whenever the model is unavailable.
+
+    Which is the ordinary case, not the exceptional one: ``OPENROUTER_API_KEY``
+    is empty by default, so a deployment that has not configured a model sends
+    exactly this to every client, every time.
+
+    The closing line is per purpose. One line closed all four, and it was the
+    document chase's — so a fee reminder asked the client to "share them", and
+    a confirmation that their return had been filed successfully asked them to
+    send documents for it anyway.
+    """
     lines = [f"Dear {client_name},", ""]
     match purpose:
         case "document_request":
@@ -373,6 +402,7 @@ def _template_message(purpose: str, client_name: str, context: dict[str, Any]) -
             if documents := context.get("documents"):
                 lines.append("")
                 lines.extend(f"  • {doc}" for doc in documents)
+            closing = "Please share them at your earliest convenience."
         case "filing_confirmation":
             lines.append(
                 f"Your {context.get('compliance', 'return')} for"
@@ -380,15 +410,18 @@ def _template_message(purpose: str, client_name: str, context: dict[str, Any]) -
             )
             if ack := context.get("acknowledgement_number"):
                 lines.append(f"Acknowledgement number: {ack}")
+            closing = "No action is needed from you on this filing."
         case "fee_reminder":
             lines.append(
                 f"This is a gentle reminder about invoice {context.get('invoice_number', '')}"
                 f" for ₹{context.get('amount_inr', '—')}, which is now due."
             )
+            closing = "Please arrange payment at your earliest convenience."
         case _:
             lines.append(
                 f"This is a reminder regarding {context.get('compliance', 'your compliance')}"
                 f" due on {context.get('due_date', 'the upcoming deadline')}."
             )
-    lines += ["", "Please share them at your earliest convenience.", "", "Regards,", "CAFlow"]
+            closing = "Please let us know if you need anything from us to meet it."
+    lines += ["", closing, "", "Regards,", firm_name or DEFAULT_SIGNATORY]
     return "\n".join(lines)
