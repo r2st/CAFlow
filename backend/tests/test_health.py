@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import sys
+import types
+
 from fastapi.testclient import TestClient
 
 from app import __version__
 from app.api.routes import health as health_route
+from app.config import settings
 
 
 class TestHealth:
@@ -60,3 +64,78 @@ class TestReadiness:
     def test_it_exposes_pool_gauges(self, client: TestClient):
         pool = client.get("/health/ready").json()["checks"]["database"]["pool"]
         assert "kind" in pool
+
+
+class FakeRedisClient:
+    def __init__(self, fail: bool = False):
+        self.fail = fail
+        self.closed = False
+
+    def ping(self):
+        if self.fail:
+            raise ConnectionError("Connection refused")
+        return True
+
+    def close(self):
+        self.closed = True
+
+
+def install_fake_redis(monkeypatch, client: FakeRedisClient) -> dict:
+    """Stand in for the redis package, and record how it was called."""
+    calls: dict = {}
+
+    def from_url(url, **kwargs):
+        calls["url"] = url
+        calls["kwargs"] = kwargs
+        return client
+
+    module = types.ModuleType("redis")
+    module.from_url = from_url
+    monkeypatch.setitem(sys.modules, "redis", module)
+    return calls
+
+
+class TestBrokerCheck:
+    def test_a_non_redis_broker_is_reported_reachable_without_dialling(self, monkeypatch):
+        # The suite runs on memory://, and an in-process broker is always there.
+        monkeypatch.setattr(settings, "celery_broker_url", "memory://")
+        monkeypatch.setitem(sys.modules, "redis", None)  # would raise if imported
+        assert health_route._check_broker() == (True, None)
+
+    def test_a_reachable_broker_answers_its_ping(self, monkeypatch):
+        monkeypatch.setattr(settings, "celery_broker_url", "redis://localhost:6379/1")
+        fake = FakeRedisClient()
+        install_fake_redis(monkeypatch, fake)
+
+        assert health_route._check_broker() == (True, None)
+        # The connection must not be left behind on every probe.
+        assert fake.closed is True
+
+    def test_an_unreachable_broker_reports_the_error_type(self, monkeypatch):
+        monkeypatch.setattr(settings, "celery_broker_url", "redis://localhost:6379/1")
+        install_fake_redis(monkeypatch, FakeRedisClient(fail=True))
+
+        ok, error = health_route._check_broker()
+        assert ok is False
+        assert error == "ConnectionError"
+
+    def test_the_probe_is_given_a_short_deadline(self, monkeypatch):
+        # A probe that hangs is worse than one that reports "not reachable".
+        monkeypatch.setattr(settings, "celery_broker_url", "rediss://broker:6379/1")
+        calls = install_fake_redis(monkeypatch, FakeRedisClient())
+
+        health_route._check_broker()
+        assert calls["kwargs"]["socket_connect_timeout"] == health_route.BROKER_TIMEOUT_SECONDS
+        assert calls["kwargs"]["socket_timeout"] == health_route.BROKER_TIMEOUT_SECONDS
+
+    def test_a_missing_redis_package_is_reported_not_reachable(self, monkeypatch):
+        # redis is an optional runtime dependency; its absence must not 500.
+        monkeypatch.setattr(settings, "celery_broker_url", "redis://localhost:6379/1")
+        monkeypatch.setitem(sys.modules, "redis", None)
+
+        ok, error = health_route._check_broker()
+        assert ok is False
+        # Which subclass a blocked import raises is the interpreter's business:
+        # 3.12 says ImportError, 3.14 says ModuleNotFoundError. What readiness
+        # promises is that it reports the failure instead of raising.
+        assert error in {"ImportError", "ModuleNotFoundError"}
