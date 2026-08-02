@@ -8,14 +8,46 @@ import {
   DetailItem,
   ENTITY_TYPE_LABELS,
   EmptyState,
+  INVOICE_STATUS_LABELS,
+  Pill,
   Skeleton,
   SkeletonStats,
   Stat,
+  TASK_STATUS_LABELS,
   formatDate,
+  formatRupees,
+  invoiceTone,
+  taskTone,
 } from '../components/ui'
 
 /** Wide window: a client page should show history as well as what's coming. */
 const WINDOW = { from_date: '2020-01-01', to_date: '2035-12-31' }
+
+/** Enough to see the shape of it; the full list is one link away. */
+const PREVIEW = 5
+
+/**
+ * A side panel summarising one domain for this client, with a link into the
+ * full page filtered to them. Rendered even when empty, because "no unpaid
+ * invoices" is itself worth knowing on a client page.
+ */
+function WorkPanel({ title, to, linkLabel, items, empty, renderItem }) {
+  return (
+    <div className="card work-panel">
+      <div className="card-header">
+        <h2>{title}</h2>
+        <Link to={to} className="small">
+          {linkLabel} →
+        </Link>
+      </div>
+      {items.length === 0 ? (
+        <div className="card-body small muted">{empty}</div>
+      ) : (
+        <ul className="work-list">{items.slice(0, PREVIEW).map(renderItem)}</ul>
+      )}
+    </div>
+  )
+}
 
 export default function ClientDetail() {
   const { clientId } = useParams()
@@ -23,6 +55,9 @@ export default function ClientDetail() {
 
   const [client, setClient] = useState(null)
   const [calendar, setCalendar] = useState(null)
+  const [tasks, setTasks] = useState([])
+  const [documents, setDocuments] = useState([])
+  const [invoices, setInvoices] = useState([])
   const [error, setError] = useState('')
   const [notice, setNotice] = useState(
     location.state?.created
@@ -48,9 +83,23 @@ export default function ClientDetail() {
     }
   }, [clientId])
 
+  // The work panels load separately from the client itself: they are context,
+  // not the record, and none of them should be able to fail the page.
+  const loadWork = useCallback(async () => {
+    const [taskResult, documentResult, invoiceResult] = await Promise.allSettled([
+      api.listTasks({ client_id: clientId, open_only: true, limit: PREVIEW }),
+      api.listDocuments({ client_id: clientId, limit: PREVIEW }),
+      api.listInvoices({ client_id: clientId, unpaid_only: true, limit: PREVIEW }),
+    ])
+    if (taskResult.status === 'fulfilled') setTasks(taskResult.value.items)
+    if (documentResult.status === 'fulfilled') setDocuments(documentResult.value.items)
+    if (invoiceResult.status === 'fulfilled') setInvoices(invoiceResult.value.items)
+  }, [clientId])
+
   useEffect(() => {
     load()
-  }, [load])
+    loadWork()
+  }, [load, loadWork])
 
   async function regenerate() {
     setBusy(true)
@@ -168,6 +217,71 @@ export default function ClientDetail() {
       </div>
 
       <PortalAccessCard clientId={clientId} />
+
+      <div className="work-grid section">
+        <WorkPanel
+          title="Open tasks"
+          to={`/tasks?client_id=${clientId}`}
+          linkLabel="All tasks"
+          items={tasks}
+          empty="Nothing open for this client."
+          renderItem={(task) => (
+            <li key={task.id}>
+              <div className="work-main">
+                <span>{task.title}</span>
+                <span className="small muted">
+                  {task.assignee_name ?? 'Unassigned'}
+                  {task.due_date ? ` · due ${formatDate(task.due_date)}` : ''}
+                </span>
+              </div>
+              <Pill tone={taskTone(task.status, task.is_overdue)}>
+                {TASK_STATUS_LABELS[task.status] ?? task.status}
+              </Pill>
+            </li>
+          )}
+        />
+
+        <WorkPanel
+          title="Recent documents"
+          to={`/documents?client_id=${clientId}`}
+          linkLabel="All documents"
+          items={documents}
+          empty="Nothing received yet."
+          renderItem={(doc) => (
+            <li key={doc.id}>
+              <div className="work-main">
+                <span>{doc.original_filename}</span>
+                <span className="small muted">
+                  {doc.compliance_label ?? 'Unlinked'}
+                  {doc.uploaded_via_portal ? ' · via portal' : ''}
+                </span>
+              </div>
+            </li>
+          )}
+        />
+
+        <WorkPanel
+          title="Unpaid invoices"
+          to={`/billing?client_id=${clientId}`}
+          linkLabel="All invoices"
+          items={invoices}
+          empty="Nothing outstanding."
+          renderItem={(invoice) => (
+            <li key={invoice.id}>
+              <div className="work-main">
+                <span className="mono">{invoice.invoice_number}</span>
+                <span className="small muted">
+                  {formatRupees(invoice.balance_paise)} due
+                  {invoice.due_date ? ` · ${formatDate(invoice.due_date)}` : ''}
+                </span>
+              </div>
+              <Pill tone={invoiceTone(invoice.status)}>
+                {INVOICE_STATUS_LABELS[invoice.status] ?? invoice.status}
+              </Pill>
+            </li>
+          )}
+        />
+      </div>
 
       <div className="card">
         <div className="card-header">

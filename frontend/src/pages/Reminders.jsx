@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import api from '../api/client'
 import {
   Alert,
@@ -165,7 +165,13 @@ export default function Reminders() {
   const [page, setPage] = useState(null)
   const [clients, setClients] = useState([])
   const [pending, setPending] = useState(null)
-  const [filters, setFilters] = useState({ reminder_status: '', reminder_type: '', client_id: '' })
+  // `?client_id=…` lets a client page link straight to that client's log.
+  const [searchParams] = useSearchParams()
+  const [filters, setFilters] = useState({
+    reminder_status: '',
+    reminder_type: '',
+    client_id: searchParams.get('client_id') ?? '',
+  })
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)

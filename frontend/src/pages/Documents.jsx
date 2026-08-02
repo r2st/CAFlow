@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import api from '../api/client'
 import {
   Alert,
@@ -131,7 +131,13 @@ export default function Documents() {
   const [outstanding, setOutstanding] = useState(null)
   const [page, setPage] = useState(null)
   const [clients, setClients] = useState([])
-  const [filters, setFilters] = useState({ client_id: '', category: '', uploaded_via_portal: '' })
+  // `?client_id=…` lets a client page link straight to that client's files.
+  const [searchParams] = useSearchParams()
+  const [filters, setFilters] = useState({
+    client_id: searchParams.get('client_id') ?? '',
+    category: '',
+    uploaded_via_portal: '',
+  })
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(true)
   const [downloadingId, setDownloadingId] = useState(null)
@@ -161,13 +167,15 @@ export default function Documents() {
     loadDocuments()
   }, [loadDocuments])
 
+  // The chase list follows the client filter too, so a deep link from a client
+  // page shows only what that client owes.
   const loadOutstanding = useCallback(async () => {
     try {
-      setOutstanding(await api.outstandingDocuments({}))
+      setOutstanding(await api.outstandingDocuments({ client_id: filters.client_id || undefined }))
     } catch (err) {
       setError(err.message)
     }
-  }, [])
+  }, [filters.client_id])
 
   useEffect(() => {
     loadOutstanding()

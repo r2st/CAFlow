@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import api from '../api/client'
 import {
   Alert,
@@ -145,6 +145,10 @@ export default function Billing() {
   const [revenue, setRevenue] = useState(null)
   const [billable, setBillable] = useState(null)
   const [page, setPage] = useState(null)
+  const [clients, setClients] = useState([])
+  // `?client_id=…` lets a client page link straight to that client's ledger.
+  const [searchParams] = useSearchParams()
+  const [clientFilter, setClientFilter] = useState(searchParams.get('client_id') ?? '')
   const [statusFilter, setStatusFilter] = useState('')
   const [unpaidOnly, setUnpaidOnly] = useState(false)
   const [offset, setOffset] = useState(0)
@@ -156,20 +160,23 @@ export default function Billing() {
 
   const loadInvoices = useCallback(async () => {
     const result = await api.listInvoices({
+      client_id: clientFilter || undefined,
       invoice_status: statusFilter || undefined,
       unpaid_only: unpaidOnly || undefined,
       limit: PAGE_SIZE,
       offset,
     })
     setPage(result)
-  }, [statusFilter, unpaidOnly, offset])
+  }, [clientFilter, statusFilter, unpaidOnly, offset])
 
   const loadAll = useCallback(async () => {
     setLoading(true)
     try {
       const [revenueResult, billableResult] = await Promise.all([
         api.revenue(),
-        api.billableWork(),
+        // The unbilled pile narrows with the ledger, so a deep link from a
+        // client page shows only that client's unbilled work.
+        api.billableWork({ client_id: clientFilter || undefined }),
         loadInvoices(),
       ])
       setRevenue(revenueResult)
@@ -180,11 +187,18 @@ export default function Billing() {
     } finally {
       setLoading(false)
     }
-  }, [loadInvoices])
+  }, [loadInvoices, clientFilter])
 
   useEffect(() => {
     loadAll()
   }, [loadAll])
+
+  useEffect(() => {
+    api
+      .listClients({ limit: 200 })
+      .then((result) => setClients(result.items))
+      .catch(() => setClients([]))
+  }, [])
 
   /**
    * Run a mutation, then reload everything it could have moved — a payment
@@ -258,6 +272,24 @@ export default function Billing() {
       <div className="card section">
         <div className="card-body">
           <div className="filters">
+            <div className="field">
+              <label htmlFor="invoice-client">Client</label>
+              <select
+                id="invoice-client"
+                value={clientFilter}
+                onChange={(event) => {
+                  setClientFilter(event.target.value)
+                  setOffset(0)
+                }}
+              >
+                <option value="">All clients</option>
+                {clients.map((client) => (
+                  <option key={client.id} value={client.id}>
+                    {client.name}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="field">
               <label htmlFor="invoice-status">Status</label>
               <select

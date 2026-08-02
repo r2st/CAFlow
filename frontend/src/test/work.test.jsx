@@ -21,8 +21,8 @@ import {
   task,
 } from './fixtures'
 
-function renderPage(ui) {
-  return render(<MemoryRouter>{ui}</MemoryRouter>)
+function renderPage(ui, { route = '/' } = {}) {
+  return render(<MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>)
 }
 
 /** Every one of these pages loads a client list for its pickers. */
@@ -154,7 +154,7 @@ describe('Tasks', () => {
 
     await user.click(await screen.findByRole('button', { name: 'New task' }))
     await user.type(screen.getByLabelText('Title'), 'File TDS return')
-    await user.selectOptions(screen.getByLabelText('Client'), 'c-1')
+    await user.selectOptions(screen.getByLabelText('For client'), 'c-1')
     await user.click(screen.getByRole('button', { name: 'Create task' }))
 
     await waitFor(() =>
@@ -167,6 +167,7 @@ describe('Tasks', () => {
 
 describe('Billing', () => {
   beforeEach(() => {
+    stubClients()
     vi.spyOn(api, 'revenue').mockResolvedValue(REVENUE)
     vi.spyOn(api, 'billableWork').mockResolvedValue(BILLABLE_WORK)
     vi.spyOn(api, 'listInvoices').mockResolvedValue(pageOf([invoice()]))
@@ -594,5 +595,83 @@ describe('Reminders', () => {
     const error = await screen.findByText('SMTP refused the recipient')
     // Scoped to the row: "Failed" is also an option in the status filter.
     expect(within(error.closest('tr')).getByText('Failed')).toBeInTheDocument()
+  })
+})
+
+/**
+ * A client page links into each of these with `?client_id=…`. The filter has
+ * to be honoured on the very first request — landing unfiltered and then
+ * narrowing would show every client's work for a beat.
+ */
+describe('deep links from a client page', () => {
+  beforeEach(() => {
+    stubClients()
+    vi.spyOn(api, 'listPractitioners').mockResolvedValue([PRACTITIONER])
+    vi.spyOn(api, 'workload').mockResolvedValue(WORKLOAD)
+    vi.spyOn(api, 'pendingReminderCount').mockResolvedValue({ scheduled: 0, due_now: 0 })
+    vi.spyOn(api, 'revenue').mockResolvedValue(REVENUE)
+    vi.spyOn(api, 'billableWork').mockResolvedValue(BILLABLE_WORK)
+  })
+
+  it('opens Tasks filtered to the client in the URL', async () => {
+    vi.spyOn(api, 'listTasks').mockResolvedValue(pageOf([task()]))
+
+    renderPage(<Tasks />, { route: '/tasks?client_id=c-1' })
+
+    await waitFor(() =>
+      expect(api.listTasks).toHaveBeenCalledWith(expect.objectContaining({ client_id: 'c-1' })),
+    )
+    expect(api.listTasks).not.toHaveBeenCalledWith(
+      expect.objectContaining({ client_id: undefined }),
+    )
+  })
+
+  it('opens Documents — list and chase list both — filtered to the client', async () => {
+    vi.spyOn(api, 'listDocuments').mockResolvedValue(pageOf([documentFixture()]))
+    vi.spyOn(api, 'outstandingDocuments').mockResolvedValue(OUTSTANDING)
+
+    renderPage(<Documents />, { route: '/documents?client_id=c-1' })
+
+    await waitFor(() =>
+      expect(api.listDocuments).toHaveBeenCalledWith(
+        expect.objectContaining({ client_id: 'c-1' }),
+      ),
+    )
+    expect(api.outstandingDocuments).toHaveBeenCalledWith({ client_id: 'c-1' })
+  })
+
+  it('opens Billing — ledger and unbilled pile both — filtered to the client', async () => {
+    vi.spyOn(api, 'listInvoices').mockResolvedValue(pageOf([invoice()]))
+
+    renderPage(<Billing />, { route: '/billing?client_id=c-1' })
+
+    await waitFor(() =>
+      expect(api.listInvoices).toHaveBeenCalledWith(expect.objectContaining({ client_id: 'c-1' })),
+    )
+    expect(api.billableWork).toHaveBeenCalledWith({ client_id: 'c-1' })
+  })
+
+  it('opens Reminders filtered to the client', async () => {
+    vi.spyOn(api, 'listReminders').mockResolvedValue(pageOf([reminder()]))
+
+    renderPage(<Reminders />, { route: '/reminders?client_id=c-1' })
+
+    await waitFor(() =>
+      expect(api.listReminders).toHaveBeenCalledWith(
+        expect.objectContaining({ client_id: 'c-1' }),
+      ),
+    )
+  })
+
+  it('shows every client when no client is named in the URL', async () => {
+    vi.spyOn(api, 'listTasks').mockResolvedValue(pageOf([task()]))
+
+    renderPage(<Tasks />, { route: '/tasks' })
+
+    await waitFor(() =>
+      expect(api.listTasks).toHaveBeenCalledWith(
+        expect.objectContaining({ client_id: undefined }),
+      ),
+    )
   })
 })

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import api from '../api/client'
 import {
   Alert,
@@ -138,7 +138,7 @@ function NewTaskForm({ clients, practitioners, onCreated, onError }) {
         </div>
         <div className="filters">
           <div className="field">
-            <label htmlFor="task-client">Client</label>
+            <label htmlFor="task-client">For client</label>
             <select id="task-client" value={form.client_id} onChange={set('client_id')}>
               <option value="">No client</option>
               {clients.map((client) => (
@@ -195,10 +195,13 @@ function NewTaskForm({ clients, practitioners, onCreated, onError }) {
 }
 
 export default function Tasks() {
+  // `?client_id=…` lets a client page link straight to that client's work.
+  const [searchParams] = useSearchParams()
   const [filters, setFilters] = useState({
     task_status: '',
     priority: '',
     assignee_id: '',
+    client_id: searchParams.get('client_id') ?? '',
     search: '',
     open_only: true,
     overdue_only: false,
@@ -222,6 +225,7 @@ export default function Tasks() {
         task_status: filters.task_status || undefined,
         priority: filters.priority || undefined,
         assignee_id: filters.mine ? undefined : filters.assignee_id || undefined,
+        client_id: filters.client_id || undefined,
         mine: filters.mine || undefined,
         open_only: filters.open_only || undefined,
         overdue_only: filters.overdue_only || undefined,
@@ -393,6 +397,17 @@ export default function Tasks() {
                 {Object.entries(TASK_PRIORITY_LABELS).map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="filter-client">Client</label>
+              <select id="filter-client" value={filters.client_id} onChange={set('client_id')}>
+                <option value="">All clients</option>
+                {clients.map((client) => (
+                  <option key={client.id} value={client.id}>
+                    {client.name}
                   </option>
                 ))}
               </select>

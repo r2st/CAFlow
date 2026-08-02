@@ -18,6 +18,10 @@ import {
   WORKLOAD,
   calendarResponse,
   complianceItem,
+  document as documentFixture,
+  invoice,
+  pageOf,
+  task,
 } from './fixtures'
 
 function renderWithProviders(ui, { route = '/' } = {}) {
@@ -265,6 +269,11 @@ describe('Client detail', () => {
       portal_token_valid_from: null,
       portal_last_seen_at: null,
     })
+    // The work panels are context on this page, not the record — stubbed
+    // empty by default so each test sets up only what it asserts on.
+    vi.spyOn(api, 'listTasks').mockResolvedValue(pageOf([]))
+    vi.spyOn(api, 'listDocuments').mockResolvedValue(pageOf([]))
+    vi.spyOn(api, 'listInvoices').mockResolvedValue(pageOf([]))
   })
 
   function renderDetail() {
@@ -328,5 +337,83 @@ describe('Client detail', () => {
     renderDetail()
 
     expect(await screen.findByText('Client not found')).toBeInTheDocument()
+  })
+
+  describe('work panels', () => {
+    beforeEach(() => {
+      vi.spyOn(api, 'getClient').mockResolvedValue({
+        ...CLIENT,
+        assigned_practitioner_name: 'Anita Sharma',
+        compliance_summary: { total: 1, pending: 1, overdue: 0, due_soon: 1, filed: 0 },
+      })
+      vi.spyOn(api, 'calendar').mockResolvedValue(calendarResponse([]))
+    })
+
+    it('scopes every panel query to this client', async () => {
+      renderDetail()
+      await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+
+      expect(api.listTasks).toHaveBeenCalledWith(
+        expect.objectContaining({ client_id: 'c-1', open_only: true }),
+      )
+      expect(api.listDocuments).toHaveBeenCalledWith(
+        expect.objectContaining({ client_id: 'c-1' }),
+      )
+      expect(api.listInvoices).toHaveBeenCalledWith(
+        expect.objectContaining({ client_id: 'c-1', unpaid_only: true }),
+      )
+    })
+
+    it('shows this client’s open work, files and unpaid invoices', async () => {
+      api.listTasks.mockResolvedValue(pageOf([task()]))
+      api.listDocuments.mockResolvedValue(pageOf([documentFixture()]))
+      api.listInvoices.mockResolvedValue(pageOf([invoice()]))
+
+      renderDetail()
+
+      expect(await screen.findByText('Reconcile GSTR-2B for July')).toBeInTheDocument()
+      expect(screen.getByText('bank-statement-july.pdf')).toBeInTheDocument()
+      expect(screen.getByText('INV-2026-0001')).toBeInTheDocument()
+      expect(screen.getByText(/₹5,900 due/)).toBeInTheDocument()
+    })
+
+    it('links each panel to its page, filtered to this client', async () => {
+      renderDetail()
+      await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+
+      expect(screen.getByRole('link', { name: /All tasks/ })).toHaveAttribute(
+        'href',
+        '/tasks?client_id=c-1',
+      )
+      expect(screen.getByRole('link', { name: /All documents/ })).toHaveAttribute(
+        'href',
+        '/documents?client_id=c-1',
+      )
+      expect(screen.getByRole('link', { name: /All invoices/ })).toHaveAttribute(
+        'href',
+        '/billing?client_id=c-1',
+      )
+    })
+
+    it('says so when a panel is empty rather than hiding it', async () => {
+      renderDetail()
+
+      expect(await screen.findByText('Nothing open for this client.')).toBeInTheDocument()
+      expect(screen.getByText('Nothing received yet.')).toBeInTheDocument()
+      expect(screen.getByText('Nothing outstanding.')).toBeInTheDocument()
+    })
+
+    it('renders the client record even when every panel query fails', async () => {
+      api.listTasks.mockRejectedValue(new Error('tasks down'))
+      api.listDocuments.mockRejectedValue(new Error('documents down'))
+      api.listInvoices.mockRejectedValue(new Error('invoices down'))
+
+      renderDetail()
+
+      expect(
+        await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' }),
+      ).toBeInTheDocument()
+      expect(screen.queryByText('tasks down')).not.toBeInTheDocument()
+    })
   })
 })
