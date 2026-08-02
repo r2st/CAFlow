@@ -201,7 +201,13 @@ def refresh_status(invoice: Invoice, today: date | None = None) -> Invoice:
     if invoice.status in (InvoiceStatus.DRAFT, InvoiceStatus.CANCELLED):
         return invoice
 
-    if invoice.total_paise > 0 and invoice.amount_paid_paise >= invoice.total_paise:
+    # A nil invoice is settled the moment it is issued. Firms raise them to put
+    # no-charge work on the record — a courtesy filing, a fee written off, work
+    # absorbed under a retainer — and there is nothing to collect. Leaving it in
+    # the unpaid states had no way out: `record_payment` refuses every amount as
+    # an overpayment against a zero total, so nothing could ever move it, while
+    # the due date still dragged it to overdue and onto the chase list.
+    if invoice.total_paise <= 0 or invoice.amount_paid_paise >= invoice.total_paise:
         invoice.status = InvoiceStatus.PAID
     elif invoice.amount_paid_paise > 0:
         invoice.status = InvoiceStatus.PARTIALLY_PAID

@@ -413,14 +413,19 @@ def cancel_invoice(invoice_id: uuid.UUID, practitioner: Manager, db: DbSession):
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Invoice {invoice.invoice_number} has already been cancelled",
         )
-    if invoice.status == InvoiceStatus.PAID:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="A paid invoice cannot be cancelled"
-        )
+    # Money having changed hands is what closes the door, not the label on the
+    # status. A nil invoice is settled the moment it is issued without anything
+    # being collected, and withdrawing one raised in error has to stay open —
+    # otherwise the filings it cites keep `is_billed` for good and that work can
+    # never be re-invoiced, which is the leakage this system exists to catch.
     if invoice.amount_paid_paise > 0:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="This invoice has payments recorded against it",
+            detail=(
+                "A paid invoice cannot be cancelled"
+                if invoice.status == InvoiceStatus.PAID
+                else "This invoice has payments recorded against it"
+            ),
         )
 
     invoice.status = InvoiceStatus.CANCELLED

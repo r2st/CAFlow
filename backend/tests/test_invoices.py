@@ -779,6 +779,129 @@ class TestPayments:
         assert paid["days_overdue"] is None
 
 
+class TestAnInvoiceWithNothingToPay:
+    """A waived fee is still an invoice, and it has to be able to settle.
+
+    Firms raise nil invoices to put no-charge work on the record — a courtesy
+    filing, a fee written off, work absorbed under a retainer. The line is
+    allowed at zero, so the invoice totals zero, and it used to have no way
+    out: ``record_payment`` refuses every amount as an overpayment, so nothing
+    could move it, and the due date still dragged it to overdue. The firm was
+    left chasing a client for nothing, permanently.
+    """
+
+    def test_a_nil_invoice_is_settled_once_it_is_sent(
+        self, client, auth_headers, client_id
+    ):
+        invoice = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[{"description": "Written off", "quantity": 1, "unit_price_paise": 0}],
+        ).json()
+        assert invoice["total_paise"] == 0
+
+        sent = client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+        assert sent["status"] == "paid"
+        assert sent["balance_paise"] == 0
+
+    def test_a_nil_invoice_does_not_go_overdue(self, client, auth_headers, client_id):
+        """There is nothing outstanding, so a past due date changes nothing."""
+        past = (date.today() - timedelta(days=30)).isoformat()
+        invoice = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            due_date=past,
+            lines=[{"description": "Courtesy filing", "quantity": 1, "unit_price_paise": 0}],
+        ).json()
+        sent = client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+        assert sent["status"] == "paid"
+        assert sent["days_overdue"] is None
+
+    def test_the_overdue_sweep_leaves_a_nil_invoice_settled(
+        self, client, auth_headers, client_id, db
+    ):
+        """The nightly sweep is the other way a status moves, and it agrees."""
+        past = (date.today() - timedelta(days=30)).isoformat()
+        invoice = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            due_date=past,
+            lines=[{"description": "Absorbed", "quantity": 1, "unit_price_paise": 0}],
+        ).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+
+        row = db.get(Invoice, uuid.UUID(invoice["id"]))
+        billing.refresh_status(row, date.today())
+        assert row.status == InvoiceStatus.PAID
+
+    def test_a_nil_invoice_is_not_chased_as_unpaid(self, client, auth_headers, client_id):
+        past = (date.today() - timedelta(days=30)).isoformat()
+        invoice = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            due_date=past,
+            lines=[{"description": "No charge", "quantity": 1, "unit_price_paise": 0}],
+        ).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+
+        unpaid = client.get(
+            "/api/v1/invoices", params={"unpaid_only": True}, headers=auth_headers
+        ).json()["items"]
+        assert invoice["id"] not in [row["id"] for row in unpaid]
+
+    def test_an_invoice_that_still_owes_something_is_untouched(
+        self, client, auth_headers, client_id
+    ):
+        """The guard is about a zero total, not about being lenient generally."""
+        past = (date.today() - timedelta(days=5)).isoformat()
+        invoice = make_invoice(client, auth_headers, client_id, due_date=past).json()
+        sent = client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+        assert sent["status"] == "overdue"
+
+    def test_a_nil_invoice_still_refuses_a_payment(self, client, auth_headers, client_id):
+        """Settled is not the same as collectable: there is nothing to receive."""
+        invoice = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[{"description": "Written off", "quantity": 1, "unit_price_paise": 0}],
+        ).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+
+        response = client.post(
+            f"/api/v1/invoices/{invoice['id']}/payments",
+            json={"amount_paise": 100},
+            headers=auth_headers,
+        )
+        assert response.status_code == 409
+
+    def test_a_nil_invoice_can_still_be_cancelled(self, client, auth_headers, client_id):
+        """Nothing was collected, so withdrawing it is still open to the firm."""
+        invoice = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[{"description": "Raised in error", "quantity": 1, "unit_price_paise": 0}],
+        ).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+
+        response = client.post(
+            f"/api/v1/invoices/{invoice['id']}/cancel", headers=auth_headers
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "cancelled"
+
+
 class TestRevenue:
     def test_reports_invoiced_collected_and_outstanding(
         self, client, auth_headers, client_id
