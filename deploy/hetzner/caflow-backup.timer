@@ -1,0 +1,25 @@
+# Nightly, at 02:15 India time.
+#
+# A CA firm's working day runs late and starts early around a filing deadline,
+# so the window is narrow: 02:15 IST is after the last GSTR-3B of the night and
+# before anyone is back at it.
+
+[Unit]
+Description=CAFlow — nightly backup
+
+[Timer]
+# The timezone is named rather than assumed. A calendar spec with no zone
+# follows the box's local time, and this box is UTC — which would put the run
+# at 07:45 IST, in the middle of the working day. Naming the zone needs
+# systemd 252 or newer; Ubuntu 24.04 ships 255.
+OnCalendar=*-*-* 02:15:00 Asia/Kolkata
+# Catch up after an outage rather than skipping the night entirely.
+Persistent=true
+# ...but not the instant the box is back, and not on the exact minute. Seven
+# other applications share this hardware; a spike they all take at once is
+# worse for each of them than a spike any one of them takes alone.
+RandomizedDelaySec=600
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

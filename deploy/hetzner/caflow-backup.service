@@ -1,0 +1,50 @@
+# One backup run on the shared Hetzner box. Started by caflow-backup.timer,
+# though `systemctl start caflow-backup` is exactly how to take one before a
+# risky migration.
+#
+#   install -m 0755 deploy/hetzner/caflow-backup.sh /usr/local/bin/caflow-backup
+#   install -m 0644 deploy/hetzner/caflow-backup.{service,timer} /etc/systemd/system/
+#   install -d -m 0700 /etc/caflow && install -m 0600 /dev/null /etc/caflow/backup.env
+#   systemctl daemon-reload && systemctl enable --now caflow-backup.timer
+#
+# Runs as root, unlike the four application units. It has to: the dump goes
+# through `sudo -u postgres`, and the documents directory is mode 750 owned by
+# the caflow user. Keeping the application services unprivileged is the point
+# of that split — this one file being root is not an argument for them being
+# root too.
+
+[Unit]
+Description=CAFlow — database and document backup, with an offsite copy
+Documentation=https://github.com/r2st/CAFlow
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Nothing to back up if the checkout is gone, and creating it here would hide
+# that. The offsite half also needs the network, hence network-online rather
+# than plain network.
+ConditionPathExists=/opt/CAFlow
+
+[Service]
+Type=oneshot
+# OFFSITE_DEST and friends live here rather than in /opt/CAFlow/.env: that file
+# is owned by the caflow user and read by four services that have no business
+# knowing where the backups go. Absent, the run still works and says loudly
+# that it kept no offsite copy.
+EnvironmentFile=-/etc/caflow/backup.env
+# The defaults the script itself uses, restated so `systemctl show` answers
+# the question without anyone reading the shell.
+Environment=BACKUP_DIR=/var/backups/caflow
+Environment=BACKUP_KEEP_DAYS=14
+Environment=APP_DIR=/opt/CAFlow
+ExecStart=/usr/local/bin/caflow-backup
+# The dump, the tarball and an rsync over the public internet, on a box with
+# 4 GB of RAM shared between eight applications. An hour is generous now and
+# will not be once the document volume is real.
+TimeoutStartSec=3600
+
+# A dump of a CA firm's client documents is the most sensitive file on this
+# box. Nothing but root reads the directory it lands in.
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=caflow-backup
