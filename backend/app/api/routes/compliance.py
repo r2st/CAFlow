@@ -190,6 +190,24 @@ def update_compliance_item(
     item = _get_item_or_404(db, practitioner.firm_id, item_id)
     updates = payload.model_dump(exclude_unset=True)
 
+    # The same position the bulk endpoint takes, for the same reason: a filing
+    # date belongs to a filed item, and recording one against anything else
+    # says a return was lodged on a day it was not. The status it is measured
+    # against is the one this patch leaves behind — the incoming one when the
+    # caller named it, otherwise what the item already is, which is what makes
+    # correcting the date of an already-filed item still work.
+    if updates.get("filed_on") is not None:
+        resulting_status = updates.get("status") or item.status
+        if resulting_status not in FILED_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"filed_on cannot be set alongside status "
+                    f"'{resulting_status.value}' — a filing date belongs to a "
+                    "filed or delayed_filed item"
+                ),
+            )
+
     if updates.get("assigned_practitioner_id"):
         try:
             firms.assert_assignable(
@@ -204,7 +222,11 @@ def update_compliance_item(
     for key, value in updates.items():
         setattr(item, key, value)
 
-    if "status" in updates:
+    # Also on a bare date change: the filed/delayed split is derived from the
+    # date, so a correction to the date has to re-derive it. Nothing re-ran
+    # when the status was left out of the patch, and an item stayed `filed`
+    # while carrying a date after its own deadline.
+    if "status" in updates or "filed_on" in updates:
         _normalise_filing(
             item,
             filed_on=updates.get("filed_on"),

@@ -277,6 +277,102 @@ class TestFilingUpdates:
         assert body["status"] == "pending"
         assert body["filed_on"] is None
 
+    def test_a_filing_date_is_refused_on_a_status_that_is_not_filed(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The single-item edit takes the same position the bulk one does.
+
+        Bulk refuses this outright: a filing date belongs to a filed item, and
+        accepting it elsewhere means recording that a return was lodged on a
+        day when it was not. The single-item route used to take it, and the
+        stale date it left behind is the one that later decides `filed` against
+        `delayed_filed` — a return lodged on time stamped as a late filing, in
+        the record the firm would show an assessing officer.
+        """
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "pending", "filed_on": date.today().isoformat()},
+        )
+        assert response.status_code == 422
+        assert "filed_on" in response.json()["detail"]
+
+        after = client.get(
+            f"{API}/compliance/items/{item.id}", headers=auth_headers
+        ).json()
+        assert after["filed_on"] is None
+        assert after["status"] == "pending"
+
+    def test_correcting_the_filing_date_alone_re_derives_delayed(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Moving the date past the due date makes it a late filing, and says so.
+
+        The filed/delayed split is derived from the date, so a correction to
+        the date has to re-derive it. Nothing re-ran when the status was left
+        out of the patch, and the item stayed `filed` while carrying a date
+        after its own deadline.
+        """
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        on_time = item.due_date - timedelta(days=1)
+        late = item.due_date + timedelta(days=3)
+
+        filed = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": on_time.isoformat()},
+        ).json()
+        assert filed["status"] == "filed"
+
+        corrected = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"filed_on": late.isoformat()},
+        ).json()
+        assert corrected["status"] == "delayed_filed"
+        assert corrected["filed_on"] == late.isoformat()
+
+    def test_correcting_the_filing_date_back_within_the_deadline_clears_delayed(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A correction the other way is the one that matters to the client."""
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        late = item.due_date + timedelta(days=3)
+        on_time = item.due_date - timedelta(days=1)
+
+        delayed = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": late.isoformat()},
+        ).json()
+        assert delayed["status"] == "delayed_filed"
+
+        corrected = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"filed_on": on_time.isoformat()},
+        ).json()
+        assert corrected["status"] == "filed"
+
+    def test_a_filing_date_on_an_item_that_was_never_filed_is_refused(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Without a status in the patch there is still nothing it could mean."""
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"filed_on": date.today().isoformat()},
+        )
+        assert response.status_code == 422
+
     def test_bulk_status_update(self, client: TestClient, auth_headers: dict, db: Session):
         client_id = create_client_record(client, auth_headers)
         items = items_for(db, client_id)[:4]
