@@ -22,6 +22,7 @@ from sqlalchemy.dialects import postgresql, sqlite
 from app.models.base import (
     ComplianceStatus,
     EntityType,
+    InvoiceStatus,
     ReminderChannel,
     ReminderStatus,
     ReminderType,
@@ -29,6 +30,7 @@ from app.models.base import (
 from app.models.client import Client
 from app.models.compliance import ComplianceItem, ComplianceType
 from app.models.firm import Firm
+from app.models.invoice import Invoice
 from app.models.reminder import Reminder
 from app.services import reminders as reminder_service
 from app.worker import tasks
@@ -460,7 +462,9 @@ class TestDispatchSendsEachReminderOnce:
         tasks._claim_next_due(recorder, cutoff=datetime.now(UTC), exclude=set())
 
         statement = recorder.statements[0]
-        assert "FOR UPDATE SKIP LOCKED" in str(statement.compile(dialect=postgresql.dialect()))
+        # Which rows it names is asserted separately, where the join it reads
+        # from is the subject.
+        assert "SKIP LOCKED" in str(statement.compile(dialect=postgresql.dialect()))
         # Stated rather than assumed: this is why the behaviour is unobservable
         # in the rest of the suite.
         assert "FOR UPDATE" not in str(statement.compile(dialect=sqlite.dialect()))
@@ -633,6 +637,183 @@ class TestDispatchSendsEachReminderOnce:
             }
 
         assert "batch limit" not in caplog.text
+
+
+class TestASwitchedOffFirmStopsTalkingToItsClients:
+    """Deactivating a firm has to reach the mail it is still sending.
+
+    Sign-in refuses one, the API refuses one, and the generation jobs skip one
+    — but the reminder jobs swept compliance items and invoices, which a
+    switched-off firm keeps, so its clients went on being chased in its name.
+    The queue made it worse: a document chase is written fifteen days ahead, so
+    even stopping the sweep leaves a fortnight of mail already addressed.
+    """
+
+    def make_overdue_invoice(self, db, firm, client, *, due_date):
+        invoice = Invoice(
+            firm_id=firm.id,
+            client_id=client.id,
+            invoice_number=f"INV/FY2026-27/{str(client.id)[:4]}",
+            issue_date=due_date - timedelta(days=30),
+            due_date=due_date,
+            status=InvoiceStatus.SENT,
+            subtotal_paise=100_000,
+            tax_paise=18_000,
+            total_paise=118_000,
+        )
+        db.add(invoice)
+        db.flush()
+        return invoice
+
+    def test_no_filing_reminder_is_queued_for_a_switched_off_firm(self, db):
+        firm = make_firm(db, is_active=False)
+        client = make_client(db, firm)
+        ctype = get_type(db, "GSTR3B_MONTHLY")  # offsets [10, 5, 2, 1]
+        make_item(db, firm, client, ctype, due_date=RUN_DATE + timedelta(days=10))
+        db.commit()
+
+        result = tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat())
+
+        assert result == {"queued": 0}
+        assert db.scalars(select(Reminder)).all() == []
+
+    def test_the_neighbour_in_the_same_run_is_unaffected(self, db):
+        """The sweep is global, so refusing one firm must not refuse the rest."""
+        off = make_firm(db, name="Closed Books", is_active=False)
+        on = make_firm(db, name="Sharma Associates")
+        ctype = get_type(db, "GSTR3B_MONTHLY")
+        for firm in (off, on):
+            client = make_client(db, firm, email=f"{firm.name[:4].lower()}@nimbus.in")
+            make_item(db, firm, client, ctype, due_date=RUN_DATE + timedelta(days=10))
+        db.commit()
+
+        assert tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat()) == {
+            "queued": 1
+        }
+
+        queued = db.scalars(select(Reminder)).one()
+        assert queued.firm_id == on.id
+
+    def test_no_payment_chase_is_queued_for_a_switched_off_firm(self, db):
+        """The debt is still owed; chasing it in the firm's name is not ours."""
+        firm = make_firm(db, is_active=False)
+        client = make_client(db, firm)
+        self.make_overdue_invoice(db, firm, client, due_date=RUN_DATE - timedelta(days=7))
+        db.commit()
+
+        assert tasks.queue_payment_reminders_task(today=RUN_DATE.isoformat()) == {"queued": 0}
+
+    def test_the_document_sweep_never_looks_at_a_switched_off_firm(self, db, monkeypatch):
+        """Asked at the firm level, before any item of theirs is read."""
+        off = make_firm(db, name="Closed Books", is_active=False)
+        on = make_firm(db, name="Sharma Associates")
+        ctype = get_type(db, "GSTR3B_MONTHLY")
+        for firm in (off, on):
+            client = make_client(db, firm, email=f"{firm.name[:4].lower()}@nimbus.in")
+            make_item(db, firm, client, ctype, due_date=RUN_DATE + timedelta(days=10))
+        db.commit()
+
+        swept = []
+        monkeypatch.setattr(
+            reminder_service.documents,
+            "items_awaiting_documents",
+            lambda db, firm_id, **kwargs: swept.append(firm_id) or [],
+        )
+
+        tasks.queue_document_reminders_task(today=RUN_DATE.isoformat())
+
+        assert swept == [on.id]
+
+    def test_mail_already_queued_is_not_sent(self, db):
+        """The fortnight of messages written before the switch-off."""
+        firm = make_firm(db, is_active=False)
+        client = make_client(db, firm)
+        make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
+
+    def test_held_mail_is_kept_scheduled_rather_than_failed(self, db):
+        """Suspension is a state a firm comes back from.
+
+        Marking the queue ``FAILED`` would be a decision nothing reverses:
+        reactivating the firm would leave every chase it had lined up dead.
+        """
+        firm = make_firm(db, is_active=False)
+        client = make_client(db, firm)
+        make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
+        db.commit()
+
+        tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        held = db.scalars(select(Reminder)).one()
+        assert held.status is ReminderStatus.SCHEDULED
+        assert held.attempt_count == 0
+        assert held.error_message is None
+
+    def test_switching_the_firm_back_on_resumes_the_queue(self, db):
+        firm = make_firm(db, is_active=False)
+        client = make_client(db, firm)
+        make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
+        db.commit()
+        tasks.dispatch_due_reminders_task()
+
+        firm.is_active = True
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task() == {"sent": 1, "failed": 0, "retrying": 0}
+
+    def test_held_mail_is_not_reported_as_a_backlog(self, db, caplog):
+        """A firm on hold is not work the next run is expected to clear.
+
+        Counted as overflow, a single suspended firm would put a backlog
+        warning in the log on every run for as long as it stayed suspended.
+        """
+        off = make_firm(db, name="Closed Books", is_active=False)
+        on = make_firm(db, name="Sharma Associates")
+        past = datetime.now(UTC) - timedelta(hours=1)
+        make_reminder(db, off, make_client(db, off, email="a@closed.in"), scheduled_for=past)
+        make_reminder(db, on, make_client(db, on, email="b@sharma.in"), scheduled_for=past)
+        db.commit()
+
+        with caplog.at_level(logging.WARNING, logger="app.worker.tasks"):
+            assert tasks.dispatch_due_reminders_task(limit=1) == {
+                "sent": 1,
+                "failed": 0,
+                "retrying": 0,
+            }
+
+        assert "batch limit" not in caplog.text
+
+    def test_a_deactivated_client_is_not_mailed_either(self, db):
+        """Queue-time checked that the client was active. Fifteen days ago."""
+        firm = make_firm(db)
+        client = make_client(db, firm, is_active=False)
+        make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
+
+        db.expire_all()
+        assert db.scalars(select(Reminder)).one().status is ReminderStatus.SCHEDULED
+
+    def test_the_claim_locks_the_reminder_and_not_the_firm(self):
+        """``FOR UPDATE`` over a join takes every table in it.
+
+        The firm row is joined only to be read, and it is the same row a plan
+        limit and an invoice number take for their own ordering — held for the
+        length of an SMTP handshake, one dispatch would stall the firm's own
+        practitioners. SQLite renders no locking clause, so this is only
+        readable on the dialect that runs in production.
+        """
+        recorder = _StatementRecorder()
+
+        tasks._claim_next_due(recorder, cutoff=datetime.now(UTC), exclude=set())
+
+        sql = str(recorder.statements[0].compile(dialect=postgresql.dialect()))
+        assert "FOR UPDATE OF reminders SKIP LOCKED" in sql
+        assert "JOIN firms" in sql
 
 
 class TestADocumentChaseDoesNotSilenceTheFilingReminder:

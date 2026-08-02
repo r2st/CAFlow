@@ -74,11 +74,16 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
     with SessionLocal() as db:
         items = db.scalars(
             select(ComplianceItem)
+            .join(Firm, Firm.id == ComplianceItem.firm_id)
             .options(
                 selectinload(ComplianceItem.client),
                 selectinload(ComplianceItem.compliance_type),
             )
             .where(
+                # A firm switched off keeps its filings — they are its records,
+                # not ours to delete — so sweeping the items alone chased the
+                # clients of a firm this deployment had stopped serving.
+                Firm.is_active.is_(True),
                 ComplianceItem.status.in_(OPEN_STATUSES),
                 ComplianceItem.due_date >= run_date,
                 ComplianceItem.due_date <= run_date + timedelta(days=60),
@@ -139,6 +144,33 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
     return {"queued": queued}
 
 
+def _deliverable(stmt, *, cutoff: datetime, exclude: set[uuid.UUID]):
+    """Narrow ``stmt`` to reminders this deployment is still willing to send.
+
+    Due, still scheduled, and — the part the queue cannot know when the row is
+    written — belonging to a firm and a client that are both still active
+    *now*. A document chase is queued up to fifteen days ahead and a filing
+    reminder up to forty-five, so the state that was checked at queue time is
+    old news by the time the message goes out: a firm switched off this morning
+    had a fortnight of mail already sitting in the queue, addressed to its
+    clients and signed with its name.
+
+    Held rather than failed. Being suspended is a state a firm comes back from,
+    and marking the queue ``FAILED`` would mean nothing resumes when it does.
+    """
+    return (
+        stmt.join(Firm, Firm.id == Reminder.firm_id)
+        .join(Client, Client.id == Reminder.client_id)
+        .where(
+            Reminder.status == ReminderStatus.SCHEDULED,
+            Reminder.scheduled_for <= cutoff,
+            Firm.is_active.is_(True),
+            Client.is_active.is_(True),
+            *([Reminder.id.not_in(exclude)] if exclude else []),
+        )
+    )
+
+
 def _claim_next_due(
     db: Session, *, cutoff: datetime, exclude: set[uuid.UUID]
 ) -> Reminder | None:
@@ -149,37 +181,33 @@ def _claim_next_due(
     runs divide the queue instead of both working through it. SQLite renders no
     locking clause at all, which is correct for a single-process test suite.
 
+    ``OF reminders`` keeps the lock off the two tables joined only to be read.
+    Without it PostgreSQL locks the matching ``firms`` row too, for as long as
+    one message takes to send — and that is the same row a plan-limit check or
+    an invoice number waits on, so every dispatch would stall the firm's own
+    practitioners behind an SMTP handshake.
+
     ``exclude`` holds the reminders this run has already tried and left
     ``SCHEDULED`` for a later run; without it the very next iteration would
     select the same row again and retry it in a tight loop.
     """
-    stmt = (
-        select(Reminder)
-        .where(
-            Reminder.status == ReminderStatus.SCHEDULED,
-            Reminder.scheduled_for <= cutoff,
-        )
-        .order_by(Reminder.scheduled_for, Reminder.id)
+    stmt = _deliverable(select(Reminder), cutoff=cutoff, exclude=exclude)
+    return db.scalars(
+        stmt.order_by(Reminder.scheduled_for, Reminder.id)
         .limit(1)
-        .with_for_update(skip_locked=True)
-    )
-    if exclude:
-        stmt = stmt.where(Reminder.id.not_in(exclude))
-    return db.scalars(stmt).first()
+        .with_for_update(skip_locked=True, of=Reminder)
+    ).first()
 
 
 def _undispatched_count(db: Session, *, cutoff: datetime, exclude: set[uuid.UUID]) -> int:
-    """How many due reminders this run never got to. No lock — it only counts."""
-    stmt = (
-        select(func.count())
-        .select_from(Reminder)
-        .where(
-            Reminder.status == ReminderStatus.SCHEDULED,
-            Reminder.scheduled_for <= cutoff,
-        )
+    """How many due reminders this run never got to. No lock — it only counts.
+
+    Counts what the claim would have taken, so a firm on hold does not read as
+    a backlog the next run is expected to clear.
+    """
+    stmt = _deliverable(
+        select(func.count()).select_from(Reminder), cutoff=cutoff, exclude=exclude
     )
-    if exclude:
-        stmt = stmt.where(Reminder.id.not_in(exclude))
     return db.scalar(stmt) or 0
 
 

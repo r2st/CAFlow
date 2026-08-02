@@ -25,10 +25,9 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import settings
 from app.models.base import ReminderChannel, ReminderStatus, ReminderType
 from app.models.client import Client
-from app.models.compliance import ComplianceItem
 from app.models.invoice import Invoice
 from app.models.reminder import Reminder
-from app.services import billing, documents
+from app.services import billing, documents, firms
 from app.services.ai import draft_client_message
 
 # Reminders go out at 09:00 IST on their offset day.
@@ -114,11 +113,10 @@ def queue_document_reminders(
         return []
 
     horizon = run_date + timedelta(days=max(offsets))
-    firm_ids = (
-        [firm_id]
-        if firm_id is not None
-        else list(db.scalars(select(ComplianceItem.firm_id).distinct()).all())
-    )
+    # Only firms this deployment still acts for. A firm switched off keeps its
+    # compliance items, and sweeping the items rather than the firms is what
+    # let it go on chasing its clients after it had stopped being served.
+    firm_ids = sorted(firms.servable_firm_ids(db, firm_id))
 
     queued: list[Reminder] = []
     for current_firm_id in firm_ids:
@@ -201,8 +199,13 @@ def queue_payment_reminders(
     if not offsets:
         return []
 
+    servable = firms.servable_firm_ids(db, firm_id)
     queued: list[Reminder] = []
     for invoice in billing.unpaid_invoices(db, firm_id, today=run_date):
+        # A switched-off firm's debts are still owed; chasing them in its name
+        # is not ours to do while it is not being served.
+        if invoice.firm_id not in servable:
+            continue
         if invoice.due_date is None:
             continue
         days_overdue = (run_date - invoice.due_date).days

@@ -35,6 +35,24 @@ def lock_firm(db: Session, firm_id: uuid.UUID) -> None:
     db.execute(select(Firm.id).where(Firm.id == firm_id).with_for_update())
 
 
+def servable_firm_ids(db: Session, firm_id: uuid.UUID | None = None) -> set[uuid.UUID]:
+    """The firms this deployment still acts for, optionally narrowed to one.
+
+    A background job runs for every tenant at once, so "is this firm still
+    active?" has no request to have answered it. Anything that speaks to a
+    client on a firm's behalf resolves the set once and works inside it: a firm
+    switched off is one whose clients hear nothing further from us.
+
+    Narrowing to a firm that is not active returns the empty set rather than
+    that firm, so a caller that already holds a firm id gets the same answer as
+    one that swept for them.
+    """
+    stmt = select(Firm.id).where(Firm.is_active.is_(True))
+    if firm_id is not None:
+        stmt = stmt.where(Firm.id == firm_id)
+    return set(db.scalars(stmt).all())
+
+
 def active_client_count(db: Session, firm_id: uuid.UUID) -> int:
     return (
         db.scalar(
