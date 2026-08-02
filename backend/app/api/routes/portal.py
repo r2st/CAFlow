@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession, Manager, PortalClient
 from app.api.routes.documents import compliance_label, serialise_checklist
+from app.config import settings
 from app.models.base import ComplianceStatus, InvoiceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
@@ -47,6 +48,7 @@ router = APIRouter(tags=["portal"])
 PORTAL_HISTORY_DAYS = 365
 PORTAL_HORIZON_DAYS = 365
 
+
 # Which invoices a client may see of their own billing.
 #
 # Deliberately a whitelist, not "everything except draft": a status added later
@@ -60,6 +62,34 @@ PORTAL_VISIBLE_INVOICE_STATUSES = (
     InvoiceStatus.OVERDUE,
     InvoiceStatus.PAID,
 )
+
+
+def _collection_window_days() -> int:
+    """How far ahead a filing has to be before its documents are asked for.
+
+    Showing a year of filings and asking for a year of documents are different
+    things. Every unfiled filing carries a checklist, so asking for all of them
+    put dozens of requests on the landing page — most for periods that have not
+    begun — around the few genuinely wanted now. A list that cannot be acted on
+    is ignored wholesale, including the rows that mattered.
+
+    The window is the firm's own: ``document_reminder_offsets_days`` is when
+    the reminders start going out, so the portal asks for exactly what those
+    emails ask for and the two never contradict each other.
+    """
+    offsets = settings.document_reminder_offsets
+    return max(offsets) if offsets else 0
+
+
+def _is_being_collected(state: str, days_until_due: int | None, window: int) -> bool:
+    """Whether the firm is chasing this filing's documents today.
+
+    Overdue is deliberately included: late is when the documents are wanted
+    most, however long ago the due date passed.
+    """
+    if state == "filed":
+        return False
+    return days_until_due is None or days_until_due <= window
 
 
 def _get_client_or_404(db: Session, firm_id: uuid.UUID, client_id: uuid.UUID) -> Client:
@@ -329,14 +359,22 @@ def portal_overview(client: PortalClient, db: DbSession):
     summary.invoices_unpaid = sum(1 for inv in invoices if inv.balance_paise > 0)
     filings: list[PortalFilingOut] = []
     outstanding_checklists = []
+    window = _collection_window_days()
 
     for item in items:
         state = item.derive_display_status(today)
         if state in ("overdue", "due_soon", "upcoming", "filed"):
             setattr(summary, state, getattr(summary, state) + 1)
 
+        days_remaining = item.days_until_due(today)
         checklist = checklists[item.id]
-        missing = checklist.missing if state != "filed" else []
+        # The filing is still listed either way — only the ask is withheld
+        # until the firm would actually be chasing it.
+        missing = (
+            checklist.missing
+            if _is_being_collected(state, days_remaining, window)
+            else []
+        )
         if missing:
             summary.documents_outstanding += len(missing)
             outstanding_checklists.append(serialise_checklist(item, checklist))
@@ -352,7 +390,7 @@ def portal_overview(client: PortalClient, db: DbSession):
                 status=item.status.value,
                 filed_on=item.filed_on,
                 acknowledgement_number=item.acknowledgement_number,
-                days_remaining=item.days_until_due(today),
+                days_remaining=days_remaining,
                 missing_documents=[
                     document_service.requirement_label(req) for req in missing
                 ],

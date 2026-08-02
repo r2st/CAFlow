@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import jwt
 import pytest
@@ -123,6 +123,106 @@ class TestPortalAccess:
         client.get("/api/v1/portal/me", headers=portal_headers)
         db.expire_all()
         assert db.get(Client, uuid.UUID(client_id)).portal_last_seen_at is not None
+
+
+class TestThePortalOnlyAsksForWhatIsDue:
+    """The portal must ask for the documents the firm is actually chasing.
+
+    A year of filings is worth *showing* — a client wants to see what is
+    coming. It is not worth *asking for*. Every unfiled filing in that year
+    contributes its whole checklist, so the landing page led with a demand for
+    dozens of documents, most for periods that have not started, alongside the
+    handful genuinely wanted this fortnight. A client cannot act on that list,
+    and one that cannot be acted on gets ignored — including the rows that
+    mattered.
+
+    The window is the firm's own: documents are chased from
+    ``document_reminder_offsets_days`` before the due date, so the portal asks
+    for exactly what the reminder emails ask for.
+    """
+
+    def overview(self, client, portal_headers) -> dict:
+        response = client.get("/api/v1/portal/me", headers=portal_headers)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_a_filing_far_ahead_is_shown_but_not_asked_for(self, client, portal_headers):
+        body = self.overview(client, portal_headers)
+        window = max(settings.document_reminder_offsets)
+        asked = {c["compliance_item_id"] for c in body["checklists"]}
+
+        far_ahead = [f for f in body["filings"] if (f["days_remaining"] or 0) > window]
+        assert far_ahead, "the fixture should generate filings beyond the chase window"
+        for filing in far_ahead:
+            assert filing["id"] not in asked
+            # Nor as a nag on the filing's own row.
+            assert filing["missing_documents"] == []
+
+    def test_the_year_of_filings_is_still_shown_in_full(self, client, portal_headers):
+        """Trimming the ask must not trim the status view."""
+        body = self.overview(client, portal_headers)
+
+        assert body["summary"]["total"] == len(body["filings"])
+        assert any((f["days_remaining"] or 0) > 60 for f in body["filings"])
+
+    def test_every_checklist_shown_is_one_inside_the_window(self, client, portal_headers):
+        body = self.overview(client, portal_headers)
+        window = max(settings.document_reminder_offsets)
+        by_id = {f["id"]: f for f in body["filings"]}
+
+        assert body["checklists"], "something within the window should still be asked for"
+        for checklist in body["checklists"]:
+            filing = by_id[checklist["compliance_item_id"]]
+            assert filing["days_remaining"] <= window
+
+    def test_the_outstanding_count_matches_what_is_actually_asked_for(
+        self, client, portal_headers
+    ):
+        """The headline number and the list beneath it must be the same thing."""
+        body = self.overview(client, portal_headers)
+
+        listed = sum(
+            1
+            for checklist in body["checklists"]
+            for requirement in checklist["requirements"]
+            if not requirement["satisfied"]
+        )
+        assert body["summary"]["documents_outstanding"] == listed
+
+    def test_an_overdue_filing_is_always_asked_for(self, client, auth_headers, client_id):
+        """Late is the one case where the documents are wanted most."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        overdue_due_date = date.today() - timedelta(days=30)
+        assert (
+            client.patch(
+                f"/api/v1/compliance/items/{item['id']}",
+                json={"due_date": overdue_due_date.isoformat()},
+                headers=auth_headers,
+            ).status_code
+            == 200
+        )
+
+        token = issue_link(client, auth_headers, client_id).json()["token"]
+        body = self.overview(client, {"Authorization": f"Bearer {token}"})
+
+        assert item["id"] in {c["compliance_item_id"] for c in body["checklists"]}
+
+    def test_a_filed_return_is_never_asked_for(self, client, auth_headers, client_id):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        client.patch(
+            f"/api/v1/compliance/items/{item['id']}",
+            json={
+                "due_date": (date.today() + timedelta(days=2)).isoformat(),
+                "status": "filed",
+                "filed_on": date.today().isoformat(),
+            },
+            headers=auth_headers,
+        )
+
+        token = issue_link(client, auth_headers, client_id).json()["token"]
+        body = self.overview(client, {"Authorization": f"Bearer {token}"})
+
+        assert item["id"] not in {c["compliance_item_id"] for c in body["checklists"]}
 
 
 class TestPortalScoping:
