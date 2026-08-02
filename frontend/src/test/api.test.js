@@ -193,3 +193,108 @@ describe('portal credentials', () => {
     )
   })
 })
+
+describe('practitioner work endpoints', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    setToken('practitioner-token')
+  })
+
+  it('names the client in a practitioner upload', async () => {
+    const spy = mockFetch(201, { document: { id: 'd-1' } })
+    const file = new File(['a,b'], 'ledger.pdf', { type: 'application/pdf' })
+
+    await api.uploadDocument(file, {
+      clientId: 'c-1',
+      complianceItemId: 'ci-1',
+      category: 'bank_statement',
+      shareWithClient: true,
+    })
+
+    const [url, options] = spy.mock.calls[0]
+    expect(url).toContain('/documents/upload')
+    expect(options.headers['Content-Type']).toBeUndefined()
+    expect(options.body.get('client_id')).toBe('c-1')
+    expect(options.body.get('compliance_item_id')).toBe('ci-1')
+    expect(options.body.get('category')).toBe('bank_statement')
+    expect(options.body.get('share_with_client')).toBe('true')
+    expect(options.body.get('file')).toBe(file)
+  })
+
+  it('leaves share_with_client off rather than sending false', async () => {
+    const spy = mockFetch(201, { document: { id: 'd-1' } })
+
+    await api.uploadDocument(new File(['x'], 'misc.pdf'), { clientId: 'c-1' })
+
+    const [, options] = spy.mock.calls[0]
+    // The endpoint defaults it to false; sending "false" as a string would be
+    // read as truthy by a stricter form parser.
+    expect(options.body.has('share_with_client')).toBe(false)
+    expect(options.body.has('category')).toBe(false)
+  })
+
+  it('sends a practitioner download with the practitioner credential', async () => {
+    const spy = mockFetch(200, 'bytes')
+
+    await expect(api.downloadDocument('d-1')).resolves.toBeInstanceOf(Blob)
+
+    const [url, options] = spy.mock.calls[0]
+    expect(url).toContain('/documents/d-1/download')
+    expect(options.headers.Authorization).toBe('Bearer practitioner-token')
+  })
+
+  it('puts the task filters on the query string', async () => {
+    const spy = mockFetch(200, { items: [], total: 0, limit: 50, offset: 0 })
+
+    await api.listTasks({ open_only: true, overdue_only: undefined, task_status: 'todo' })
+
+    const [url] = spy.mock.calls[0]
+    expect(url).toContain('open_only=true')
+    expect(url).toContain('task_status=todo')
+    expect(url).not.toContain('overdue_only')
+  })
+
+  it('posts a bulk task update as a body, not a query', async () => {
+    const spy = mockFetch(200, { updated: 2, skipped: 0 })
+
+    await api.bulkUpdateTasks({ task_ids: ['t-1', 't-2'], status: 'done' })
+
+    const [url, options] = spy.mock.calls[0]
+    expect(url).toContain('/tasks/bulk')
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body)).toEqual({ task_ids: ['t-1', 't-2'], status: 'done' })
+  })
+
+  it('sends the client id for a bulk reminder cancel as a query param', async () => {
+    const spy = mockFetch(200, { cancelled: 3 })
+
+    await api.cancelScheduledForClient('c-1')
+
+    const [url, options] = spy.mock.calls[0]
+    // This endpoint takes client_id in the query, not the body — posting it as
+    // JSON would cancel nothing and still return 200.
+    expect(url).toContain('/reminders/cancel-scheduled?client_id=c-1')
+    expect(options.method).toBe('POST')
+    expect(options.body).toBeUndefined()
+  })
+
+  it('records a payment against the invoice it belongs to', async () => {
+    const spy = mockFetch(200, { id: 'inv-1', status: 'paid' })
+
+    await api.recordPayment('inv-1', { amount_paise: 250000, reference: 'UTR123' })
+
+    const [url, options] = spy.mock.calls[0]
+    expect(url).toContain('/invoices/inv-1/payments')
+    expect(JSON.parse(options.body)).toEqual({ amount_paise: 250000, reference: 'UTR123' })
+  })
+
+  it('asks for revenue over an explicit window when given one', async () => {
+    const spy = mockFetch(200, { invoiced_paise: 0 })
+
+    await api.revenue({ from_date: '2026-04-01', to_date: '2027-03-31' })
+
+    const [url] = spy.mock.calls[0]
+    expect(url).toContain('from_date=2026-04-01')
+    expect(url).toContain('to_date=2027-03-31')
+  })
+})

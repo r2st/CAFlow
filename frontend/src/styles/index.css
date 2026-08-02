@@ -761,6 +761,35 @@ button.link:hover:not(:disabled) { background: none; text-decoration: underline;
 
 /* -------------------------------------------------------------- mobile -- */
 
+/* ------------------------------------------------------- attention strip -- */
+
+/* Whatever is wrong today, and the page that fixes it. Rendered only for
+   non-zero counts, so anything visible here is worth a click. */
+.attention-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.attention-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 16px;
+  background: var(--overdue-bg);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--overdue);
+}
+.attention-card:hover {
+  border-color: var(--overdue);
+  text-decoration: none;
+}
+
+.attention-count { font-size: 1.5rem; font-weight: 650; line-height: 1.2; }
+.attention-label { font-size: 0.85rem; font-weight: 500; }
+
 /* ------------------------------------------------- work surfaces (shared) -- */
 
 /* Checkbox filters sit on the same line as the select filters above them. */

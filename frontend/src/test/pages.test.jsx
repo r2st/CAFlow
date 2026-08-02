@@ -12,7 +12,10 @@ import {
   CLIENT,
   DASHBOARD_STATS,
   FIRM,
+  OUTSTANDING,
   PRACTITIONER,
+  REVENUE,
+  WORKLOAD,
   calendarResponse,
   complianceItem,
 } from './fixtures'
@@ -80,6 +83,11 @@ describe('Dashboard', () => {
     vi.spyOn(api, 'me').mockResolvedValue(PRACTITIONER)
     vi.spyOn(api, 'firm').mockResolvedValue(FIRM)
     vi.spyOn(api, 'dashboard').mockResolvedValue(DASHBOARD_STATS)
+    // The dashboard also pulls money, workload and the chase list. They are
+    // stubbed empty by default so each test only sets up what it asserts on.
+    vi.spyOn(api, 'revenue').mockResolvedValue(REVENUE)
+    vi.spyOn(api, 'workload').mockResolvedValue(WORKLOAD)
+    vi.spyOn(api, 'outstandingDocuments').mockResolvedValue(OUTSTANDING)
   })
 
   it('renders the practice headline numbers', async () => {
@@ -127,6 +135,70 @@ describe('Dashboard', () => {
     renderWithProviders(<Dashboard />)
 
     expect(await screen.findByText('Nothing due in this window')).toBeInTheDocument()
+  })
+
+  it('points each live problem at the page that fixes it', async () => {
+    vi.spyOn(api, 'calendar').mockResolvedValue(calendarResponse([complianceItem()]))
+
+    const { container } = renderWithProviders(<Dashboard />)
+
+    await screen.findByText('Dashboard')
+    const strip = within(container.querySelector('.attention-strip'))
+    expect(strip.getByText('filings overdue').closest('a')).toHaveAttribute('href', '/calendar')
+    expect(strip.getByText('documents to chase').closest('a')).toHaveAttribute(
+      'href',
+      '/documents',
+    )
+    expect(strip.getByText('tasks overdue').closest('a')).toHaveAttribute('href', '/tasks')
+    expect(strip.getByText('overdue receivables').closest('a')).toHaveAttribute('href', '/billing')
+  })
+
+  it('leaves the attention strip out entirely when nothing is wrong', async () => {
+    vi.spyOn(api, 'calendar').mockResolvedValue(calendarResponse([]))
+    api.dashboard.mockResolvedValue({ ...DASHBOARD_STATS, overdue: 0 })
+    api.revenue.mockResolvedValue({ ...REVENUE, overdue_paise: 0 })
+    api.outstandingDocuments.mockResolvedValue({ ...OUTSTANDING, total_missing: 0 })
+    api.workload.mockResolvedValue({
+      ...WORKLOAD,
+      rows: WORKLOAD.rows.map((row) => ({ ...row, overdue: 0 })),
+    })
+
+    const { container } = renderWithProviders(<Dashboard />)
+
+    await screen.findByText('Nothing due in this window')
+    expect(container.querySelector('.attention-strip')).toBeNull()
+  })
+
+  it('shows the financial-year position', async () => {
+    vi.spyOn(api, 'calendar').mockResolvedValue(calendarResponse([]))
+
+    renderWithProviders(<Dashboard />)
+
+    expect(await screen.findByText('This financial year')).toBeInTheDocument()
+    expect(screen.getByText('Invoiced').closest('.stat')).toHaveTextContent('₹25,000')
+    expect(screen.getByText('Not yet billed').closest('.stat')).toHaveTextContent('₹7,500')
+  })
+
+  it('still renders the calendar when the money and workload calls fail', async () => {
+    vi.spyOn(api, 'calendar').mockResolvedValue(calendarResponse([complianceItem()]))
+    api.revenue.mockRejectedValue(new Error('revenue is down'))
+    api.workload.mockRejectedValue(new Error('workload is down'))
+    api.outstandingDocuments.mockRejectedValue(new Error('documents are down'))
+
+    renderWithProviders(<Dashboard />)
+
+    expect(await screen.findByText(/GSTR-3B \(Monthly\)/)).toBeInTheDocument()
+    expect(screen.queryByText('This financial year')).not.toBeInTheDocument()
+    // Secondary panels failing is not the user's problem to read about.
+    expect(screen.queryByText('revenue is down')).not.toBeInTheDocument()
+  })
+
+  it('does raise the error when the compliance calendar itself fails', async () => {
+    vi.spyOn(api, 'calendar').mockRejectedValue(new Error('Calendar unavailable'))
+
+    renderWithProviders(<Dashboard />)
+
+    expect(await screen.findByText('Calendar unavailable')).toBeInTheDocument()
   })
 })
 

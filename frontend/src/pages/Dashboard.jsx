@@ -24,17 +24,34 @@ export default function Dashboard() {
   const { firm } = useAuth()
   const [stats, setStats] = useState(null)
   const [calendar, setCalendar] = useState(null)
+  const [revenue, setRevenue] = useState(null)
+  const [workload, setWorkload] = useState(null)
+  const [outstanding, setOutstanding] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     const window_ = calendarWindow()
-    Promise.all([api.dashboard(), api.calendar({ ...window_, limit: 15 })])
-      .then(([dashboardStats, cal]) => {
-        setStats(dashboardStats)
-        setCalendar(cal)
+    // allSettled, not all: the compliance calendar is the point of this page,
+    // and a failing revenue or workload call must not blank it. Only the two
+    // core calls can raise an error banner.
+    Promise.allSettled([
+      api.dashboard(),
+      api.calendar({ ...window_, limit: 15 }),
+      api.revenue(),
+      api.workload(),
+      api.outstandingDocuments({}),
+    ])
+      .then(([statsResult, calendarResult, revenueResult, workloadResult, outstandingResult]) => {
+        if (statsResult.status === 'fulfilled') setStats(statsResult.value)
+        if (calendarResult.status === 'fulfilled') setCalendar(calendarResult.value)
+        if (revenueResult.status === 'fulfilled') setRevenue(revenueResult.value)
+        if (workloadResult.status === 'fulfilled') setWorkload(workloadResult.value)
+        if (outstandingResult.status === 'fulfilled') setOutstanding(outstandingResult.value)
+
+        const core = [statsResult, calendarResult].find((r) => r.status === 'rejected')
+        if (core) setError(core.reason.message)
       })
-      .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
   }, [])
 
@@ -62,15 +79,69 @@ export default function Dashboard() {
           </div>
         </>
       ) : (
-        <DashboardBody stats={stats} calendar={calendar} />
+        <DashboardBody
+          stats={stats}
+          calendar={calendar}
+          revenue={revenue}
+          workload={workload}
+          outstanding={outstanding}
+        />
       )}
     </>
   )
 }
 
-function DashboardBody({ stats, calendar }) {
+/**
+ * The things a partner should act on today, each a door into the page that
+ * fixes it. Only non-zero counts appear — a strip of zeroes is noise, and the
+ * point is that anything showing here is a live problem.
+ */
+function AttentionStrip({ stats, revenue, workload, outstanding }) {
+  const items = [
+    { key: 'overdue', count: stats?.overdue, label: 'filings overdue', to: '/calendar' },
+    {
+      key: 'documents',
+      count: outstanding?.total_missing,
+      label: 'documents to chase',
+      to: '/documents',
+    },
+    {
+      key: 'tasks',
+      count: workload?.rows?.reduce((sum, row) => sum + row.overdue, 0),
+      label: 'tasks overdue',
+      to: '/tasks',
+    },
+    {
+      key: 'receivables',
+      count: revenue?.overdue_paise ? formatRupees(revenue.overdue_paise) : 0,
+      label: 'overdue receivables',
+      to: '/billing',
+    },
+  ].filter((item) => item.count)
+
+  if (items.length === 0) return null
+
+  return (
+    <div className="attention-strip">
+      {items.map((item) => (
+        <Link key={item.key} to={item.to} className="attention-card">
+          <span className="attention-count">{item.count}</span>
+          <span className="attention-label">{item.label}</span>
+        </Link>
+      ))}
+    </div>
+  )
+}
+
+function DashboardBody({ stats, calendar, revenue, workload, outstanding }) {
   return (
     <>
+      <AttentionStrip
+        stats={stats}
+        revenue={revenue}
+        workload={workload}
+        outstanding={outstanding}
+      />
       {stats && (
         <div className="stat-grid">
           <Stat label="Active clients" value={stats.active_clients} />
@@ -95,6 +166,37 @@ function DashboardBody({ stats, calendar }) {
                   {category.replace('_', ' ')}: {count}
                 </span>
               ))}
+          </div>
+        </div>
+      )}
+
+      {revenue && (
+        <div className="card section">
+          <div className="card-header">
+            <h2>This financial year</h2>
+            <Link to="/billing" className="small">
+              Billing →
+            </Link>
+          </div>
+          <div className="card-body">
+            <div className="stat-grid">
+              <Stat label="Invoiced" value={formatRupees(revenue.invoiced_paise)} />
+              <Stat
+                label="Collected"
+                value={formatRupees(revenue.collected_paise)}
+                tone="filed"
+              />
+              <Stat
+                label="Outstanding"
+                value={formatRupees(revenue.outstanding_paise)}
+                tone="due-soon"
+              />
+              <Stat
+                label="Not yet billed"
+                value={formatRupees(revenue.unbilled_paise)}
+                tone="upcoming"
+              />
+            </div>
           </div>
         </div>
       )}
