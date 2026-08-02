@@ -391,6 +391,9 @@ button.link:hover:not(:disabled) { background: none; text-decoration: underline;
 .alert.error   { background: var(--overdue-bg);  color: var(--overdue); }
 .alert.success { background: var(--upcoming-bg); color: var(--upcoming); }
 .alert.info    { background: var(--filed-bg);    color: var(--filed); }
+/* Nothing has gone wrong yet, but something is about to stop working — a plan
+   at its seat limit, not a failed request. */
+.alert.warning { background: var(--due-soon-bg); color: var(--due-soon); }
 
 .alert-close {
   background: none;

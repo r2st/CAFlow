@@ -181,6 +181,8 @@ export const api = {
   firm: () => request('/auth/firm'),
   listPractitioners: () => request('/auth/practitioners'),
   addPractitioner: (payload) => request('/auth/practitioners', { method: 'POST', body: payload }),
+  updatePractitioner: (id, payload) =>
+    request(`/auth/practitioners/${id}`, { method: 'PATCH', body: payload }),
 
   // --- Clients ---
   listClients: (params) => request('/clients', { params }),

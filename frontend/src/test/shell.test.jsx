@@ -123,9 +123,18 @@ describe('Layout', () => {
   it('reaches every work surface', async () => {
     renderLayout()
 
-    for (const name of ['Documents', 'Tasks', 'Reminders', 'Billing']) {
+    for (const name of ['Documents', 'Tasks', 'Reminders', 'Billing', 'Team']) {
       expect(await screen.findByRole('link', { name })).toBeInTheDocument()
     }
+  })
+
+  it.each(['manager', 'junior'])('still shows the team to a %s', async (role) => {
+    // Unlike the audit trail, the roster is readable by the whole firm — only
+    // the controls that change it are the admin's, and the page hides those.
+    api.me.mockResolvedValue({ ...PRACTITIONER, role })
+    renderLayout()
+
+    expect(await screen.findByRole('link', { name: 'Team' })).toBeInTheDocument()
   })
 
   it('offers the audit trail to an owner', async () => {

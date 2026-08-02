@@ -26,6 +26,26 @@ export const FIRM = {
   plan: 'practice',
   is_active: true,
   created_at: '2026-01-01T00:00:00Z',
+  // Derived from the plan by the server; null means unlimited.
+  user_limit: 5,
+  client_limit: 200,
+}
+
+/** A team member. Defaults to a junior, since that is the common case. */
+export function practitioner(overrides = {}) {
+  return {
+    id: 'p-2',
+    firm_id: 'f-1',
+    full_name: 'Vikram Rao',
+    email: 'vikram@sharma-ca.in',
+    phone: null,
+    membership_number: null,
+    role: 'junior',
+    is_active: true,
+    last_login_at: '2026-08-01T09:30:00Z',
+    created_at: '2026-02-01T00:00:00Z',
+    ...overrides,
+  }
 }
 
 export const CLIENT = {

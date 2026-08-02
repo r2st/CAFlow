@@ -284,6 +284,30 @@ export function formatMinutes(minutes) {
   return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`
 }
 
+export const ROLE_LABELS = {
+  owner: 'Owner',
+  partner: 'Partner',
+  manager: 'Manager',
+  junior: 'Junior',
+}
+
+/**
+ * What each role may actually do, in the words a firm would use.
+ *
+ * The permission rules live on the server; repeating them here is how the
+ * person choosing a role finds out what they are handing over before they
+ * hand it over, rather than by watching a colleague hit a 403.
+ */
+export const ROLE_DESCRIPTIONS = {
+  owner: 'Full access. Every firm has exactly one, set when the firm registered.',
+  partner: 'Full access, including the team and the audit trail.',
+  manager: 'Runs client work — clients, filings, documents, tasks, billing and portal links.',
+  junior: 'Day-to-day work. Cannot manage the team, portal access or the audit trail.',
+}
+
+/** The roles a firm admin may assign. The owner is set at registration. */
+export const ASSIGNABLE_ROLES = ['partner', 'manager', 'junior']
+
 export const ENTITY_TYPE_LABELS = {
   individual: 'Individual',
   proprietorship: 'Proprietorship',

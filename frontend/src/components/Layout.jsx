@@ -45,6 +45,7 @@ export default function Layout() {
           <NavLink to="/tasks">Tasks</NavLink>
           <NavLink to="/reminders">Reminders</NavLink>
           <NavLink to="/billing">Billing</NavLink>
+          <NavLink to="/team">Team</NavLink>
           {/* Offered only to the roles the API will actually serve — a link
               that always 403s is worse than no link. */}
           {isFirmAdmin && <NavLink to="/audit">Audit trail</NavLink>}

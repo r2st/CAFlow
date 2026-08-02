@@ -16,6 +16,7 @@ import Portal from './pages/Portal'
 import Register from './pages/Register'
 import Reminders from './pages/Reminders'
 import Tasks from './pages/Tasks'
+import Team from './pages/Team'
 
 function RequireAuth({ children }) {
   const { isAuthenticated, loading } = useAuth()
@@ -58,6 +59,9 @@ export default function App() {
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/reminders" element={<Reminders />} />
           <Route path="/billing" element={<Billing />} />
+          {/* Readable by the whole firm — everyone benefits from knowing who
+              is on the team. The controls that change it are the admin's. */}
+          <Route path="/team" element={<Team />} />
           {/* The server is the authority on who may read this; the route
               stays reachable so a 403 explains itself rather than a redirect
               silently pretending the page does not exist. */}
