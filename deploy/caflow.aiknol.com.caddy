@@ -1,0 +1,71 @@
+# Caddy site config for caflow.aiknol.com.
+#
+# Install as /etc/caddy/conf.d/caflow.aiknol.com.caddy and import it from the
+# main Caddyfile:
+#
+#     {
+#         email ops@aiknol.com      # global block: ACME registration
+#     }
+#     import /etc/caddy/conf.d/*.caddy
+#
+# The email belongs in the global block, which can only appear at the top of
+# the main Caddyfile — which is why it is not in this file.
+#
+# Caddy is the only thing on this host that listens on a public interface.
+# Everything the stack publishes is bound to 127.0.0.1 (see
+# docker-compose.yml), so this is the whole of the app's front door: the
+# certificate, HSTS, the body limit and the client address all start here.
+
+caflow.aiknol.com {
+	encode zstd gzip
+
+	# HSTS is set here rather than in the container's nginx, because this is
+	# where TLS actually terminates and nginx cannot know whether it did.
+	# A year, and the subdomains too — nothing else is served under this name.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# The rest of the security headers come from nginx inside the web
+		# container, which is where the CSP lives, because the CSP has to
+		# match the bundle it is serving. Repeating them here would be two
+		# places to keep in step for no gain.
+		-Server
+	}
+
+	# The app caps uploads at 20 MB and refuses a request body over 25 MB. This
+	# turns an oversized body away at the edge, before it crosses the proxy at
+	# all. Keep it at or above MAX_REQUEST_BODY_BYTES, or the app's own limit —
+	# and the message it gives — is never reached.
+	request_body {
+		max_size 25MB
+	}
+
+	reverse_proxy 127.0.0.1:8080 {
+		# Overwrite, not append. Caddy's default is to append the peer to
+		# whatever X-Forwarded-For the caller sent, and the app reads the
+		# left-most entry as the client — so an appended header would let a
+		# caller write its own first entry and mint a fresh rate-limit bucket
+		# per request, which is to say no rate limit at all. {remote_host} is
+		# the address Caddy actually accepted the connection from, and it is
+		# the only address in this exchange that is not a claim.
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up Host {host}
+
+		# Document uploads and AI categorisation outrun the default read
+		# timeout; nginx behind this allows 120s for the same reason.
+		transport http {
+			read_timeout 150s
+			write_timeout 150s
+		}
+	}
+
+	log {
+		output file /var/log/caddy/caflow.aiknol.com.log {
+			roll_size 20MB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+}

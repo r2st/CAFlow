@@ -26,3 +26,7 @@ httpx==0.28.1
 
 # --- Testing ---
 pytest==9.1.1
+# Reads docker-compose.yml and the production overlay in tests/test_deployment.py.
+# Already present by way of uvicorn[standard]; named here so the tests do not
+# rest on another package's extra.
+PyYAML==6.0.3

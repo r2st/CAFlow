@@ -1,0 +1,72 @@
+# Production overlay for docker-compose.yml. Never used on its own:
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d
+#
+# which is exactly what deploy/caflow.service runs. Paths in the base file are
+# resolved against the base file's directory, so this is run from the repo root.
+#
+# What it changes: the environment goes from "works on a fresh clone" to "works
+# on caflow.aiknol.com", and every secret that had a usable default loses it.
+# `${VAR:?message}` fails the `up` with that message rather than starting a
+# stack on a placeholder — a deploy that stops is recoverable, a deploy running
+# on `dev-secret-change-me` is a signing key anyone can reproduce.
+#
+# Secrets come from /etc/caflow/caflow.env, which the systemd unit loads into
+# the environment of the compose process. See deploy/caflow.env.example.
+
+x-prod-env: &prod-env
+  ENVIRONMENT: production
+  # The app refuses to start in production with DEBUG on: it would put
+  # tracebacks in HTTP responses.
+  DEBUG: "false"
+  LOG_JSON: "true"
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  SECRET_KEY: '${SECRET_KEY:?set it in /etc/caflow/caflow.env — see deploy/caflow.env.example}'
+  # One origin, over TLS. The app refuses "*" here while it allows credentials.
+  CORS_ORIGINS: ${CORS_ORIGINS:-https://caflow.aiknol.com}
+  # Magic links are built from this and carry a session token, so the app
+  # refuses an http:// value in production.
+  PORTAL_BASE_URL: ${PORTAL_BASE_URL:-https://caflow.aiknol.com/portal}
+  # Caddy overwrites X-Forwarded-For before nginx ever sees it, so the
+  # left-most entry is the real client and the rate limiter can key on it.
+  # Still only believed from a peer inside TRUSTED_PROXY_IPS, whose default
+  # covers the compose network and nothing outside it.
+  TRUST_PROXY_HEADERS: "true"
+
+# Container logs are the only logs; without a cap they fill the disk, and a
+# full disk on this box is a CA firm that cannot file.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  postgres:
+    environment:
+      POSTGRES_USER: caflow
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:?set it in /etc/caflow/caflow.env}'
+      POSTGRES_DB: caflow
+    logging: *logging
+
+  redis:
+    logging: *logging
+
+  migrate:
+    environment: *prod-env
+    logging: *logging
+
+  api:
+    environment: *prod-env
+    logging: *logging
+
+  worker:
+    environment: *prod-env
+    logging: *logging
+
+  beat:
+    environment: *prod-env
+    logging: *logging
+
+  web:
+    logging: *logging

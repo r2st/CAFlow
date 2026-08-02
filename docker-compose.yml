@@ -15,7 +15,7 @@ x-backend-env: &backend-env
   LOG_JSON: ${LOG_JSON:-false}
   LOG_LEVEL: ${LOG_LEVEL:-}
   # Service names, not localhost: these are container-to-container.
-  DATABASE_URL: postgresql+psycopg://caflow:caflow@postgres:5432/caflow
+  DATABASE_URL: postgresql+psycopg://caflow:${POSTGRES_PASSWORD:-caflow}@postgres:5432/caflow
   REDIS_URL: redis://redis:6379/0
   CELERY_BROKER_URL: redis://redis:6379/1
   CELERY_RESULT_BACKEND: redis://redis:6379/2
@@ -53,11 +53,15 @@ services:
     container_name: caflow-postgres
     environment:
       POSTGRES_USER: caflow
-      POSTGRES_PASSWORD: caflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-caflow}
       POSTGRES_DB: caflow
     ports:
-      # Published on 5434 so it does not collide with a local server.
-      - "5434:5432"
+      # Published on 5434 so it does not collide with a local server, and bound
+      # to loopback so it is reachable from this machine and nowhere else. A
+      # bare "5434:5432" listens on every interface, which on a laptop is the
+      # database on the coffee-shop wifi and in production is the database on
+      # the internet — in both cases behind a password that ships in this file.
+      - "127.0.0.1:5434:5432"
     volumes:
       - caflow_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -71,7 +75,9 @@ services:
     image: redis:7-alpine
     container_name: caflow-redis
     ports:
-      - "6381:6379"
+      # Loopback only, for the same reason as postgres above — and Redis has no
+      # password at all.
+      - "127.0.0.1:6381:6379"
     volumes:
       - caflow_redisdata:/data
     healthcheck:
@@ -138,7 +144,12 @@ services:
     image: caflow-web:latest
     container_name: caflow-web
     ports:
-      - "8080:80"
+      # Loopback, because in production Caddy terminates TLS in front of this
+      # and is the only thing that should reach it. Published on every
+      # interface, the plaintext port answers the internet directly — which is
+      # the app without HSTS, without the certificate, and with an
+      # X-Forwarded-For of the caller's choosing.
+      - "127.0.0.1:8080:80"
     depends_on:
       - api
     restart: unless-stopped

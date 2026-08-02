@@ -1,0 +1,49 @@
+# The whole CAFlow stack, started and stopped as one unit.
+#
+#   install -m 0644 deploy/caflow.service /etc/systemd/system/caflow.service
+#   systemctl daemon-reload && systemctl enable --now caflow
+#
+# Type=oneshot with RemainAfterExit is the right shape for Compose: `up -d`
+# returns as soon as the containers are started, and the containers' own
+# restart policies keep them up from there. A Type=simple unit would watch the
+# compose CLI exit and declare the stack dead a second after it came up.
+
+[Unit]
+Description=CAFlow — practice management stack (Docker Compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+# Reaching the app means reaching Caddy, which holds the certificate and is
+# the only listener on a public interface. Ordering only — Caddy serves its
+# other sites whether or not this stack is up.
+Before=caddy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/caflow
+
+# Secrets and the site's own settings. Compose interpolates them into the
+# overlay, which fails the start outright if SECRET_KEY or POSTGRES_PASSWORD is
+# missing rather than falling back to a development default.
+EnvironmentFile=/etc/caflow/caflow.env
+
+# Images are built on the box: there is no registry in this deployment, and a
+# pull would find nothing. --remove-orphans clears containers left by a service
+# that has since been renamed or dropped.
+ExecStartPre=/usr/bin/docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml build
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml down
+# `systemctl reload caflow` after a `git pull`: rebuild and recreate whatever
+# changed, leaving the rest — and the database — alone.
+ExecReload=/usr/bin/docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml up -d --build --remove-orphans
+
+# A first start builds two images from scratch, which is minutes on a small
+# VPS. Generous, but not unbounded: a build wedged forever should still fail.
+TimeoutStartSec=1800
+TimeoutStopSec=300
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

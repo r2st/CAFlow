@@ -1,0 +1,24 @@
+# Nightly, at 02:15 India time.
+#
+# A CA firm's working day runs late and starts early around a filing deadline,
+# so the window is narrow: 02:15 IST is after the last GSTR-3B of the night and
+# before anyone is back at it.
+
+[Unit]
+Description=CAFlow — nightly backup
+
+[Timer]
+# The timezone is named rather than assumed. A calendar spec with no zone
+# follows the box's local time, and a VPS bought anywhere ships as UTC — which
+# would put this at 07:45 IST, in the middle of the working day. Naming the
+# zone needs systemd 252 or newer; on anything older, set the box to
+# Asia/Kolkata with timedatectl and drop the zone from this line.
+OnCalendar=*-*-* 02:15:00 Asia/Kolkata
+# Catch up after an outage rather than skipping the night entirely.
+Persistent=true
+# ...but not the instant the box is back, and not on the exact minute.
+RandomizedDelaySec=600
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

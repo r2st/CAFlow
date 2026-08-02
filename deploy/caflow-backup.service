@@ -1,0 +1,28 @@
+# One backup run. Started by caflow-backup.timer, not by hand — though
+# `systemctl start caflow-backup` is exactly how to take one before a risky
+# migration.
+#
+#   install -m 0644 deploy/caflow-backup.{service,timer} /etc/systemd/system/
+#   install -m 0755 deploy/caflow-backup.sh /usr/local/bin/caflow-backup
+#   systemctl daemon-reload && systemctl enable --now caflow-backup.timer
+
+[Unit]
+Description=CAFlow — database and document backup
+Requires=docker.service
+After=docker.service caflow.service
+# Nothing to dump if the stack is down, and starting it here would hide that.
+ConditionPathExists=/srv/caflow
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/caflow
+EnvironmentFile=/etc/caflow/caflow.env
+# Overridable in caflow.env; these are the defaults the script itself uses.
+Environment=BACKUP_DIR=/var/backups/caflow
+Environment=BACKUP_KEEP_DAYS=14
+ExecStart=/usr/local/bin/caflow-backup
+TimeoutStartSec=3600
+
+# A dump of a CA firm's client documents is the most sensitive file on the
+# box. Nothing but root reads the directory it lands in.
+UMask=0077
