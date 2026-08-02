@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import api from '../api/client'
 import {
+  ACCEPTED_FILE_TYPES,
   Alert,
   DOCUMENT_CATEGORY_LABELS,
   EmptyState,
@@ -119,6 +120,11 @@ function UploadForm({ clients, onUploaded, onError }) {
           id="upload-file"
           ref={inputRef}
           type="file"
+          // The same list the portal offers a client. Nothing outside it can
+          // be uploaded from here either, so leaving it off only meant a
+          // practitioner picked a file, waited for it to go up, and was handed
+          // a 415 for it.
+          accept={ACCEPTED_FILE_TYPES}
           disabled={!clientId || uploading}
           onChange={pick}
         />

@@ -73,6 +73,22 @@ export function statusLabel(status) {
 }
 
 /**
+ * What a file picker offers, mirroring ALLOWED_CONTENT_TYPES in the backend's
+ * storage service. Used by both the client portal and the practitioner's own
+ * upload form, which is why it lives here rather than beside either one.
+ *
+ * No .xls or .doc. Those are OLE containers, which the server refuses on their
+ * leading bytes whatever content type the browser puts on them, so offering
+ * them only invited someone to pick the one file that could not be sent. The
+ * refusal names both formats and asks for .docx, .xlsx or PDF.
+ *
+ * `accept` is a hint rather than a gate — "All files" is still in the dialog —
+ * so this hides nothing that the server would have taken.
+ */
+export const ACCEPTED_FILE_TYPES =
+  '.pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff,.txt,.csv,.json,.xlsx,.docx'
+
+/**
  * Paise are the storage unit everywhere; render them as rupees — exactly,
  * including the paise.
  *

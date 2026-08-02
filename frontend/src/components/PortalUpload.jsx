@@ -1,4 +1,5 @@
 import { useId, useRef, useState } from 'react'
+import { ACCEPTED_FILE_TYPES } from './ui'
 
 /**
  * A file picker that uploads as soon as a file is chosen.
@@ -7,18 +8,6 @@ import { useId, useRef, useState } from 'react'
  * the control keyboard-reachable and screen-reader-labelled while letting it
  * look like the rest of the buttons.
  */
-
-/**
- * Mirrors ALLOWED_CONTENT_TYPES in the backend's storage service.
- *
- * No .xls or .doc. Those are OLE containers, which the server refuses on their
- * leading bytes whatever content type the browser puts on them, so offering
- * them here only invited a client to pick the one file that could not be sent.
- * The refusal names both formats and says to save as .docx/.xlsx or PDF.
- */
-export const ACCEPTED_FILE_TYPES =
-  '.pdf,.jpg,.jpeg,.png,.webp,.tif,.tiff,.txt,.csv,.json,.xlsx,.docx'
-
 export default function PortalUpload({
   label = 'Upload',
   busyLabel = 'Uploading…',

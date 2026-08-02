@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import api from '../api/client'
+import { ACCEPTED_FILE_TYPES } from '../components/ui'
 import Billing from '../pages/Billing'
 import Documents from '../pages/Documents'
 import Reminders from '../pages/Reminders'
@@ -332,6 +333,20 @@ describe('Documents', () => {
     expect(await screen.findByText('bank-statement-july.pdf')).toBeInTheDocument()
     expect(screen.getByText('Portal')).toBeInTheDocument()
     expect(screen.getByText('GSTR-3B · 2026-07')).toBeInTheDocument()
+  })
+
+  it('offers the practitioner the same file types the portal offers a client', async () => {
+    renderPage(<Documents />)
+
+    // The picker used to offer everything, so a practitioner could choose an
+    // executable, wait for it to upload, and be handed a 415 for it. The
+    // server's allow-list is the same on both routes, so the picker should be
+    // too — including leaving out .doc and .xls, which it always refuses.
+    const accept = (await screen.findByLabelText('File')).getAttribute('accept')
+    expect(accept).toBe(ACCEPTED_FILE_TYPES)
+    expect(accept).toContain('.pdf')
+    expect(accept).not.toMatch(/\.xls(,|$)/)
+    expect(accept).not.toMatch(/\.doc(,|$)/)
   })
 
   it('flags a low-confidence AI guess as unconfirmed', async () => {
