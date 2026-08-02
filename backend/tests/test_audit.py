@@ -234,29 +234,34 @@ class TestAuditFilters:
         assert "to_date" in response.json()["detail"]
 
 
+def _write_entry(db: Session, firm_id: str, moment: datetime, action: str = "test.event") -> None:
+    import uuid as _uuid
+
+    db.add(
+        AuditLog(
+            firm_id=_uuid.UUID(firm_id),
+            action=action,
+            entity_type="probe",
+            summary=f"probe at {moment.isoformat()}",
+            changes={},
+            created_at=moment,
+        )
+    )
+    db.commit()
+
+
 class TestAuditDateWindow:
     """``to_date`` is inclusive: entries later that day must not fall out."""
 
     @pytest.fixture
     def dated_entries(self, db: Session, firm_id: str) -> None:
-        import uuid as _uuid
-
         for moment in (
             datetime(2026, 7, 1, 9, 0, tzinfo=UTC),
-            datetime(2026, 7, 15, 23, 59, tzinfo=UTC),
+            # 23:59 IST on the 15th — the last minute of the Indian day.
+            datetime(2026, 7, 15, 18, 29, tzinfo=UTC),
             datetime(2026, 8, 1, 9, 0, tzinfo=UTC),
         ):
-            db.add(
-                AuditLog(
-                    firm_id=_uuid.UUID(firm_id),
-                    action="test.event",
-                    entity_type="probe",
-                    summary=f"probe at {moment.isoformat()}",
-                    changes={},
-                    created_at=moment,
-                )
-            )
-        db.commit()
+            _write_entry(db, firm_id, moment)
 
     def test_includes_entries_late_on_the_final_day(
         self, client: TestClient, auth_headers: dict, dated_entries: None
@@ -280,6 +285,50 @@ class TestAuditDateWindow:
         )
 
         assert response.json()["total"] == 1
+
+
+class TestAuditDaysAreIndianDays:
+    """The day a filter names is a working day in India, not one in UTC.
+
+    Entries are stored as UTC instants — right for an instant — but the
+    practitioner typing a date here is picking a day in the practice's own
+    calendar, and UTC is five and a half hours behind it. Bounding the window
+    in UTC filed the first five and a half hours of every Indian day under the
+    previous date, which is deadline-night work: exactly the entries someone
+    goes looking for.
+    """
+
+    def test_an_entry_from_the_small_hours_belongs_to_the_indian_day(
+        self, client: TestClient, auth_headers: dict, db: Session, firm_id: str
+    ):
+        # 02:00 IST on 6 August — still 5 August in UTC.
+        _write_entry(db, firm_id, datetime(2026, 8, 5, 20, 30, tzinfo=UTC), "probe.late")
+
+        def total(day: str) -> int:
+            return client.get(
+                f"{API}/audit",
+                headers=auth_headers,
+                params={"action": "probe.late", "from_date": day, "to_date": day},
+            ).json()["total"]
+
+        assert total("2026-08-06") == 1
+        assert total("2026-08-05") == 0
+
+    def test_an_entry_late_in_the_indian_evening_stays_on_that_day(
+        self, client: TestClient, auth_headers: dict, db: Session, firm_id: str
+    ):
+        """The other edge: 23:30 IST must not spill into the following day."""
+        _write_entry(db, firm_id, datetime(2026, 8, 5, 18, 0, tzinfo=UTC), "probe.evening")
+
+        def total(day: str) -> int:
+            return client.get(
+                f"{API}/audit",
+                headers=auth_headers,
+                params={"action": "probe.evening", "from_date": day, "to_date": day},
+            ).json()["total"]
+
+        assert total("2026-08-05") == 1
+        assert total("2026-08-06") == 0
 
 
 class TestAuditOrderingAndPaging:

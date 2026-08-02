@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 
 from app.api.deps import DbSession, FirmAdmin
+from app.core import clock
 from app.models.audit import AuditLog
 from app.schemas.audit import AuditActionOut, AuditActionsResponse, AuditLogOut
 from app.schemas.common import Page
@@ -27,14 +28,32 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 def _day_bounds(
     from_date: date | None, to_date: date | None
 ) -> tuple[datetime | None, datetime | None]:
-    """Turn inclusive calendar days into a half-open UTC timestamp range.
+    """Turn inclusive calendar days into the UTC instants that bound them.
 
     ``to_date`` is inclusive to the user: asking for entries up to the 5th
     should include everything that happened on the 5th, not stop at midnight
     as a naive ``<= date`` comparison would.
+
+    The days are Indian days. Entries are stored as UTC instants, which is
+    right for an instant, but the person typing a date into this filter is
+    picking a working day in India — and UTC is five and a half hours behind
+    it. Bounding in UTC put the first five and a half hours of every Indian day
+    under the previous date: a return lodged at 02:00 IST on the 6th, on the
+    last night of the window and exactly when that work gets done, was
+    unfindable on the 6th and turned up on the 5th. The audit trail is the
+    firm's account of who did what and when, so the one filter over it must
+    agree with the clock the rest of the practice runs on.
     """
-    start = datetime.combine(from_date, time.min, tzinfo=UTC) if from_date else None
-    end = datetime.combine(to_date, time.max, tzinfo=UTC) if to_date else None
+    start = (
+        datetime.combine(from_date, time.min, tzinfo=clock.IST).astimezone(UTC)
+        if from_date
+        else None
+    )
+    end = (
+        datetime.combine(to_date, time.max, tzinfo=clock.IST).astimezone(UTC)
+        if to_date
+        else None
+    )
     return start, end
 
 
