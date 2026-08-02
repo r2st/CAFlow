@@ -300,13 +300,22 @@ def update_invoice(
         _apply_lines(db, invoice, payload.lines, practitioner.firm_id)
     billing.recalculate(invoice)
 
+    # After the lines, so a re-numbering attempt is not undone by a savepoint
+    # rollback belonging to the line edit.
+    was = invoice.invoice_number
+    renumbered = billing.renumber_for_issue_date(db, invoice, invoice.issue_date)
+
     audit.record(
         db,
         action="invoice.update",
         entity_type="invoice",
         entity_id=invoice.id,
         actor=practitioner,
-        summary=f"Updated draft invoice {invoice.invoice_number}",
+        summary=(
+            f"Updated draft invoice {invoice.invoice_number}"
+            + (f", renumbered from {was}" if renumbered else "")
+        ),
+        changes={"invoice_number": [was, invoice.invoice_number]} if renumbered else None,
     )
     db.commit()
     db.refresh(invoice)

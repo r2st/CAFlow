@@ -144,6 +144,132 @@ class TestNumbering:
         assert third["invoice_number"] != second["invoice_number"]
 
 
+class TestRedatingADraft:
+    """A number carries its financial year, and a draft's date can still move.
+
+    Raising invoices on 31 March and then dating them 1 April — deferring the
+    revenue into the new year — is ordinary at the start of April. It used to
+    leave an ``FY2025-26`` number on an invoice dated in FY2026-27, so two
+    invoices dated in the same year sat in different series and the firm's
+    books disagreed with its own numbering.
+    """
+
+    def test_moving_a_draft_into_the_next_year_moves_its_number(
+        self, client, auth_headers, client_id
+    ):
+        draft = make_invoice(
+            client, auth_headers, client_id, issue_date="2026-03-31"
+        ).json()
+        assert draft["invoice_number"] == "INV/FY2025-26/0001"
+
+        updated = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"issue_date": "2026-04-01"},
+            headers=auth_headers,
+        ).json()
+        assert updated["invoice_number"] == "INV/FY2026-27/0001"
+
+    def test_moving_a_draft_back_a_year_moves_its_number_back(
+        self, client, auth_headers, client_id
+    ):
+        draft = make_invoice(
+            client, auth_headers, client_id, issue_date="2026-04-05"
+        ).json()
+        assert draft["invoice_number"].startswith("INV/FY2026-27/")
+
+        updated = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"issue_date": "2026-02-20"},
+            headers=auth_headers,
+        ).json()
+        assert updated["invoice_number"] == "INV/FY2025-26/0001"
+
+    def test_the_new_number_does_not_collide_with_that_years_invoices(
+        self, client, auth_headers, client_id
+    ):
+        """It takes the next free number in the year it is joining, not 0001."""
+        existing = make_invoice(
+            client, auth_headers, client_id, issue_date="2026-05-02"
+        ).json()
+        draft = make_invoice(
+            client, auth_headers, client_id, issue_date="2026-03-31"
+        ).json()
+
+        updated = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"issue_date": "2026-06-10"},
+            headers=auth_headers,
+        ).json()
+        assert updated["invoice_number"] != existing["invoice_number"]
+        assert updated["invoice_number"].startswith("INV/FY2026-27/")
+
+    def test_a_date_inside_the_same_year_leaves_the_number_alone(
+        self, client, auth_headers, client_id
+    ):
+        draft = make_invoice(
+            client, auth_headers, client_id, issue_date="2026-05-02"
+        ).json()
+        updated = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"issue_date": "2026-09-30"},
+            headers=auth_headers,
+        ).json()
+        assert updated["invoice_number"] == draft["invoice_number"]
+
+    def test_an_edit_that_is_not_a_date_leaves_the_number_alone(
+        self, client, auth_headers, client_id
+    ):
+        draft = make_invoice(
+            client, auth_headers, client_id, issue_date="2026-03-31"
+        ).json()
+        updated = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"notes": "Q4 advisory"},
+            headers=auth_headers,
+        ).json()
+        assert updated["invoice_number"] == draft["invoice_number"]
+
+    def test_a_renumbering_is_written_into_the_audit_trail(
+        self, client, auth_headers, client_id
+    ):
+        """The number on a document changed; that is not something to do quietly."""
+        draft = make_invoice(
+            client, auth_headers, client_id, issue_date="2026-03-31"
+        ).json()
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"issue_date": "2026-04-01"},
+            headers=auth_headers,
+        )
+        entries = client.get(
+            "/api/v1/audit", params={"action": "invoice.update"}, headers=auth_headers
+        ).json()["items"]
+        assert entries
+        assert entries[0]["changes"]["invoice_number"] == [
+            "INV/FY2025-26/0001",
+            "INV/FY2026-27/0001",
+        ]
+
+    def test_a_sent_invoice_is_refused_the_edit_before_any_of_this(
+        self, client, auth_headers, client_id
+    ):
+        """The number is a document of record once it has gone out."""
+        draft = make_invoice(
+            client, auth_headers, client_id, issue_date="2026-03-31"
+        ).json()
+        client.post(f"/api/v1/invoices/{draft['id']}/send", headers=auth_headers)
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"issue_date": "2026-04-01"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 409
+        after = client.get(
+            f"/api/v1/invoices/{draft['id']}", headers=auth_headers
+        ).json()
+        assert after["invoice_number"] == draft["invoice_number"]
+
+
 class TestTwoInvoicesAtOnce:
     """Numbering is a read followed by a write, and something fits in between.
 

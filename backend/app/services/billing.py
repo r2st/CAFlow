@@ -48,6 +48,11 @@ class UnknownComplianceItem(BillingError):
 # --------------------------------------------------------------- numbering --
 
 
+def number_prefix(issue_date: date) -> str:
+    """``INV/FY2026-27/`` — the series an invoice dated ``issue_date`` belongs to."""
+    return f"{settings.invoice_number_prefix}/{fy_label(fiscal_year_start(issue_date))}/"
+
+
 def next_invoice_number(db: Session, firm_id: uuid.UUID, issue_date: date | None = None) -> str:
     """``INV/FY2026-27/0007`` — sequential within the firm's financial year.
 
@@ -59,9 +64,7 @@ def next_invoice_number(db: Session, firm_id: uuid.UUID, issue_date: date | None
     be by the time a row is inserted. :func:`insert_numbered` is what makes
     that hold; calling this on its own is only a question, not a claim.
     """
-    issue_date = issue_date or date.today()
-    fy = fy_label(fiscal_year_start(issue_date))
-    prefix = f"{settings.invoice_number_prefix}/{fy}/"
+    prefix = number_prefix(issue_date or date.today())
 
     used = set(
         db.scalars(
@@ -129,6 +132,41 @@ def insert_numbered(
                 raise
             continue
         return invoice
+    raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
+
+
+def renumber_for_issue_date(db: Session, invoice: Invoice, issue_date: date) -> bool:
+    """Move a draft into the number series its new issue date belongs to.
+
+    An invoice number carries the financial year it was allocated in, and the
+    sequence within that year is what a GST return is reconciled against. A
+    draft raised on 31 March and then dated 1 April — deferring the revenue
+    into the new year, which is an ordinary thing for a firm to do at the start
+    of April — kept its ``FY2025-26`` number while being dated in FY2026-27.
+    Two invoices dated in the same year then sat in different series, and the
+    firm's own books disagreed with its numbering.
+
+    Only a draft: once sent, the number is a document of record and the caller
+    is refused the edit long before this. Returns whether the number changed.
+    """
+    if invoice.invoice_number.startswith(number_prefix(issue_date)):
+        return False
+
+    previous = invoice.invoice_number
+    firms.lock_firm(db, invoice.firm_id)
+    for remaining in reversed(range(NUMBER_ATTEMPTS)):
+        try:
+            with db.begin_nested():
+                invoice.invoice_number = next_invoice_number(db, invoice.firm_id, issue_date)
+                db.flush()
+        except IntegrityError as exc:
+            if not remaining or not number_collision(exc):
+                raise
+            # The savepoint took the write back out; the attribute is ours to
+            # restore, so the next attempt reads the same starting point.
+            invoice.invoice_number = previous
+            continue
+        return True
     raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
 
 
