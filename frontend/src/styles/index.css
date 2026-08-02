@@ -1122,6 +1122,12 @@ th.tick input, td.tick input { width: auto; margin: 0; }
   .stat { padding: 11px 13px; }
   .stat-value { font-size: 1.4rem; }
 
+  /* Most of what a details card holds is short — a PAN, a TAN, a frequency —
+     and at the desktop minimum each of those claims a whole row, turning a
+     dozen short facts into a dozen screens of scrolling. Pairing them up
+     costs the long values a wrapped line and saves half the height. */
+  .detail-grid { grid-template-columns: repeat(auto-fit, minmax(138px, 1fr)); gap: 12px 14px; }
+
   .card-header { padding: 12px 14px; }
   .card-body { padding: 14px; }
 
