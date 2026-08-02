@@ -1,3 +1,49 @@
+# The whole CAFlow stack.
+#
+#   docker compose up -d                   # everything, migrated and seeded
+#   docker compose up -d postgres redis    # just the backing services, for
+#                                          # running the API on the host
+#
+# Every setting below has a working default, so a fresh clone comes up without
+# a .env file. Anything you do set — SECRET_KEY, SMTP, the OpenRouter key — is
+# read from the shell or from a .env beside this file.
+
+x-backend-env: &backend-env
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  DEBUG: ${DEBUG:-true}
+  SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
+  LOG_JSON: ${LOG_JSON:-false}
+  LOG_LEVEL: ${LOG_LEVEL:-}
+  # Service names, not localhost: these are container-to-container.
+  DATABASE_URL: postgresql+psycopg://caflow:caflow@postgres:5432/caflow
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  # nginx serves the app and proxies the API, so one origin covers both.
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+  PORTAL_BASE_URL: ${PORTAL_BASE_URL:-http://localhost:8080/portal}
+  STORAGE_DIR: /var/lib/caflow/documents
+  # nginx sets X-Forwarded-For, so the rate limiter can trust it here.
+  TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-true}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-no-reply@caflow.local}
+  EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-CAFlow}
+
+x-backend: &backend
+  build:
+    context: ./backend
+  image: caflow-backend:latest
+  environment: *backend-env
+  volumes:
+    # Uploads must be visible to the API that stores them and to the worker
+    # that categorises them, so the volume is shared rather than per-container.
+    - caflow_documents:/var/lib/caflow/documents
+  restart: unless-stopped
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -7,6 +53,7 @@ services:
       POSTGRES_PASSWORD: caflow
       POSTGRES_DB: caflow
     ports:
+      # Published on 5434 so it does not collide with a local server.
       - "5434:5432"
     volumes:
       - caflow_pgdata:/var/lib/postgresql/data
@@ -15,17 +62,81 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     container_name: caflow-redis
     ports:
       - "6381:6379"
+    volumes:
+      - caflow_redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+
+  # One-shot: migrate, then load the statutory compliance calendar. Everything
+  # else waits for this, so no process ever meets a half-built schema.
+  migrate:
+    <<: *backend
+    container_name: caflow-migrate
+    command: ["seed"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend
+    container_name: caflow-api
+    command: ["api"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # Published for direct access to /docs; the browser goes via web.
+      - "8000:8000"
+
+  worker:
+    <<: *backend
+    container_name: caflow-worker
+    command: ["worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Beat only enqueues; it holds no state worth persisting beyond its schedule.
+  beat:
+    <<: *backend
+    container_name: caflow-beat
+    command: ["beat"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: ./frontend
+    image: caflow-web:latest
+    container_name: caflow-web
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    restart: unless-stopped
 
 volumes:
   caflow_pgdata:
+  caflow_redisdata:
+  caflow_documents:

@@ -1,0 +1,14 @@
+# node_modules is reinstalled from the lockfile inside the image, and dist is
+# rebuilt there — copying either in would only risk shipping a stale build.
+node_modules/
+dist/
+.vite/
+
+.env
+.env.local
+*.local
+
+Dockerfile
+.dockerignore
+.DS_Store
+coverage/
