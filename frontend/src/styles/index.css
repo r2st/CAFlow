@@ -26,6 +26,13 @@
 
   --radius: 10px;
   --radius-sm: 6px;
+
+  /* How tall the sidebar is once it collapses to a header bar. Anything else
+     that sticks to the top of the viewport on a phone has to clear it, and
+     the two have no way to measure each other in CSS. Getting it slightly
+     wrong leaves a small gap; not having it at all hides whatever sticks
+     underneath, which is what used to happen to the bulk-action bar. */
+  --mobile-header: 57px;
   --shadow: 0 1px 2px rgba(20, 24, 45, 0.06), 0 4px 14px rgba(20, 24, 45, 0.05);
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
@@ -1200,8 +1207,16 @@ th.tick input, td.tick input { width: auto; margin: 0; }
   .requirement-list li .upload-control { width: 100%; }
   .requirement-list li .upload-button { width: 100%; text-align: center; }
 
-  /* The bar stacks so the count and the actions each get a full line. */
-  .bulk-bar { flex-direction: column; align-items: stretch; }
+  /* The bar stacks so the count and the actions each get a full line, and
+     sticks below the header rather than at the top of the viewport. Both are
+     sticky and the header wins on z-index, so at top: 0 the header sat over
+     the bar's first line — hiding the selected count, which is the one thing
+     the bar exists to keep on screen while the list scrolls underneath. */
+  .bulk-bar {
+    flex-direction: column;
+    align-items: stretch;
+    top: var(--mobile-header);
+  }
   .bulk-bar select { width: 100%; min-width: 0; }
 
   /* Name over bar over counts — three columns is unreadable on a phone. */
