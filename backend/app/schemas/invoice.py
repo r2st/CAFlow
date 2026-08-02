@@ -8,13 +8,13 @@ from datetime import date, datetime
 from pydantic import Field
 
 from app.models.base import InvoiceStatus
-from app.schemas.common import ORMModel, SanitizedModel
+from app.schemas.common import MAX_AMOUNT_PAISE, ORMModel, SanitizedModel
 
 
 class InvoiceLineIn(SanitizedModel):
     description: str = Field(min_length=1, max_length=512)
     quantity: int = Field(default=1, ge=1, le=10_000)
-    unit_price_paise: int = Field(ge=0)
+    unit_price_paise: int = Field(ge=0, le=MAX_AMOUNT_PAISE)
     sac_code: str | None = Field(default=None, max_length=16)
     compliance_item_id: uuid.UUID | None = None
 
@@ -76,7 +76,7 @@ class InvoiceDetailOut(InvoiceOut):
 
 
 class PaymentCreate(SanitizedModel):
-    amount_paise: int = Field(gt=0)
+    amount_paise: int = Field(gt=0, le=MAX_AMOUNT_PAISE)
     payment_date: date | None = None
     reference: str | None = Field(default=None, max_length=128)
 

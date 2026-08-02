@@ -9,6 +9,7 @@ import pytest
 
 from app.models.base import InvoiceStatus
 from app.models.invoice import Invoice, InvoiceLine
+from app.schemas.common import MAX_AMOUNT_PAISE
 from app.services import billing
 from tests.conftest import make_client_payload
 
@@ -663,3 +664,80 @@ class TestLinesCitingFilings:
             ],
         )
         assert response.status_code == 404
+
+
+class TestAmountBounds:
+    """Money columns are 64-bit; an absurd amount must be a 422, not a 500.
+
+    Without an upper bound the arithmetic — amount × quantity × lines, plus
+    GST — overflows BIGINT, and the caller gets a database error instead of a
+    message naming the field they got wrong.
+    """
+
+    OVER = MAX_AMOUNT_PAISE + 1
+
+    def test_a_line_priced_beyond_the_ceiling_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[
+                {"description": "Absurd", "quantity": 1, "unit_price_paise": self.OVER}
+            ],
+        )
+        assert response.status_code == 422
+        assert "unit_price_paise" in response.text
+
+    def test_the_ceiling_itself_is_accepted(self, client, auth_headers, client_id):
+        """The bound is a guard rail, so the largest allowed amount still works."""
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[
+                {
+                    "description": "At the ceiling",
+                    "quantity": 1,
+                    "unit_price_paise": MAX_AMOUNT_PAISE,
+                }
+            ],
+        )
+        assert response.status_code == 201
+        assert response.json()["subtotal_paise"] == MAX_AMOUNT_PAISE
+
+    def test_the_worst_case_invoice_still_fits_in_the_column(self):
+        """200 lines, 10,000 each, at the ceiling, plus GST — inside BIGINT."""
+        subtotal = 200 * 10_000 * MAX_AMOUNT_PAISE
+        total = subtotal + (subtotal * 10_000 + 5_000) // 10_000
+        assert total < 2**63 - 1
+
+    def test_a_payment_beyond_the_ceiling_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+
+        response = client.post(
+            f"/api/v1/invoices/{invoice['id']}/payments",
+            json={"amount_paise": self.OVER},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+    def test_a_filing_fee_beyond_the_ceiling_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        """A fee reaches an invoice line through generation, so it needs the
+        same ceiling — otherwise the overflow just arrives one step later."""
+        item = client.get(
+            "/api/v1/compliance/calendar", params={"limit": 1}, headers=auth_headers
+        ).json()["items"][0]
+
+        response = client.patch(
+            f"/api/v1/compliance/items/{item['id']}",
+            json={"fee_paise": self.OVER},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422

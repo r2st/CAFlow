@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pydantic import Field
 
 from app.models.base import ComplianceCategory, ComplianceStatus, Frequency
-from app.schemas.common import ORMModel, SanitizedModel
+from app.schemas.common import MAX_AMOUNT_PAISE, ORMModel, SanitizedModel
 
 
 class ComplianceTypeOut(ORMModel):
@@ -63,7 +63,7 @@ class ComplianceItemUpdate(SanitizedModel):
     acknowledgement_number: str | None = Field(default=None, max_length=128)
     assigned_practitioner_id: uuid.UUID | None = None
     due_date: date | None = None
-    fee_paise: int | None = Field(default=None, ge=0)
+    fee_paise: int | None = Field(default=None, ge=0, le=MAX_AMOUNT_PAISE)
     notes: str | None = None
 
 

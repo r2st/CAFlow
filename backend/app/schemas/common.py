@@ -27,6 +27,16 @@ INVISIBLE_CHARS = re.compile(r"[​-‏‪-‮⁦-⁩﻿]")
 # Whitespace is meaningful in a secret, so these are passed through untouched.
 UNSANITISED_FIELDS = frozenset({"password", "owner_password", "new_password", "token"})
 
+# ₹1,000 crore, as an upper bound on any single amount a client can send.
+#
+# This is not a business rule — no CA bills that on one line — it is what keeps
+# an absurd number from reaching a BIGINT column. Money columns are 64-bit, and
+# an invoice multiplies an amount by a quantity (up to 10,000) across up to 200
+# lines before adding GST. At this ceiling the worst case is ~2.4e18, inside the
+# 9.2e18 a BIGINT holds; without it, an out-of-range amount is a 500 from the
+# database driver rather than a 422 naming the field.
+MAX_AMOUNT_PAISE = 1_000_000_000_000
+
 
 def sanitize_text(value: str) -> str:
     """Strip characters that are invisible, control, or display-spoofing.
