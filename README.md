@@ -134,6 +134,23 @@ Neither dependency will accept the other's token. Revocation needs no
 blocklist: `Client.portal_token_valid_from` is a cut-off instant, and a token
 is accepted only if it was minted at or after it.
 
+**Roles.** Four, widening outward. `junior` reads everything in the firm and
+does the day-to-day work — updating filing status, uploading documents, creating
+and updating tasks. `manager` adds the paths that commit the firm to something:
+creating and deactivating clients, granting and revoking portal access, issuing
+invoices and recording payments, generating tasks, queueing and cancelling
+reminders. `partner` and `owner` additionally reach team management and the
+audit trail. Role checks live in `api/deps.py` as dependency factories, so an
+endpoint declares who may call it in its signature rather than in its body.
+
+**Audit trail.** Every mutating endpoint appends to `audit_log` through
+`services.audit`, recording the actor, the action, the record touched and a
+before/after of just the fields that changed. It is readable at `GET /audit` and
+writable from nowhere — there is no create endpoint, and a `POST` to the
+collection is a 405. Reading is limited to owners and partners, because the log
+records what managers did too. Actions taken through the client portal are
+recorded against a client label rather than a practitioner id.
+
 **Uploads.** Stored on a shared volume that both the API and the worker mount
 (`STORAGE_DIR`). The storage module is the only thing that touches the
 filesystem, so swapping it for S3-compatible object storage is a single-file
