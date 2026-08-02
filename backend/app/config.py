@@ -8,6 +8,7 @@ happens to need it.
 
 from __future__ import annotations
 
+import ipaddress
 from functools import lru_cache
 
 from pydantic import Field, field_validator, model_validator
@@ -78,6 +79,16 @@ class Settings(BaseSettings):
     # Trust X-Forwarded-For for the client IP. Only enable behind a proxy that
     # overwrites the header — otherwise callers can forge their rate-limit key.
     trust_proxy_headers: bool = False
+    # ...and only when the connection itself came from one of these. Turning
+    # the switch above on is not enough on its own: the stack publishes the API
+    # port alongside nginx, so a caller who reaches it directly could otherwise
+    # send any X-Forwarded-For it liked and pick a fresh rate-limit bucket for
+    # every request. A proxy sits on a private network in every deployment
+    # this ships with, so the default closes that without configuration.
+    # Set to "*" to trust any peer — only sane if nothing else can reach the port.
+    trusted_proxy_ips: str = (
+        "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
+    )
 
     # --- Request handling ---
     # Rejected before the body is read, so a huge upload cannot exhaust memory.
@@ -245,12 +256,44 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @property
+    def trusted_proxy_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        """Networks whose forwarded headers are believed.
+
+        An empty list means nothing is trusted, which is the safe way to read a
+        malformed setting: the peer address is then used directly, and a caller
+        gets its own real address as a rate-limit key rather than one it chose.
+        """
+        return _network_list(self.trusted_proxy_ips)
+
+    @property
+    def trusts_every_proxy(self) -> bool:
+        return self.trusted_proxy_ips.strip() == "*"
+
+    @property
     def document_reminder_offsets(self) -> list[int]:
         return _int_list(self.document_reminder_offsets_days)
 
     @property
     def payment_reminder_offsets(self) -> list[int]:
         return _int_list(self.payment_reminder_offsets_days)
+
+
+def _network_list(raw: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Parse a comma-separated list of IPs and CIDRs, ignoring junk entries.
+
+    A bare address is accepted and read as a single-host network, so the
+    setting does not force anyone to write ``/32``.
+    """
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or part == "*":
+            continue
+        try:
+            networks.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            continue
+    return networks
 
 
 def _int_list(raw: str) -> list[int]:

@@ -9,6 +9,7 @@ exception handlers — a request id to log against.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import time
 import uuid
@@ -272,18 +273,53 @@ def _token_subject(request: Request) -> str | None:
     return None
 
 
+def _is_trusted_proxy(peer: str) -> bool:
+    """Is the machine that opened this connection a proxy we believe?
+
+    ``TRUST_PROXY_HEADERS`` alone is not enough. The stack publishes the API
+    port alongside nginx, so a caller reaching it directly could send whatever
+    ``X-Forwarded-For`` it liked and mint a fresh rate-limit bucket per request
+    — which is to say, no rate limit at all. The header is only believed when
+    the connection came from a listed address.
+    """
+    if settings.trusts_every_proxy:
+        return True
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return any(address in network for network in settings.trusted_proxy_networks)
+
+
+def _forwarded_client(request: Request) -> str | None:
+    """The originating address from the proxy headers, if there is a real one.
+
+    The value has to parse as an IP address. A proxy sends one; anything else
+    is either a misconfigured hop or a caller trying to write its own bucket
+    key, and neither should end up keying a counter or landing in a log line.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    # Left-most entry is the original client.
+    candidate = forwarded.split(",")[0].strip() or request.headers.get("x-real-ip", "").strip()
+    if not candidate:
+        return None
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
+
 def client_ip(request: Request) -> str:
     """The caller's address, honouring proxy headers only when configured.
 
-    ``X-Forwarded-For`` is caller-supplied unless a proxy overwrites it, so
-    trusting it by default would let anyone pick their own rate-limit bucket.
+    ``X-Forwarded-For`` is caller-supplied unless a proxy overwrites it, so it
+    is believed only when the switch is on *and* the connection came from a
+    trusted proxy. Falling back to the peer address is the conservative
+    direction: a caller gets its own real address rather than one it chose.
     """
-    if settings.trust_proxy_headers:
-        forwarded = request.headers.get("x-forwarded-for", "")
+    peer = request.client.host if request.client else "unknown"
+    if settings.trust_proxy_headers and _is_trusted_proxy(peer):
+        forwarded = _forwarded_client(request)
         if forwarded:
-            # Left-most entry is the original client.
-            return forwarded.split(",")[0].strip()[:64]
-        real_ip = request.headers.get("x-real-ip", "").strip()
-        if real_ip:
-            return real_ip[:64]
-    return request.client.host if request.client else "unknown"
+            return forwarded[:64]
+    return peer

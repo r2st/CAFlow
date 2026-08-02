@@ -232,6 +232,21 @@ class TestInMemoryCounter:
         assert asyncio.run(run()).allowed
 
 
+def fake_request(headers=None, peer="10.0.0.9"):
+    """A request as ``client_ip`` sees it: some headers and a peer address."""
+
+    class FakeClient:
+        host = peer
+
+    class FakeRequest:
+        pass
+
+    request = FakeRequest()
+    request.headers = headers or {}
+    request.client = FakeClient() if peer is not None else None
+    return request
+
+
 class TestClientIp:
     def test_forwarded_headers_are_ignored_by_default(self, client: TestClient):
         # Trusting X-Forwarded-For unconditionally would let a caller pick
@@ -241,8 +256,74 @@ class TestClientIp:
     def test_the_left_most_forwarded_address_wins_when_trusted(self, monkeypatch):
         monkeypatch.setattr(settings, "trust_proxy_headers", True)
 
-        class FakeRequest:
-            headers = {"x-forwarded-for": "203.0.113.7, 10.0.0.1"}
-            client = None
+        request = fake_request({"x-forwarded-for": "203.0.113.7, 10.0.0.1"})
 
-        assert client_ip(FakeRequest()) == "203.0.113.7"
+        assert client_ip(request) == "203.0.113.7"
+
+    def test_x_real_ip_is_used_when_there_is_no_forwarded_for(self, monkeypatch):
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request({"x-real-ip": "203.0.113.9"})
+
+        assert client_ip(request) == "203.0.113.9"
+
+
+class TestForwardedHeadersFromUntrustedPeers:
+    """The switch is not enough on its own.
+
+    ``docker-compose`` publishes the API port alongside nginx, so a caller can
+    reach the app directly. If the header were believed on that connection, it
+    could name a different address on every request and never meet a rate
+    limit at all.
+    """
+
+    def test_a_direct_caller_cannot_forge_its_own_address(self, monkeypatch):
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request(
+            {"x-forwarded-for": "203.0.113.7"}, peer="198.51.100.4"
+        )
+
+        assert client_ip(request) == "198.51.100.4"
+
+    def test_a_request_with_no_peer_is_not_trusted_either(self, monkeypatch):
+        """No peer means nothing to check the header against."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request({"x-forwarded-for": "203.0.113.7"}, peer=None)
+
+        assert client_ip(request) == "unknown"
+
+    def test_the_proxy_nginx_runs_behind_is_trusted_out_of_the_box(self, monkeypatch):
+        """The compose network is 172.16/12, and it must work unconfigured."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request({"x-forwarded-for": "203.0.113.7"}, peer="172.18.0.5")
+
+        assert client_ip(request) == "203.0.113.7"
+
+    def test_a_star_trusts_whatever_opened_the_connection(self, monkeypatch):
+        """For a deployment where nothing but the proxy can reach the port."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+        monkeypatch.setattr(settings, "trusted_proxy_ips", "*")
+
+        request = fake_request({"x-forwarded-for": "203.0.113.7"}, peer="198.51.100.4")
+
+        assert client_ip(request) == "203.0.113.7"
+
+    def test_a_forwarded_value_that_is_not_an_address_is_discarded(self, monkeypatch):
+        """Junk must not key a counter or reach a log line."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request({"x-forwarded-for": "not-an-ip"})
+
+        assert client_ip(request) == "10.0.0.9"
+
+    def test_an_unparseable_trust_list_trusts_nothing(self, monkeypatch):
+        """Reading a malformed setting as 'trust nobody' is the safe direction."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+        monkeypatch.setattr(settings, "trusted_proxy_ips", "garbage,,also-garbage")
+
+        request = fake_request({"x-forwarded-for": "203.0.113.7"})
+
+        assert client_ip(request) == "10.0.0.9"

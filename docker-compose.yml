@@ -23,7 +23,10 @@ x-backend-env: &backend-env
   CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
   PORTAL_BASE_URL: ${PORTAL_BASE_URL:-http://localhost:8080/portal}
   STORAGE_DIR: /var/lib/caflow/documents
-  # nginx sets X-Forwarded-For, so the rate limiter can trust it here.
+  # nginx sets X-Forwarded-For, so the rate limiter can trust it here. The
+  # header is still only believed from a peer inside TRUSTED_PROXY_IPS, whose
+  # default already covers the private range the compose network sits on —
+  # left unset here so an empty value cannot silently mean "trust nobody".
   TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-true}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
   SMTP_HOST: ${SMTP_HOST:-}
@@ -100,9 +103,13 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    ports:
-      # Published for direct access to /docs; the browser goes via web.
-      - "8000:8000"
+    # The API port is deliberately not published. nginx already proxies /docs,
+    # /health and the API itself on 8080, so publishing 8000 added no reach —
+    # it only added a way to bypass the proxy and hand the app an
+    # X-Forwarded-For of one's choosing. Reach it directly with
+    # `docker compose exec api ...` when debugging.
+    expose:
+      - "8000"
 
   worker:
     <<: *backend

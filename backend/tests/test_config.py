@@ -6,6 +6,8 @@ without disturbing the process-wide singleton the rest of the suite uses.
 
 from __future__ import annotations
 
+import ipaddress
+
 import pytest
 
 from app.config import ConfigError, Settings, get_settings
@@ -126,6 +128,37 @@ class TestDerivedValues:
         assert Settings(_env_file=None, debug=True, log_level="warning").effective_log_level == (
             "WARNING"
         )
+
+    def test_the_default_trust_list_covers_where_a_proxy_actually_lives(self):
+        """Loopback and the private ranges, so compose works unconfigured."""
+        settings = Settings(_env_file=None)
+        networks = settings.trusted_proxy_networks
+
+        assert networks
+        for peer in ("127.0.0.1", "10.1.2.3", "172.18.0.5", "192.168.1.9"):
+            assert any(ipaddress.ip_address(peer) in net for net in networks), peer
+        # A public address is not a proxy we have any reason to believe.
+        assert not any(ipaddress.ip_address("203.0.113.7") in net for net in networks)
+
+    def test_a_bare_address_needs_no_prefix(self):
+        settings = Settings(_env_file=None, trusted_proxy_ips="198.51.100.4")
+        assert settings.trusted_proxy_networks == [ipaddress.ip_network("198.51.100.4/32")]
+
+    def test_junk_entries_are_dropped_rather_than_crashing_the_boot(self):
+        settings = Settings(_env_file=None, trusted_proxy_ips="10.0.0.0/8,nonsense,,::1")
+        assert settings.trusted_proxy_networks == [
+            ipaddress.ip_network("10.0.0.0/8"),
+            ipaddress.ip_network("::1/128"),
+        ]
+
+    def test_an_empty_trust_list_trusts_nothing(self):
+        """The safe reading: the peer address is used as-is."""
+        assert Settings(_env_file=None, trusted_proxy_ips="").trusted_proxy_networks == []
+
+    def test_a_star_is_recognised_as_trust_everything(self):
+        settings = Settings(_env_file=None, trusted_proxy_ips="*")
+        assert settings.trusts_every_proxy is True
+        assert Settings(_env_file=None).trusts_every_proxy is False
 
 
 class TestStartupFailure:
