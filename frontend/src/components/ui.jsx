@@ -72,13 +72,34 @@ export function statusLabel(status) {
   return STATUS_LABELS[status] ?? status
 }
 
-/** Paise are the storage unit everywhere; render them as rupees. */
+/**
+ * Paise are the storage unit everywhere; render them as rupees — exactly,
+ * including the paise.
+ *
+ * GST at 18% lands a total off a whole rupee for every subtotal that is not a
+ * multiple of ₹50, so rounding money for display was rounding most invoices.
+ * It showed figures that were not the figure:
+ *
+ * - ₹1,310.98 outstanding read as "₹1,311", which is more than is owed and
+ *   which the server refuses as an overpayment.
+ * - Invoices stopped footing. Two lines of ₹555.50 each showed as ₹556 and
+ *   ₹556 against a subtotal of ₹1,111 — arithmetic a client can see is wrong
+ *   on a bill they are being asked to pay.
+ * - A balance of 98 paise read as "₹1 outstanding".
+ * - The reminder emails have always formatted to the paise, so the amount a
+ *   client was chased for disagreed with the screen the practitioner read it
+ *   from.
+ *
+ * Whole amounts keep their clean form: `minimumFractionDigits: 0` leaves
+ * ₹25,000 as ₹25,000 rather than padding every dashboard tile with ".00".
+ */
 export function formatRupees(paise) {
   if (paise === null || paise === undefined) return '—'
   return new Intl.NumberFormat('en-IN', {
     style: 'currency',
     currency: 'INR',
-    maximumFractionDigits: 0,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
   }).format(paise / 100)
 }
 

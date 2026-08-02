@@ -465,3 +465,147 @@ describe('Billing — correcting a draft', () => {
     expect(await screen.findByText('INV-2026-0001 cancelled.')).toBeInTheDocument()
   })
 })
+
+/**
+ * Settling an invoice to the paise.
+ *
+ * GST at 18% on a whole-rupee subtotal lands on a fraction of a rupee more
+ * often than it doesn't: ₹1,111 of work bills at ₹1,310.98. The server holds
+ * money in paise and refuses a payment larger than the balance, so a form that
+ * deals in whole rupees cannot settle those invoices at all — and the amount it
+ * offered by default was itself one of the amounts the server refuses.
+ */
+describe('Recording a payment against a balance that is not whole rupees', () => {
+  // ₹1,111 of work, 18% GST: ₹199.98 tax, ₹1,310.98 to pay.
+  const AWKWARD = invoice({
+    status: 'sent',
+    subtotal_paise: 111100,
+    tax_paise: 19998,
+    total_paise: 131098,
+    amount_paid_paise: 0,
+    balance_paise: 131098,
+  })
+
+  beforeEach(() => {
+    vi.spyOn(api, 'listClients').mockResolvedValue(pageOf([CLIENT]))
+    vi.spyOn(api, 'revenue').mockResolvedValue(REVENUE)
+    vi.spyOn(api, 'billableWork').mockResolvedValue(BILLABLE_WORK)
+    vi.spyOn(api, 'listInvoices').mockResolvedValue(pageOf([AWKWARD]))
+  })
+
+  async function openPaymentForm(user) {
+    await user.click(await screen.findByRole('button', { name: 'Payment' }))
+    return screen.findByLabelText('Amount (₹)')
+  }
+
+  it('offers the balance exactly, down to the paise', async () => {
+    const user = userEvent.setup()
+    renderBilling()
+
+    expect(await openPaymentForm(user)).toHaveValue(1310.98)
+  })
+
+  it('sends exactly what is owed, settling the invoice in one go', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'recordPayment').mockResolvedValue(invoice({ status: 'paid' }))
+    renderBilling()
+
+    await openPaymentForm(user)
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+
+    // Not 131100 — the server refuses anything above the balance, so rounding
+    // the default up made the form's own suggestion unsubmittable.
+    await waitFor(() =>
+      expect(api.recordPayment).toHaveBeenCalledWith('inv-1', {
+        amount_paise: 131098,
+        reference: null,
+      }),
+    )
+  })
+
+  it('lets paise be typed, rather than whole rupees only', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'recordPayment').mockResolvedValue(invoice({ status: 'partially_paid' }))
+    renderBilling()
+
+    const field = await openPaymentForm(user)
+    await user.clear(field)
+    await user.type(field, '500.50')
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+
+    await waitFor(() =>
+      expect(api.recordPayment).toHaveBeenCalledWith('inv-1', {
+        amount_paise: 50050,
+        reference: null,
+      }),
+    )
+  })
+
+  it('will not leave a few paise outstanding by rounding the balance down', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'recordPayment').mockResolvedValue(invoice({ status: 'paid' }))
+    renderBilling()
+
+    await openPaymentForm(user)
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+
+    // Paying ₹1,310 would hold the invoice at "partially paid" over 98 paise,
+    // and put the client on the chase list for it.
+    await waitFor(() => expect(api.recordPayment).toHaveBeenCalled())
+    const [, body] = api.recordPayment.mock.calls[0]
+    expect(body.amount_paise).toBe(AWKWARD.balance_paise)
+  })
+
+  it('turns away more than is owed in rupees, not in paise', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'recordPayment').mockResolvedValue(invoice())
+    renderBilling()
+
+    const field = await openPaymentForm(user)
+    await user.clear(field)
+    await user.type(field, '2000')
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+
+    // The server says this too, but says it as "131098 paise", which is not
+    // how anyone holding a cheque thinks about it.
+    expect(await screen.findByText(/more than the ₹1,310.98 still owed/i)).toBeInTheDocument()
+    expect(api.recordPayment).not.toHaveBeenCalled()
+  })
+
+  it('quotes the balance it is refusing, rather than a rounded one', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'recordPayment').mockResolvedValue(invoice())
+    renderBilling()
+
+    const field = await openPaymentForm(user)
+    await user.clear(field)
+    await user.type(field, '1311')
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+
+    // ₹1,311 is two paise over a ₹1,310.98 balance, so it is refused — and
+    // while money was rounded for display the refusal read "that is more than
+    // the ₹1,311 still owed", naming the very amount just typed as the amount
+    // owed. The practitioner is told what is actually outstanding instead.
+    const alert = await screen.findByText(/more than the/i)
+    expect(alert).toHaveTextContent('₹1,310.98')
+    expect(alert).not.toHaveTextContent('more than the ₹1,311 still owed')
+    expect(api.recordPayment).not.toHaveBeenCalled()
+  })
+
+  it('carries a payment reference through when one is given', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'recordPayment').mockResolvedValue(invoice({ status: 'paid' }))
+    renderBilling()
+
+    await openPaymentForm(user)
+    await user.type(screen.getByLabelText('Reference'), 'UTR9988')
+    await user.click(screen.getByRole('button', { name: 'Record payment' }))
+
+    await waitFor(() =>
+      expect(api.recordPayment).toHaveBeenCalledWith('inv-1', {
+        amount_paise: 131098,
+        reference: 'UTR9988',
+      }),
+    )
+  })
+})

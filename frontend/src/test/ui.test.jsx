@@ -12,6 +12,41 @@ describe('formatters', () => {
     expect(formatRupees(null)).toBe('—')
   })
 
+  it('leaves a whole-rupee amount whole', () => {
+    // Dashboard tiles and most fees are whole rupees; they should not be
+    // padded with a ".00" that carries no information.
+    expect(formatRupees(2_500_000)).toBe('₹25,000')
+    expect(formatRupees(0)).toBe('₹0')
+  })
+
+  it('groups large amounts in lakhs, as an Indian reader expects', () => {
+    // ₹25,00,000 — not ₹2,500,000.
+    expect(formatRupees(250_000_000)).toBe('₹25,00,000')
+  })
+
+  it('shows the paise when there are paise', () => {
+    // 18% GST on ₹1,111 of work. Rounding this to ₹1,311 showed more than is
+    // owed — an amount the server refuses as an overpayment.
+    expect(formatRupees(131_098)).toBe('₹1,310.98')
+    expect(formatRupees(19_998)).toBe('₹199.98')
+  })
+
+  it('does not round a balance under a rupee up to one', () => {
+    // 98 paise left on an invoice is not "₹1 outstanding".
+    expect(formatRupees(98)).toBe('₹0.98')
+    expect(formatRupees(50)).toBe('₹0.5')
+    expect(formatRupees(1)).toBe('₹0.01')
+  })
+
+  it('keeps an invoice footing when its lines are not whole rupees', () => {
+    // Two lines of ₹555.50 come to ₹1,111. Rounded for display they read as
+    // ₹556 and ₹556 against a ₹1,111 subtotal — visibly wrong arithmetic on a
+    // bill the client is being asked to pay.
+    const line = 55_550
+    expect(formatRupees(line)).toBe('₹555.5')
+    expect(formatRupees(line * 2)).toBe('₹1,111')
+  })
+
   it('formats ISO dates for an Indian reader', () => {
     expect(formatDate('2026-08-20')).toBe('20 Aug 2026')
     expect(formatDate(null)).toBe('—')

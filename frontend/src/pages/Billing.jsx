@@ -26,8 +26,24 @@ import {
 
 const PAGE_SIZE = 25
 
+/**
+ * Record a payment against an invoice.
+ *
+ * The amount is entered in rupees and sent in paise, and the two have to line
+ * up to the paise or the invoice cannot be settled. GST at 18% on a whole-rupee
+ * subtotal lands on a fraction of a rupee more often than not — ₹1,111 of work
+ * bills at ₹1,310.98 — and this form used to round the outstanding balance to
+ * whole rupees before offering it. Both directions of that rounding were wrong.
+ * Rounded up, the server refused the form's own default as more than what is
+ * owed, and a whole-rupee step meant no amount the practitioner could type was
+ * accepted either: the invoice could not be paid off at all. Rounded down, it
+ * settled to within a rupee and left the invoice part-paid, chasing a client
+ * for the last 44 paise.
+ *
+ * So the balance is offered exactly, and paise can be typed.
+ */
 function PaymentForm({ invoice, onDone, onError }) {
-  const [amount, setAmount] = useState(() => String((invoice.balance_paise / 100).toFixed(0)))
+  const [amount, setAmount] = useState(() => (invoice.balance_paise / 100).toFixed(2))
   const [reference, setReference] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -38,10 +54,20 @@ function PaymentForm({ invoice, onDone, onError }) {
       onError('Enter an amount greater than zero.')
       return
     }
+    const paise = Math.round(rupees * 100)
+    if (paise > invoice.balance_paise) {
+      // The server refuses this too, but in paise, which is not how anyone
+      // holding a cheque thinks about it.
+      onError(
+        `That is more than the ${formatRupees(invoice.balance_paise)} still owed on ` +
+          `${invoice.invoice_number}.`,
+      )
+      return
+    }
     setSaving(true)
     try {
       await api.recordPayment(invoice.id, {
-        amount_paise: Math.round(rupees * 100),
+        amount_paise: paise,
         reference: reference.trim() || null,
       })
       await onDone()
@@ -59,8 +85,14 @@ function PaymentForm({ invoice, onDone, onError }) {
         <input
           id={`pay-${invoice.id}`}
           type="number"
-          min="1"
-          step="1"
+          min="0.01"
+          // Paise, not whole rupees: a balance ending in .98 has to be typeable.
+          step="0.01"
+          // Deliberately no `max`. It would be accurate, but native constraint
+          // validation blocks the submit before any handler runs, so the
+          // browser's own bubble replaces the check below — and says "must be
+          // less than or equal to 1310.98" where the app says what is owed, on
+          // which invoice, in rupees, in the same alert as every other error.
           value={amount}
           onChange={(event) => setAmount(event.target.value)}
         />

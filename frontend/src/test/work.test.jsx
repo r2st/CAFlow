@@ -270,7 +270,12 @@ describe('Billing', () => {
     await screen.findByText('INV-2026-0001')
     await userEvent.setup().click(screen.getByRole('button', { name: 'Payment' }))
 
-    expect(screen.getByLabelText('Amount (₹)')).toHaveAttribute('min', '1')
+    const field = screen.getByLabelText('Amount (₹)')
+    // One paisa, not one rupee. GST at 18% routinely lands a balance on a
+    // fraction of a rupee, and a whole-rupee floor and step between them made
+    // those invoices impossible to settle exactly.
+    expect(field).toHaveAttribute('min', '0.01')
+    expect(field).toHaveAttribute('step', '0.01')
   })
 
   it('offers no payment button once an invoice is settled', async () => {

@@ -78,6 +78,37 @@ class TestTotals:
         invoice = Invoice(total_paise=100_000, amount_paid_paise=40_000)
         assert invoice.balance_paise == 60_000
 
+    def test_a_whole_rupee_fee_routinely_bills_to_a_fraction_of_a_rupee(self):
+        # 18% of ₹1,111 is ₹199.98, so the invoice totals ₹1,310.98. Nothing
+        # here is unusual — GST lands off a whole rupee for every subtotal that
+        # is not a multiple of ₹50 — and it is the reason anything downstream
+        # that deals in whole rupees cannot settle an invoice exactly.
+        invoice = Invoice(gst_rate_bps=1800, lines=[])
+        invoice.lines.append(InvoiceLine(description="Advisory", quantity=1, unit_price_paise=111_100))
+        billing.recalculate(invoice)
+        assert invoice.tax_paise == 19_998
+        assert invoice.total_paise == 131_098
+        assert invoice.total_paise % 100 != 0
+
+    def test_paying_the_balance_rounded_up_to_the_rupee_is_refused(self):
+        # ₹1,311 against a ₹1,310.98 balance. Two paise over is still over, and
+        # record_payment refuses anything over — see the endpoint saying so in
+        # TestPayments.test_overpayment_is_refused. That is what makes a
+        # rounded-up suggestion unsubmittable rather than merely imprecise.
+        invoice = Invoice(total_paise=131_098, amount_paid_paise=0)
+        rounded_up_to_whole_rupees = round(invoice.balance_paise / 100) * 100
+        assert rounded_up_to_whole_rupees > invoice.balance_paise
+
+    def test_paying_the_balance_rounded_down_leaves_it_unsettled(self):
+        # ₹1,310 of a ₹1,310.98 balance: the invoice stays part-paid over 98
+        # paise, and keeps appearing on the list of clients to chase.
+        invoice = Invoice(
+            total_paise=131_098, amount_paid_paise=131_000, status=InvoiceStatus.SENT
+        )
+        assert invoice.balance_paise == 98
+        billing.refresh_status(invoice)
+        assert invoice.status is InvoiceStatus.PARTIALLY_PAID
+
 
 class TestNumbering:
     def test_numbers_are_sequential_within_the_financial_year(
