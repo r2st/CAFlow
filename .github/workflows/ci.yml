@@ -198,6 +198,62 @@ jobs:
           docker logs caflow-api-smoke
           exit 1
 
+      # A header that is in nginx.conf is not yet a header the browser gets:
+      # nginx drops every inherited add_header in a block that declares one of
+      # its own, so a policy can be present in the file and absent from the
+      # response. This asks the running container what it actually sends.
+      - name: Image serves the app shell with its security headers
+        if: matrix.name == 'web'
+        run: |
+          # nginx resolves upstream hostnames at startup and refuses to start
+          # if one is unknown, so the API name has to point somewhere even
+          # though nothing is proxied here.
+          docker run -d --name caflow-web-smoke -p 8080:80 \
+            --add-host api:127.0.0.1 caflow-web:ci
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/healthz > /dev/null; then
+              echo "Serving after ${attempt}s"
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "::error::The web image never started serving"
+              docker logs caflow-web-smoke
+              docker rm -f caflow-web-smoke
+              exit 1
+            fi
+            sleep 1
+          done
+
+          shell_headers=$(curl -fsS -D - -o /dev/null http://localhost:8080/)
+          echo "$shell_headers"
+
+          status=0
+          for header in content-security-policy x-frame-options \
+                        x-content-type-options referrer-policy permissions-policy; do
+            if ! grep -qi "^${header}:" <<< "$shell_headers"; then
+              echo "::error::The app shell went out without ${header}"
+              status=1
+            fi
+          done
+
+          # The bundle itself lives under /assets/, which declares its own
+          # Cache-Control and so inherits nothing. That is exactly the case
+          # where a header goes missing without anyone noticing.
+          bundle=$(curl -fsS http://localhost:8080/ | grep -o '/assets/[^"]*\.js' | head -1)
+          if [ -z "$bundle" ]; then
+            echo "::error::Could not find the bundle in the served index.html"
+            status=1
+          elif ! curl -fsS -D - -o /dev/null "http://localhost:8080${bundle}" \
+               | grep -qi '^x-content-type-options:'; then
+            echo "::error::${bundle} went out without X-Content-Type-Options"
+            status=1
+          fi
+
+          docker logs caflow-web-smoke
+          docker rm -f caflow-web-smoke
+          exit $status
+
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
