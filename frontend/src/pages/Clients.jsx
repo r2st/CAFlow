@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
+import { useAuth } from '../context/AuthContext'
 import { Alert, ENTITY_TYPE_LABELS, EmptyState, Skeleton } from '../components/ui'
 
 const PAGE_SIZE = 25
 
 export default function Clients() {
+  // Onboarding a client is manager-and-above on the API.
+  const { canManageClients } = useAuth()
   const [search, setSearch] = useState('')
   const [gstFilter, setGstFilter] = useState('')
   const [offset, setOffset] = useState(0)
@@ -47,9 +50,11 @@ export default function Clients() {
           <h1>Clients</h1>
           <p>{total} client{total === 1 ? '' : 's'} in the practice</p>
         </div>
-        <Link to="/clients/new">
-          <button>Add client</button>
-        </Link>
+        {canManageClients && (
+          <Link to="/clients/new">
+            <button>Add client</button>
+          </Link>
+        )}
       </div>
 
       <Alert kind="error">{error}</Alert>

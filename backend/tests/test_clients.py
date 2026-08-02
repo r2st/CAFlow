@@ -508,3 +508,119 @@ class TestTenantIsolation:
             f"{API}/clients/{created['client']['id']}", headers=other_headers
         )
         assert response.status_code == 404
+
+
+class TestClientRolePermissions:
+    """Onboarding and amending a client is manager-and-above.
+
+    A junior does the filing work but does not decide who the firm acts for, or
+    which obligations a client carries — changing a registration flag silently
+    rewrites the compliance calendar. The web UI hides these controls from a
+    junior; these tests are what makes that a guarantee rather than a courtesy.
+    """
+
+    @staticmethod
+    def junior_headers(client: TestClient, auth_headers: dict) -> dict[str, str]:
+        client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Junior Jain",
+                "email": "junior@sharma-ca.in",
+                "password": "junior-password-1",
+                "role": "junior",
+            },
+        )
+        token = client.post(
+            f"{API}/auth/login",
+            json={"email": "junior@sharma-ca.in", "password": "junior-password-1"},
+        ).json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_a_junior_cannot_onboard_a_client(self, client: TestClient, auth_headers: dict):
+        headers = self.junior_headers(client, auth_headers)
+
+        response = client.post(f"{API}/clients", headers=headers, json=make_client_payload())
+
+        assert response.status_code == 403
+        assert "Insufficient permissions" in response.json()["detail"]
+
+    def test_a_junior_cannot_amend_a_client(
+        self, client: TestClient, auth_headers: dict, created_client: dict
+    ):
+        headers = self.junior_headers(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/clients/{created_client['id']}",
+            headers=headers,
+            json={"name": "Renamed By Junior"},
+        )
+
+        assert response.status_code == 403
+
+    def test_a_junior_cannot_deactivate_a_client(
+        self, client: TestClient, auth_headers: dict, created_client: dict
+    ):
+        headers = self.junior_headers(client, auth_headers)
+
+        response = client.delete(f"{API}/clients/{created_client['id']}", headers=headers)
+
+        assert response.status_code == 403
+        # The refusal is total: the client is still on the books.
+        after = client.get(f"{API}/clients/{created_client['id']}", headers=auth_headers)
+        assert after.json()["is_active"] is True
+
+    def test_a_junior_cannot_regenerate_the_calendar(
+        self, client: TestClient, auth_headers: dict, created_client: dict
+    ):
+        headers = self.junior_headers(client, auth_headers)
+
+        response = client.post(
+            f"{API}/clients/{created_client['id']}/compliance-items",
+            headers=headers,
+            json={},
+        )
+
+        assert response.status_code == 403
+
+    def test_a_junior_can_still_read_the_client_they_work_on(
+        self, client: TestClient, auth_headers: dict, created_client: dict
+    ):
+        headers = self.junior_headers(client, auth_headers)
+
+        assert client.get(f"{API}/clients", headers=headers).status_code == 200
+        assert (
+            client.get(f"{API}/clients/{created_client['id']}", headers=headers).status_code == 200
+        )
+
+    def test_a_manager_can_amend_and_deactivate(
+        self, client: TestClient, auth_headers: dict, created_client: dict
+    ):
+        client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Meera Manager",
+                "email": "meera@sharma-ca.in",
+                "password": "manager-password-1",
+                "role": "manager",
+            },
+        )
+        token = client.post(
+            f"{API}/auth/login",
+            json={"email": "meera@sharma-ca.in", "password": "manager-password-1"},
+        ).json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        patched = client.patch(
+            f"{API}/clients/{created_client['id']}",
+            headers=headers,
+            json={"contact_person": "Someone New"},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["client"]["contact_person"] == "Someone New"
+
+        assert (
+            client.delete(f"{API}/clients/{created_client['id']}", headers=headers).status_code
+            == 204
+        )

@@ -253,15 +253,13 @@ function MemberRow({ member, isSelf, canManage, onChangeRole, onSetActive, busy 
 }
 
 export default function Team() {
-  const { practitioner, firm } = useAuth()
+  const { practitioner, firm, isFirmAdmin: canManage } = useAuth()
   const [members, setMembers] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState(false)
-
-  const canManage = practitioner?.role === 'owner' || practitioner?.role === 'partner'
 
   const load = useCallback(async () => {
     try {

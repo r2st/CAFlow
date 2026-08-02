@@ -3,6 +3,18 @@ import api, { getToken, setToken } from '../api/client'
 
 const AuthContext = createContext(null)
 
+/**
+ * Who is allowed to do what, kept in one place because the API enforces the
+ * same two groupings and the UI has to agree with it. A button that leads
+ * only to a 403 is worse than no button: the practitioner reads it as the app
+ * being broken rather than as the permission it actually is.
+ *
+ * These mirror `require_firm_admin` and `require_manager` in the backend's
+ * `app/api/deps.py` — change them together.
+ */
+const FIRM_ADMIN_ROLES = new Set(['owner', 'partner'])
+const CLIENT_MANAGER_ROLES = new Set(['owner', 'partner', 'manager'])
+
 export function AuthProvider({ children }) {
   const [practitioner, setPractitioner] = useState(null)
   const [firm, setFirm] = useState(null)
@@ -56,6 +68,8 @@ export function AuthProvider({ children }) {
       firm,
       loading,
       isAuthenticated: Boolean(practitioner),
+      isFirmAdmin: FIRM_ADMIN_ROLES.has(practitioner?.role),
+      canManageClients: CLIENT_MANAGER_ROLES.has(practitioner?.role),
       login,
       register,
       logout,

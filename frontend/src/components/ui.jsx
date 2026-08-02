@@ -144,6 +144,23 @@ export function EmptyState({ title, children }) {
   )
 }
 
+/**
+ * Shown where a page exists but this practitioner's role cannot use it.
+ *
+ * Hiding the button that leads here is not enough on its own — the URL is
+ * still typeable, shareable and bookmarkable — and the API would answer with a
+ * bare 403. Saying which role is needed turns a dead end into something the
+ * practitioner can act on: ask the person who has it.
+ */
+export function NoAccess({ need = 'a manager, partner or owner', children }) {
+  return (
+    <div className="empty">
+      <h3>You do not have access to this</h3>
+      <p className="small">{children ?? `This needs ${need} on the firm's account.`}</p>
+    </div>
+  )
+}
+
 export function Stat({ label, value, tone }) {
   return (
     <div className="stat">
