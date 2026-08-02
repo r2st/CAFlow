@@ -934,6 +934,116 @@ class TestClientListingAndDetail:
         assert statuses == {ComplianceStatus.NOT_APPLICABLE}
 
 
+class TestOffBoardingMeansTheSameThingByEitherDoor:
+    """``DELETE /clients/{id}`` and ``PATCH {"is_active": false}`` both off-board.
+
+    They are the same transition — the firm has stopped acting for this client
+    — and the UI reaches for whichever is nearer. Only the delete closed the
+    open filings, so a client off-boarded through the patch kept every
+    obligation: they stayed on the firm's dashboard and calendar, went overdue
+    there, and no amount of editing the client would clear them.
+    """
+
+    @staticmethod
+    def onboard(client: TestClient, auth_headers: dict) -> str:
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        assert created["compliance_items_created"] > 0
+        return created["client"]["id"]
+
+    @staticmethod
+    def statuses(db: Session, client_id: str) -> set[ComplianceStatus]:
+        return {
+            item.status
+            for item in db.scalars(
+                select(ComplianceItem).where(ComplianceItem.client_id == uuid.UUID(client_id))
+            ).all()
+        }
+
+    def test_patching_a_client_inactive_closes_their_open_filings(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = self.onboard(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+        assert response.status_code == 200
+        assert response.json()["client"]["is_active"] is False
+
+        assert self.statuses(db, client_id) == {ComplianceStatus.NOT_APPLICABLE}
+
+    def test_the_dashboard_stops_counting_a_client_the_firm_has_let_go(
+        self, client: TestClient, auth_headers: dict
+    ):
+        client_id = self.onboard(client, auth_headers)
+        before = client.get(f"{API}/compliance/dashboard", headers=auth_headers).json()
+        assert before["overdue"] + before["due_soon"] + before["upcoming"] > 0
+
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+
+        after = client.get(f"{API}/compliance/dashboard", headers=auth_headers).json()
+        assert after["active_clients"] == 0
+        assert (after["overdue"], after["due_soon"], after["upcoming"]) == (0, 0, 0)
+
+    def test_the_close_is_recorded_so_taking_them_back_on_undoes_it(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The same reversibility the delete has — the patch must not lose it."""
+        client_id = self.onboard(client, auth_headers)
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": True}
+        )
+        assert ComplianceStatus.PENDING in self.statuses(db, client_id)
+        assert ComplianceStatus.NOT_APPLICABLE not in self.statuses(db, client_id)
+
+    def test_an_edit_that_does_not_touch_is_active_leaves_the_filings_alone(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = self.onboard(client, auth_headers)
+
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"notes": "Moved office"}
+        )
+        assert self.statuses(db, client_id) == {ComplianceStatus.PENDING}
+
+    def test_re_saving_an_already_inactive_client_is_not_a_second_off_boarding(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A practitioner marks the item not-applicable; the re-save must not claim it.
+
+        Only the transition shelves. Off-boarding a client who is already off
+        would stamp ``offboarded_from_status`` onto rows it never closed, and
+        reactivation would then "restore" a judgement someone made by hand.
+        """
+        client_id = self.onboard(client, auth_headers)
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+        item = db.scalars(
+            select(ComplianceItem).where(ComplianceItem.client_id == uuid.UUID(client_id))
+        ).first()
+        item.offboarded_from_status = None  # a hand-made not-applicable
+        db.commit()
+
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": True}
+        )
+
+        db.refresh(item)
+        assert item.status == ComplianceStatus.NOT_APPLICABLE
+
+
 class TestTenantIsolation:
     def test_a_firm_cannot_see_another_firms_clients(
         self, client: TestClient, auth_headers: dict

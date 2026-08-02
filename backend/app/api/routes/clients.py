@@ -292,6 +292,13 @@ def update_client(
     # without this one. Only on the transition: re-saving an already-active
     # client must not be charged a slot it is already occupying.
     reactivating = updates.get("is_active") is True and not client.is_active
+    # The same transition ``DELETE /clients/{id}`` performs, and it has to mean
+    # the same thing arriving by either door. It did not: off-boarding through
+    # the patch left every open filing ``pending``, so a firm that had stopped
+    # acting for a client still carried their obligations on its dashboard and
+    # its calendar, watched them go overdue, and had no way to clear them
+    # short of deactivating an already-deactivated client.
+    deactivating = updates.get("is_active") is False and client.is_active
     if reactivating:
         _claim_client_slot(db, firm)
 
@@ -318,6 +325,9 @@ def update_client(
 
     created = 0
     restored = 0
+    shelved = 0
+    if deactivating:
+        shelved = shelve_open_items(db, client)
     if reactivating:
         # A client back on the books owes what they owed. Both halves are
         # needed: the reopen covers the periods off-boarding closed, and the
@@ -340,6 +350,7 @@ def update_client(
         entity_id=client.id,
         actor=practitioner,
         summary=f"Updated client {client.name}"
+        + (f"; closed {shelved} open filing(s)" if shelved else "")
         + (f"; reopened {restored} filing(s)" if restored else "")
         + (f"; generated {created} new compliance item(s)" if created else ""),
         changes=audit.diff(before, audit.snapshot(client, updates)),
