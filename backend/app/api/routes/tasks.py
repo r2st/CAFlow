@@ -327,7 +327,11 @@ def update_task(
     if "assignee_id" in updates:
         _validate_assignee(db, practitioner.firm_id, updates["assignee_id"])
 
-    before = {key: getattr(task, key) for key in updates}
+    # ``_apply_status`` stamps and clears ``completed_at``, which no payload
+    # ever names — so without watching it, when a task was finished is a fact
+    # the trail does not hold.
+    watched = set(updates) | {"completed_at"}
+    before = audit.snapshot(task, watched)
     for key, value in updates.items():
         if key == "status":
             _apply_status(task, value)
@@ -341,7 +345,7 @@ def update_task(
         entity_id=task.id,
         actor=practitioner,
         summary=f"Updated task “{task.title}” → {task.status.value}",
-        changes=audit.diff(before, updates),
+        changes=audit.diff(before, audit.snapshot(task, watched)),
     )
     db.commit()
     db.refresh(task)

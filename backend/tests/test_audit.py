@@ -7,14 +7,15 @@ filterable down to the history of a single record.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import io
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.models.audit import AuditLog
-from tests.conftest import FIRM_REGISTRATION, make_client_payload
+from tests.conftest import FIRM_REGISTRATION, first_item_of_type, make_client_payload
 
 API = "/api/v1"
 
@@ -383,3 +384,157 @@ class TestAuditActions:
         response = client.get(f"{API}/audit/actions", headers=headers_for(token))
 
         assert response.status_code == 403
+
+
+class TestTheTrailRecordsWhatHappened:
+    """The diff is what the row became, not what the request asked for.
+
+    Several handlers derive a field after applying the patch. Diffing the
+    payload against the pre-state recorded the derivation as the value the
+    caller sent — or, when the caller never named the field, not at all.
+    """
+
+    def _entries(self, client: TestClient, auth_headers: dict, entity_id: str) -> list[dict]:
+        response = client.get(
+            f"{API}/audit", headers=auth_headers, params={"entity_id": entity_id}
+        )
+        assert response.status_code == 200, response.text
+        return [e for e in response.json()["items"] if e["changes"]]
+
+    def test_a_late_filing_is_recorded_as_delayed_not_as_filed(
+        self, client: TestClient, auth_headers: dict, client_id: str
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        late = date.fromisoformat(item["due_date"]) + timedelta(days=5)
+
+        response = client.patch(
+            f"{API}/compliance/items/{item['id']}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": late.isoformat()},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "delayed_filed"
+
+        diff = self._entries(client, auth_headers, item["id"])[0]["changes"]
+        # "filed" is a status this row never held.
+        assert diff["after"]["status"] == "delayed_filed"
+        assert diff["after"]["filed_on"] == late.isoformat()
+
+    def test_correcting_only_the_date_records_the_reclassification(
+        self, client: TestClient, auth_headers: dict, client_id: str
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        due = date.fromisoformat(item["due_date"])
+
+        on_time = client.patch(
+            f"{API}/compliance/items/{item['id']}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": (due - timedelta(days=1)).isoformat()},
+        )
+        assert on_time.json()["status"] == "filed"
+
+        # Only the date moves; the status follows it across the deadline.
+        late = client.patch(
+            f"{API}/compliance/items/{item['id']}",
+            headers=auth_headers,
+            json={"filed_on": (due + timedelta(days=3)).isoformat()},
+        )
+        assert late.status_code == 200, late.text
+        assert late.json()["status"] == "delayed_filed"
+
+        latest = self._entries(client, auth_headers, item["id"])[0]["changes"]
+        assert latest["before"]["status"] == "filed"
+        assert latest["after"]["status"] == "delayed_filed"
+
+    def test_a_bulk_revert_does_not_claim_a_status_the_items_do_not_have(
+        self, client: TestClient, auth_headers: dict, client_id: str
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        late = date.fromisoformat(item["due_date"]) + timedelta(days=2)
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [item["id"]],
+                "status": "filed",
+                "filed_on": late.isoformat(),
+            },
+        )
+        assert response.status_code == 200, response.text
+
+        entries = client.get(
+            f"{API}/audit", headers=auth_headers, params={"action": "compliance_item.bulk_status"}
+        ).json()["items"]
+        assert entries[0]["changes"]["status"] == "filed"
+        assert entries[0]["changes"]["resulting_statuses"] == ["delayed_filed"]
+
+    def test_finishing_a_task_records_when_it_was_finished(
+        self, client: TestClient, auth_headers: dict, client_id: str
+    ):
+        created = client.post(
+            f"{API}/tasks",
+            headers=auth_headers,
+            json={"title": "Collect bank statements", "client_id": client_id},
+        )
+        assert created.status_code == 201, created.text
+        task_id = created.json()["id"]
+
+        done = client.patch(
+            f"{API}/tasks/{task_id}", headers=auth_headers, json={"status": "done"}
+        )
+        assert done.status_code == 200, done.text
+
+        diff = self._entries(client, auth_headers, task_id)[0]["changes"]
+        assert diff["before"]["completed_at"] is None
+        # The stamp is the record of when the work was finished. Compared as
+        # instants: SQLite hands the column back naive, so the trail carries an
+        # offset the response does not.
+        recorded = datetime.fromisoformat(diff["after"]["completed_at"])
+        returned = datetime.fromisoformat(done.json()["completed_at"])
+        assert recorded.replace(tzinfo=None) == returned.replace(tzinfo=None)
+
+    def test_reopening_a_task_records_the_stamp_being_cleared(
+        self, client: TestClient, auth_headers: dict, client_id: str
+    ):
+        task_id = client.post(
+            f"{API}/tasks",
+            headers=auth_headers,
+            json={"title": "File GSTR-3B", "client_id": client_id},
+        ).json()["id"]
+        client.patch(f"{API}/tasks/{task_id}", headers=auth_headers, json={"status": "done"})
+
+        reopened = client.patch(
+            f"{API}/tasks/{task_id}", headers=auth_headers, json={"status": "in_progress"}
+        )
+        assert reopened.status_code == 200, reopened.text
+
+        diff = self._entries(client, auth_headers, task_id)[0]["changes"]
+        assert diff["before"]["completed_at"] is not None
+        assert diff["after"]["completed_at"] is None
+
+    def test_categorising_by_hand_records_the_confidence_being_dropped(
+        self, client: TestClient, auth_headers: dict, client_id: str
+    ):
+        uploaded = client.post(
+            f"{API}/documents/upload",
+            files={
+                "file": ("statement.pdf", io.BytesIO(b"%PDF-1.4\n% a statement\n"), "application/pdf")
+            },
+            data={"client_id": client_id},
+            headers=auth_headers,
+        )
+        assert uploaded.status_code == 201, uploaded.text
+        document_id = uploaded.json()["document"]["id"]
+
+        corrected = client.patch(
+            f"{API}/documents/{document_id}", headers=auth_headers, json={"category": "form_16"}
+        )
+        assert corrected.status_code == 200, corrected.text
+        assert corrected.json()["is_category_confirmed"] is True
+
+        diff = self._entries(client, auth_headers, document_id)[0]["changes"]
+        assert diff["after"]["category"] == "form_16"
+        # A human choosing the category is what makes the guess meaningless,
+        # and the trail is where "a human chose it" is recorded.
+        assert diff["after"]["is_category_confirmed"] is True

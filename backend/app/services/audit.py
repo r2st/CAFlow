@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -43,6 +44,32 @@ def record(
     )
     db.add(entry)
     return entry
+
+
+def snapshot(entity: Any, keys: Iterable[str]) -> dict[str, Any]:
+    """The entity's current values for ``keys``, for one side of a :func:`diff`.
+
+    Both sides come from the entity, never from the request body. Diffing the
+    payload against the pre-state records what was *asked for*, and a handler
+    that derives a field after applying the patch then has that derivation
+    misreported or lost outright:
+
+    * A filing patched ``filed_on`` to a date past its own deadline is stored
+      as ``delayed_filed``. Diffed against the payload it reads ``filed`` — a
+      status the row never held — and a bare date correction that reclassified
+      it recorded no status change at all. That log is the firm's account of
+      when a return was lodged, which is exactly the thing an assessing officer
+      asks about, so "recorded on time" against a row that says otherwise is
+      the worst way for it to be wrong.
+    * A task moved to ``done`` stamps ``completed_at``; a document given a
+      category by hand clears the classifier's confidence. Neither is in the
+      payload, so neither appeared.
+
+    Pass a key set covering both what the caller sent and whatever the handler
+    may derive from it. Keys that did not move cost nothing — ``diff`` drops
+    them.
+    """
+    return {key: getattr(entity, key) for key in keys}
 
 
 def diff(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:

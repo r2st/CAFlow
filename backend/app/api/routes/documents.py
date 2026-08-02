@@ -347,7 +347,11 @@ def update_document(
                 detail="That filing belongs to a different client",
             )
 
-    before = {key: getattr(document, key) for key in updates}
+    # Both are derived from a category change rather than sent with it, so
+    # neither showed up as having moved — and "a human overrode the
+    # classifier" is the whole point of recording the edit.
+    watched = set(updates) | {"is_category_confirmed", "category_confidence"}
+    before = audit.snapshot(document, watched)
     for key, value in updates.items():
         setattr(document, key, value)
 
@@ -363,7 +367,7 @@ def update_document(
         entity_id=document.id,
         actor=practitioner,
         summary=f"Updated {document.original_filename}",
-        changes=audit.diff(before, updates),
+        changes=audit.diff(before, audit.snapshot(document, watched)),
     )
     db.commit()
     db.refresh(document)

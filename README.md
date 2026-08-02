@@ -185,6 +185,16 @@ collection is a 405. Reading is limited to owners and partners, because the log
 records what managers did too. Actions taken through the client portal are
 recorded against a client label rather than a practitioner id.
 
+Both sides of that before/after are read off the record, never off the request
+body — several handlers derive a field after applying the patch, and diffing
+the payload recorded the derivation as the value the caller sent or dropped it
+entirely. A filing whose date is corrected to one past its own deadline is
+stored as `delayed_filed`; against the payload it read `filed`, a status the
+row never held, and a bare date correction logged no status change at all. That
+log is the firm's account of when a return was lodged, which is the question an
+assessing officer asks. The same fix covers `completed_at` on a finished task
+and the classifier confidence a hand-picked document category clears.
+
 **Uploads.** Stored on a shared volume that both the API and the worker mount
 (`STORAGE_DIR`). The storage module is the only thing that touches the
 filesystem, so swapping it for S3-compatible object storage is a single-file

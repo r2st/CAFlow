@@ -317,7 +317,7 @@ def update_practitioner(
     if updates.get("is_active") is False and target.is_active:
         released = task_service.release_open_tasks(db, target)
 
-    before = {key: getattr(target, key) for key in updates}
+    before = audit.snapshot(target, updates)
     for key, value in updates.items():
         setattr(target, key, value)
 
@@ -329,7 +329,7 @@ def update_practitioner(
         actor=admin,
         summary=f"Updated {target.email}"
         + (f"; {released} open task(s) returned to unassigned" if released else ""),
-        changes=audit.diff(before, updates),
+        changes=audit.diff(before, audit.snapshot(target, updates)),
     )
     db.commit()
     db.refresh(target)

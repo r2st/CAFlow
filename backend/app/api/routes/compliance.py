@@ -218,7 +218,12 @@ def update_compliance_item(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
-    before = {key: getattr(item, key) for key in updates}
+    # ``_normalise_filing`` derives both of these below, so both are watched
+    # whether or not the caller named them: a bare date correction that moves a
+    # filing past its deadline changes the status too, and that is the half of
+    # the change the record most needs to carry.
+    watched = set(updates) | {"status", "filed_on"}
+    before = audit.snapshot(item, watched)
     for key, value in updates.items():
         setattr(item, key, value)
 
@@ -240,7 +245,7 @@ def update_compliance_item(
         entity_id=item.id,
         actor=practitioner,
         summary=f"{item.compliance_type.code} {item.period_label} → {item.status.value}",
-        changes=audit.diff(before, updates),
+        changes=audit.diff(before, audit.snapshot(item, watched)),
     )
     db.commit()
     db.refresh(item)
@@ -294,7 +299,14 @@ def bulk_update_status(
         entity_type="compliance_item",
         actor=practitioner,
         summary=f"Set {len(items)} item(s) to {payload.status.value}",
-        changes={"item_ids": [str(i.id) for i in items], "status": payload.status.value},
+        changes={
+            "item_ids": [str(i.id) for i in items],
+            "status": payload.status.value,
+            # What they became, which the request does not say: a filing
+            # lodged after its own deadline is stored as delayed_filed, so a
+            # batch marked filed routinely lands on both.
+            "resulting_statuses": sorted({item.status.value for item in items}),
+        },
     )
     db.commit()
     return BulkStatusUpdateResult(

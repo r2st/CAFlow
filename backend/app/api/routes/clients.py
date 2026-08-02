@@ -247,7 +247,7 @@ def update_client(
                 detail=f"A client with PAN {updates['pan']} already exists",
             )
 
-    before = {key: getattr(client, key) for key in updates}
+    before = audit.snapshot(client, updates)
     for key, value in updates.items():
         setattr(client, key, value)
     db.flush()
@@ -267,7 +267,7 @@ def update_client(
         actor=practitioner,
         summary=f"Updated client {client.name}"
         + (f"; generated {created} new compliance item(s)" if created else ""),
-        changes=audit.diff(before, updates),
+        changes=audit.diff(before, audit.snapshot(client, updates)),
     )
     db.commit()
     db.refresh(client)
