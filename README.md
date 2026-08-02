@@ -121,6 +121,19 @@ tagged with it. A user quoting the id from an error message is enough to find
 the exact log entry. Set `LOG_JSON=true` wherever logs are shipped to a
 collector.
 
+**Reminders go out once.** The dispatcher claims one reminder at a time with
+`SELECT … FOR UPDATE SKIP LOCKED` and commits its outcome before starting the
+next send. Both halves matter: beat fires the job every fifteen minutes and the
+worker runs two processes, so overlapping runs are ordinary, and Celery
+acknowledges a task only once it finishes, so a worker killed mid-batch has
+that task redelivered. Reading a whole batch and committing at the end turned
+either of those into a firm's client list being mailed twice. What remains is
+an at-least-once window of exactly one message — a process killed between the
+SMTP handshake and the commit re-sends that one. `task_time_limit` sits below
+the broker's `visibility_timeout` so a slow task is never redelivered while it
+is still running, and the worker's `stop_grace_period` outlasts one SMTP
+timeout so a deploy does not kill a send it has already made.
+
 **Rate limits.** Counters live in Redis when it is reachable, so limits hold
 across workers; otherwise they fall back to a per-process window. Credential
 endpoints get a much tighter bucket than the rest of the API. Responses carry

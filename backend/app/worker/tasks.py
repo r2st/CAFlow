@@ -6,8 +6,8 @@ import logging
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.database import SessionLocal
@@ -137,6 +137,50 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
     return {"queued": queued}
 
 
+def _claim_next_due(
+    db: Session, *, cutoff: datetime, exclude: set[uuid.UUID]
+) -> Reminder | None:
+    """Take exclusive hold of the oldest reminder that is due, or return None.
+
+    ``FOR UPDATE SKIP LOCKED`` is what makes the claim exclusive: a row another
+    dispatcher is already sending is passed over rather than waited for, so two
+    runs divide the queue instead of both working through it. SQLite renders no
+    locking clause at all, which is correct for a single-process test suite.
+
+    ``exclude`` holds the reminders this run has already tried and left
+    ``SCHEDULED`` for a later run; without it the very next iteration would
+    select the same row again and retry it in a tight loop.
+    """
+    stmt = (
+        select(Reminder)
+        .where(
+            Reminder.status == ReminderStatus.SCHEDULED,
+            Reminder.scheduled_for <= cutoff,
+        )
+        .order_by(Reminder.scheduled_for, Reminder.id)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    if exclude:
+        stmt = stmt.where(Reminder.id.not_in(exclude))
+    return db.scalars(stmt).first()
+
+
+def _undispatched_count(db: Session, *, cutoff: datetime, exclude: set[uuid.UUID]) -> int:
+    """How many due reminders this run never got to. No lock — it only counts."""
+    stmt = (
+        select(func.count())
+        .select_from(Reminder)
+        .where(
+            Reminder.status == ReminderStatus.SCHEDULED,
+            Reminder.scheduled_for <= cutoff,
+        )
+    )
+    if exclude:
+        stmt = stmt.where(Reminder.id.not_in(exclude))
+    return db.scalar(stmt) or 0
+
+
 @celery_app.task(name="caflow.dispatch_due_reminders")
 def dispatch_due_reminders_task(limit: int = 200) -> dict[str, int]:
     """Send reminders whose scheduled time has arrived.
@@ -148,59 +192,115 @@ def dispatch_due_reminders_task(limit: int = 200) -> dict[str, int]:
     it up again, up to ``settings.reminder_max_attempts``. Permanent failures —
     a malformed address, a refused recipient — fail immediately rather than
     burning retries on something that cannot succeed.
+
+    One reminder is claimed, sent and committed at a time, rather than the
+    whole batch being read up front and written back at the end. Both halves of
+    that matter, because sending mail is the one thing here that a rollback
+    cannot take back:
+
+    * **The claim** is a locked row, so a second dispatcher cannot pick it up.
+      Beat fires this every fifteen minutes and the worker runs two processes,
+      so a batch that outlives its interval — two hundred messages through a
+      greylisting relay will — overlaps with the next run. Reading the same
+      ``SCHEDULED`` rows twice meant mailing every client in the batch twice.
+    * **The commit** is per reminder, so a crash costs at most the one message
+      in flight. A single commit at the end meant a worker killed at message
+      one hundred and fifty had sent a hundred and forty-nine emails and
+      recorded none of them — and with ``task_acks_late`` the task is then
+      redelivered, so all hundred and forty-nine go out again.
+
+    What is left is an at-least-once window of exactly one message: a process
+    killed between the SMTP handshake and the commit re-sends that one. That is
+    the honest floor without a provider-side idempotency key, and it is three
+    orders of magnitude better than the batch it replaces.
     """
-    now = datetime.now(UTC)
+    cutoff = datetime.now(UTC)
     sent = failed = retrying = 0
+    # Tried this run and deliberately left SCHEDULED for the next one.
+    deferred: set[uuid.UUID] = set()
+    firms: dict[uuid.UUID, Firm | None] = {}
+    claimed = 0
 
     with SessionLocal() as db:
-        due = db.scalars(
-            select(Reminder)
-            .options(selectinload(Reminder.client))
-            .where(
-                Reminder.status == ReminderStatus.SCHEDULED,
-                Reminder.scheduled_for <= now,
-            )
-            .limit(limit)
-        ).all()
-
-        firms: dict[uuid.UUID, Firm | None] = {}
-        for reminder in due:
-            reminder.attempt_count += 1
-            if not reminder.recipient:
-                reminder.status = ReminderStatus.FAILED
-                reminder.error_message = "No recipient address on file for this client"
-                failed += 1
-                continue
-
-            if reminder.firm_id not in firms:
-                firms[reminder.firm_id] = db.get(Firm, reminder.firm_id)
-
+        for _ in range(limit):
+            reminder = _claim_next_due(db, cutoff=cutoff, exclude=deferred)
+            if reminder is None:
+                break
+            claimed += 1
             try:
-                outcome = delivery.deliver(reminder, firms[reminder.firm_id])
-            except (mailer.DeliveryError, delivery.NoTransport) as exc:
-                permanent = getattr(exc, "permanent", True) or (
-                    reminder.attempt_count >= settings.reminder_max_attempts
-                )
-                reminder.error_message = str(exc)
-                if permanent:
-                    reminder.status = ReminderStatus.FAILED
-                    failed += 1
-                else:
-                    # Stays SCHEDULED; the next dispatcher run tries again.
-                    retrying += 1
-                continue
+                outcome = _attempt_delivery(db, reminder, firms)
+            except Exception:
+                # The claim is released and the reminder stays exactly as it
+                # was found, which is the only safe reading of "we do not know
+                # whether that went out".
+                db.rollback()
+                raise
+            if outcome == "sent":
+                sent += 1
+            elif outcome == "failed":
+                failed += 1
+            else:
+                retrying += 1
+                deferred.add(reminder.id)
+            # Ends the transaction, so the outcome is durable and the row lock
+            # is held only for the length of one delivery.
+            db.commit()
 
-            reminder.status = ReminderStatus.SENT
-            reminder.sent_at = now
-            reminder.error_message = None
-            logger.debug("Reminder %s: %s", reminder.id, outcome.detail)
-            sent += 1
-        db.commit()
+        # Only asked when the loop ran out of iterations rather than out of
+        # work, and only counts what was never looked at — a reminder deferred
+        # for a transient failure waits for the next run by design, and
+        # counting it here would make every greylisted message look like a
+        # backlog.
+        overflow = (
+            _undispatched_count(db, cutoff=cutoff, exclude=deferred)
+            if claimed == limit
+            else 0
+        )
 
+    if overflow:
+        logger.warning(
+            "Dispatch stopped at its batch limit of %s with %s reminder(s) still due; "
+            "they wait for the next run",
+            limit,
+            overflow,
+        )
     logger.info(
         "Dispatched %s reminder(s), %s failed, %s awaiting retry", sent, failed, retrying
     )
     return {"sent": sent, "failed": failed, "retrying": retrying}
+
+
+def _attempt_delivery(
+    db: Session, reminder: Reminder, firms: dict[uuid.UUID, Firm | None]
+) -> str:
+    """Try to send one claimed reminder. Returns "sent", "failed" or "retrying"."""
+    reminder.attempt_count += 1
+    if not reminder.recipient:
+        reminder.status = ReminderStatus.FAILED
+        reminder.error_message = "No recipient address on file for this client"
+        return "failed"
+
+    if reminder.firm_id not in firms:
+        firms[reminder.firm_id] = db.get(Firm, reminder.firm_id)
+
+    try:
+        outcome = delivery.deliver(reminder, firms[reminder.firm_id])
+    except (mailer.DeliveryError, delivery.NoTransport) as exc:
+        permanent = getattr(exc, "permanent", True) or (
+            reminder.attempt_count >= settings.reminder_max_attempts
+        )
+        reminder.error_message = str(exc)
+        if permanent:
+            reminder.status = ReminderStatus.FAILED
+            return "failed"
+        # Stays SCHEDULED; the next dispatcher run tries again.
+        return "retrying"
+
+    reminder.status = ReminderStatus.SENT
+    reminder.sent_at = datetime.now(UTC)
+    reminder.error_message = None
+    logger.debug("Reminder %s: %s", reminder.id, outcome.detail)
+    return "sent"
 
 
 @celery_app.task(name="caflow.mark_overdue_clients")

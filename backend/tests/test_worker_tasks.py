@@ -11,10 +11,13 @@ bodies are an AI feature, and these tests are about scheduling, not wording.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql, sqlite
 
 from app.models.base import (
     ComplianceStatus,
@@ -28,8 +31,24 @@ from app.models.compliance import ComplianceItem, ComplianceType
 from app.models.firm import Firm
 from app.models.reminder import Reminder
 from app.worker import tasks
+from app.worker.celery_app import celery_app
 
 RUN_DATE = date(2026, 7, 1)
+
+
+class _StatementRecorder:
+    """A stand-in session that keeps the statement instead of running it.
+
+    Lets a test read the SQL the claim would issue, on a dialect the suite does
+    not run against.
+    """
+
+    def __init__(self) -> None:
+        self.statements: list = []
+
+    def scalars(self, statement):
+        self.statements.append(statement)
+        return SimpleNamespace(first=lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -412,6 +431,245 @@ class TestDispatchDueReminders:
             if r.status is ReminderStatus.SCHEDULED
         ]
         assert len(remaining) == 3
+
+
+class TestDispatchSendsEachReminderOnce:
+    """The dispatcher's guarantee: a reminder is mailed once, not once per run.
+
+    Beat fires it every fifteen minutes and the worker runs two processes, so
+    two dispatches genuinely overlap whenever a batch outlives its interval.
+    The old shape — read the whole batch, send it, commit at the end — turned
+    both an overlap and a crash into a firm's entire client list being mailed
+    twice. These cover the two halves of the replacement: the row is claimed
+    exclusively, and each outcome is committed before the next send starts.
+    """
+
+    def test_the_claim_takes_a_row_lock_a_second_dispatcher_skips(self):
+        """The lock is the whole mechanism, and SQLite cannot show it.
+
+        ``FOR UPDATE SKIP LOCKED`` is what makes two concurrent dispatchers
+        divide the queue rather than duplicate it, and the test suite runs on
+        SQLite, which renders no locking clause at all — so a change that
+        dropped ``with_for_update`` would pass every other test in this file
+        while quietly restoring the double-send. Compile the statement against
+        both dialects and read the SQL instead.
+        """
+        recorder = _StatementRecorder()
+
+        tasks._claim_next_due(recorder, cutoff=datetime.now(UTC), exclude=set())
+
+        statement = recorder.statements[0]
+        assert "FOR UPDATE SKIP LOCKED" in str(statement.compile(dialect=postgresql.dialect()))
+        # Stated rather than assumed: this is why the behaviour is unobservable
+        # in the rest of the suite.
+        assert "FOR UPDATE" not in str(statement.compile(dialect=sqlite.dialect()))
+
+    def test_a_crash_mid_batch_keeps_the_deliveries_already_made(self, db, monkeypatch):
+        """A worker killed at message three has sent two, and says so.
+
+        With one commit at the end of the batch, those two were mailed and
+        recorded nowhere — and ``task_acks_late`` then redelivers the task, so
+        both clients hear it again. Committing per reminder costs at most the
+        one in flight.
+        """
+        firm = make_firm(db)
+        past = datetime.now(UTC) - timedelta(hours=1)
+        for index in range(4):
+            recipient = f"c{index}@nimbus.in"
+            client = make_client(db, firm, name=f"Client {index}", email=recipient)
+            make_reminder(
+                db,
+                firm,
+                client,
+                scheduled_for=past + timedelta(minutes=index),
+                recipient=recipient,
+            )
+        db.commit()
+
+        delivered: list[str] = []
+
+        def dies_on_the_third(reminder, firm=None):
+            delivered.append(reminder.recipient)
+            if len(delivered) == 3:
+                raise RuntimeError("worker killed mid-send")
+            return tasks.delivery.DeliveryOutcome(delivered=True, transport="log")
+
+        monkeypatch.setattr(tasks.delivery, "deliver", dies_on_the_third)
+
+        with pytest.raises(RuntimeError):
+            tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        status = {r.recipient: r.status for r in db.scalars(select(Reminder)).all()}
+        assert status["c0@nimbus.in"] is ReminderStatus.SENT
+        assert status["c1@nimbus.in"] is ReminderStatus.SENT
+        # In flight when it died: nobody knows whether the relay took it, so it
+        # stays as it was found and the next run may send it once more.
+        assert status["c2@nimbus.in"] is ReminderStatus.SCHEDULED
+        assert status["c3@nimbus.in"] is ReminderStatus.SCHEDULED
+        # And the two already recorded are not offered again.
+        monkeypatch.setattr(
+            tasks.delivery,
+            "deliver",
+            lambda reminder, firm=None: tasks.delivery.DeliveryOutcome(
+                delivered=True, transport="log"
+            ),
+        )
+        assert tasks.dispatch_due_reminders_task() == {"sent": 2, "failed": 0, "retrying": 0}
+
+    def test_a_reminder_held_for_the_next_run_is_not_retried_inside_this_one(
+        self, db, monkeypatch
+    ):
+        """A transient failure defers; it does not spin.
+
+        Re-selecting after every commit means the reminder that was just left
+        ``SCHEDULED`` is the very next row the query would return. Without the
+        exclusion it would be retried until the batch limit or the attempt
+        ceiling ran out — turning one greylisted message into three.
+        """
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
+        db.commit()
+
+        attempts = []
+
+        def greylisted(reminder, firm=None):
+            attempts.append(reminder.id)
+            raise tasks.mailer.DeliveryError("451 greylisted, try again later")
+
+        monkeypatch.setattr(tasks.delivery, "deliver", greylisted)
+
+        result = tasks.dispatch_due_reminders_task(limit=25)
+
+        assert result == {"sent": 0, "failed": 0, "retrying": 1}
+        assert len(attempts) == 1
+        db.expire_all()
+        reminder = db.scalars(select(Reminder)).one()
+        assert reminder.status is ReminderStatus.SCHEDULED
+        assert reminder.attempt_count == 1
+
+    def test_the_longest_wait_goes_out_first(self, db, monkeypatch):
+        """A partial run must drain the backlog, not the newest arrivals."""
+        firm = make_firm(db)
+        now = datetime.now(UTC)
+        for label, hours in (("newest", 1), ("oldest", 3), ("middle", 2)):
+            client = make_client(db, firm, name=label, email=f"{label}@nimbus.in")
+            make_reminder(
+                db,
+                firm,
+                client,
+                scheduled_for=now - timedelta(hours=hours),
+                recipient=f"{label}@nimbus.in",
+            )
+        db.commit()
+
+        order: list[str] = []
+
+        def record(reminder, firm=None):
+            order.append(reminder.recipient)
+            return tasks.delivery.DeliveryOutcome(delivered=True, transport="log")
+
+        monkeypatch.setattr(tasks.delivery, "deliver", record)
+
+        tasks.dispatch_due_reminders_task()
+
+        assert order == ["oldest@nimbus.in", "middle@nimbus.in", "newest@nimbus.in"]
+
+    def test_a_truncated_batch_says_so_rather_than_looking_complete(self, db, caplog):
+        """Silently stopping at the limit reads as "everything went out"."""
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        past = datetime.now(UTC) - timedelta(hours=1)
+        for _ in range(3):
+            make_reminder(db, firm, client, scheduled_for=past)
+        db.commit()
+
+        with caplog.at_level(logging.WARNING, logger="app.worker.tasks"):
+            assert tasks.dispatch_due_reminders_task(limit=2) == {
+                "sent": 2,
+                "failed": 0,
+                "retrying": 0,
+            }
+
+        assert "batch limit" in caplog.text
+        assert "1 reminder(s) still due" in caplog.text
+
+    def test_a_run_that_exactly_empties_the_queue_is_quiet(self, db, caplog):
+        """Reaching the limit is not the same as leaving work behind."""
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
+        db.commit()
+
+        with caplog.at_level(logging.WARNING, logger="app.worker.tasks"):
+            tasks.dispatch_due_reminders_task(limit=1)
+
+        assert "batch limit" not in caplog.text
+
+    def test_a_deferred_reminder_is_not_reported_as_a_backlog(self, db, monkeypatch, caplog):
+        """A greylisted message waits for the next run by design.
+
+        Counting it as overflow would put a warning in the log on every run
+        where one relay was slow, which is how a real backlog warning stops
+        being read.
+        """
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
+        db.commit()
+
+        def greylisted(reminder, firm=None):
+            raise tasks.mailer.DeliveryError("451 greylisted, try again later")
+
+        monkeypatch.setattr(tasks.delivery, "deliver", greylisted)
+
+        with caplog.at_level(logging.WARNING, logger="app.worker.tasks"):
+            assert tasks.dispatch_due_reminders_task(limit=1) == {
+                "sent": 0,
+                "failed": 0,
+                "retrying": 1,
+            }
+
+        assert "batch limit" not in caplog.text
+
+
+class TestWorkerRuntimeLimits:
+    """The three timeouts that keep ``task_acks_late`` from meaning "twice".
+
+    Acknowledging after the work is done is what lets a dead worker's task be
+    picked up by a live one. The cost is that every one of these numbers has to
+    agree with the others: a task that outlives the broker's redelivery window
+    is handed to a second worker *while the first is still running it*.
+    """
+
+    def test_a_task_cannot_outlive_the_brokers_redelivery_window(self):
+        conf = celery_app.conf
+        soft = conf.task_soft_time_limit
+        hard = conf.task_time_limit
+        visibility = conf.broker_transport_options["visibility_timeout"]
+
+        # Soft first, so the task raises inside itself and can roll back; hard
+        # as the backstop; redelivery only after the hard kill has happened.
+        assert soft < hard < visibility
+
+    def test_redelivery_is_the_premise_the_limits_are_protecting(self):
+        assert celery_app.conf.task_acks_late is True
+        # One task in flight per process, so a slow batch cannot also be
+        # sitting on a queue of reserved work nobody is looking at.
+        assert celery_app.conf.worker_prefetch_multiplier == 1
+
+    def test_a_wedged_dispatch_cannot_outlast_its_own_schedule(self):
+        """Beat fires the dispatcher four times an hour.
+
+        A run allowed to exceed that interval piles up behind itself, and every
+        overlapping run is another set of row locks contending for the same
+        queue.
+        """
+        schedule = celery_app.conf.beat_schedule["dispatch-due-reminders"]["schedule"]
+        assert schedule.minute == set(range(0, 60, 15))
+
+        assert celery_app.conf.task_soft_time_limit <= 15 * 60
 
 
 # -------------------------------------------------------- generation & overdue --

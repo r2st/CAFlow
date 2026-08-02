@@ -227,3 +227,54 @@ class TestBodyLimitsAgree:
             "Caddy must not give up before the nginx behind it does, or the app's "
             "own response never makes it back"
         )
+
+
+def _duration_seconds(value: str | int) -> float:
+    """Compose durations — ``30s``, ``2m``, a bare number of seconds."""
+    if isinstance(value, int):
+        return float(value)
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)(ms|s|m|h)?", value.strip())
+    assert match, f"{value!r} is not a duration Compose understands"
+    scale = {None: 1, "ms": 0.001, "s": 1, "m": 60, "h": 3600}[match.group(2)]
+    return float(match.group(1)) * scale
+
+
+class TestShutdownIsGracefulEnoughToBeSafe:
+    """A deploy sends SIGTERM; ten seconds later Docker sends SIGKILL.
+
+    Ten is the default, and it is under both of the things that actually need
+    to finish here. For the worker that matters most: Celery acknowledges a
+    task only once it is done, so a process killed mid-task has that task
+    redelivered — and the one step a redelivery cannot undo is an email already
+    handed to the relay. The dispatcher commits each delivery as it happens
+    (see ``worker.tasks.dispatch_due_reminders_task``), so the exposure is one
+    message rather than a batch; this window is what keeps even that one from
+    being killed between the SMTP handshake and its commit.
+    """
+
+    def test_the_worker_outlasts_the_send_it_may_be_holding(self, compose):
+        grace = _duration_seconds(compose["services"]["worker"]["stop_grace_period"])
+
+        assert grace >= settings.smtp_timeout_seconds + 10, (
+            "a send that runs to its SMTP timeout must still have room to record "
+            "itself before the container is killed"
+        )
+
+    def test_the_api_outlasts_dockers_default(self, compose):
+        """uvicorn drains in-flight requests on SIGTERM; a deploy must let it."""
+        grace = _duration_seconds(compose["services"]["api"]["stop_grace_period"])
+
+        assert grace > 10
+
+    def test_a_worker_killed_anyway_is_not_redelivered_into_a_running_task(self):
+        """The compose window and the Celery limits are one argument, not two.
+
+        If the hard time limit could exceed the broker's visibility timeout, a
+        task still running would be handed to a second worker — the same
+        double-send this window exists to prevent, arriving by a different
+        route.
+        """
+        from app.worker.celery_app import celery_app
+
+        visibility = celery_app.conf.broker_transport_options["visibility_timeout"]
+        assert celery_app.conf.task_time_limit < visibility

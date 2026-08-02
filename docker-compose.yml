@@ -116,6 +116,10 @@ services:
     # `docker compose exec api ...` when debugging.
     expose:
       - "8000"
+    # SIGTERM makes uvicorn stop accepting connections and finish what it is
+    # holding. Docker's default is ten seconds, which is under the API's own
+    # slowest path, so a deploy would cut a document upload in half.
+    stop_grace_period: 30s
 
   worker:
     <<: *backend
@@ -126,6 +130,15 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # Celery's SIGTERM is a warm shutdown: no new tasks, finish the running
+    # one. A whole reminder batch will not fit in any grace period worth
+    # waiting, and it does not have to — the dispatcher commits each delivery
+    # as it happens, so an interrupted batch resumes rather than restarts. What
+    # this window has to cover is the *one* send in flight, and its SMTP
+    # timeout alone is twenty seconds. At Docker's default ten, the deploy
+    # SIGKILLs a worker that has just handed a message to the relay and not yet
+    # recorded it, and `task_acks_late` sends it again on redelivery.
+    stop_grace_period: 60s
 
   # Beat only enqueues; it holds no state worth persisting beyond its schedule.
   beat:
