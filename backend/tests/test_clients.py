@@ -1391,3 +1391,254 @@ class TestTakingAClientBackOn:
         assert patched.status_code == 200
         assert patched.json()["compliance_items_created"] == 0
         assert self._statuses(db, client_id) == before
+
+
+class TestARegistrationTheClientNoLongerHolds:
+    """Generation only ever added, and a registration is not for ever.
+
+    A client who surrenders their GST registration, moves to QRMP, or converts
+    from a company to an LLP keeps every filing the old registration had
+    already materialised — a year of them. They sit pending on the calendar,
+    are counted on the dashboard, go overdue one by one, raise tasks, and email
+    the client asking for the paperwork behind a return nobody owes. Marked
+    filed by someone working down the list, each then carries a fee onto an
+    invoice.
+    """
+
+    def _onboard(self, client: TestClient, auth_headers: dict, **overrides) -> str:
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload(**overrides)
+        ).json()
+        assert created["compliance_items_created"] > 0
+        return created["client"]["id"]
+
+    def _open_items(self, db: Session, client_id: str, code: str) -> list[ComplianceItem]:
+        return [
+            item
+            for item in items_of(db, uuid.UUID(client_id))
+            if item.compliance_type.code == code
+            and item.status
+            in (ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS)
+        ]
+
+    def test_surrendering_a_gst_registration_closes_the_filings_ahead(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = self._onboard(client, auth_headers)
+        assert self._open_items(db, client_id, "GSTR3B_MONTHLY")
+
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": False},
+        )
+        assert response.status_code == 200, response.text
+
+        remaining = self._open_items(db, client_id, "GSTR3B_MONTHLY")
+        assert all(item.period_start <= clock.today() for item in remaining), (
+            "a period that has not begun cannot be owed under a surrendered "
+            "registration"
+        )
+        # The rest of the calendar is untouched: this client still files an ITR.
+        assert self._open_items(db, client_id, "ITR_AUDIT")
+
+    def test_the_period_the_change_lands_inside_is_left_alone(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A registration surrendered mid-month still owes that month's return.
+
+        Which is the one period this cannot decide — only the practitioner
+        knows the effective date — so the rule is to close what cannot have
+        arisen and leave the rest to them.
+        """
+        client_id = self._onboard(client, auth_headers)
+        current = [
+            item
+            for item in self._open_items(db, client_id, "GSTR3B_MONTHLY")
+            if item.period_start <= clock.today() <= item.period_end
+        ]
+
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": False},
+        )
+
+        for item in current:
+            db.refresh(item)
+            assert item.status == ComplianceStatus.PENDING
+
+    def test_a_filed_return_is_never_withdrawn(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """It is the record of what was lodged, whatever the client registers now."""
+        client_id = self._onboard(client, auth_headers)
+        ahead = max(
+            self._open_items(db, client_id, "GSTR3B_MONTHLY"),
+            key=lambda item: item.due_date,
+        )
+        ahead.status = ComplianceStatus.FILED
+        ahead.filed_on = clock.today()
+        db.commit()
+
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": False},
+        )
+
+        db.refresh(ahead)
+        assert ahead.status == ComplianceStatus.FILED
+
+    def test_moving_to_qrmp_swaps_monthly_returns_for_quarterly_ones(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The commonest change of all, and the one that doubles up worst."""
+        client_id = self._onboard(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_filing_frequency": "quarterly"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["compliance_items_created"] > 0
+
+        monthly_ahead = [
+            item
+            for item in self._open_items(db, client_id, "GSTR3B_MONTHLY")
+            if item.period_start > clock.today()
+        ]
+        assert not monthly_ahead
+        assert self._open_items(db, client_id, "GSTR3B_QUARTERLY")
+
+    def test_registering_again_reinstates_what_the_change_closed(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A flag switched back on has to bring the filings back with it.
+
+        Generation skips a (type, period) that already exists whatever its
+        status, so without this the client would be GST-registered and owe no
+        GST returns for every period already materialised.
+        """
+        client_id = self._onboard(client, auth_headers)
+        before = {item.id for item in self._open_items(db, client_id, "GSTR3B_MONTHLY")}
+
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": False},
+        )
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": True},
+        )
+
+        after = {item.id for item in self._open_items(db, client_id, "GSTR3B_MONTHLY")}
+        assert after == before
+
+    def test_work_already_under_way_comes_back_as_it_was(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Not collapsed into pending — the same reason off-boarding records it."""
+        client_id = self._onboard(client, auth_headers)
+        started = max(
+            self._open_items(db, client_id, "GSTR3B_MONTHLY"),
+            key=lambda item: item.due_date,
+        )
+        started.status = ComplianceStatus.IN_PROGRESS
+        db.commit()
+
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": False},
+        )
+        db.refresh(started)
+        assert started.status == ComplianceStatus.NOT_APPLICABLE
+
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": True},
+        )
+        db.refresh(started)
+        assert started.status == ComplianceStatus.IN_PROGRESS
+
+    def test_an_item_a_practitioner_ruled_out_stays_ruled_out(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Their judgement about one filing is not this mechanism's to undo.
+
+        Only what a registration change closed carries the marker, so a
+        hand-marked item has nothing to reinstate it.
+        """
+        client_id = self._onboard(client, auth_headers)
+        by_hand = self._open_items(db, client_id, "GSTR3B_MONTHLY")[0]
+        by_hand.status = ComplianceStatus.NOT_APPLICABLE
+        db.commit()
+
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": False},
+        )
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": True},
+        )
+
+        db.refresh(by_hand)
+        assert by_hand.status == ComplianceStatus.NOT_APPLICABLE
+
+    def test_an_off_boarded_client_is_not_reopened_by_a_flag_edit(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Off-boarding closed everything; a registration edit must not undo it."""
+        client_id = self._onboard(client, auth_headers)
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"tds_applicable": False},
+        )
+        assert response.status_code == 200, response.text
+
+        statuses = {item.status for item in items_of(db, uuid.UUID(client_id))}
+        assert statuses == {ComplianceStatus.NOT_APPLICABLE}
+
+    def test_an_edit_that_touches_no_registration_changes_nothing(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = self._onboard(client, auth_headers)
+        before = {item.id: item.status for item in items_of(db, uuid.UUID(client_id))}
+
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"contact_person": "Someone New"},
+        )
+
+        after = {item.id: item.status for item in items_of(db, uuid.UUID(client_id))}
+        assert after == before
+
+    def test_the_withdrawal_is_recorded_in_the_trail(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A firm's calendar losing a year of filings is not a silent change."""
+        client_id = self._onboard(client, auth_headers)
+
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"gst_registered": False},
+        )
+
+        entries = client.get(
+            f"{API}/audit", headers=auth_headers, params={"entity_id": client_id}
+        ).json()["items"]
+        summaries = [entry["summary"] for entry in entries]
+        assert any("withdrew" in summary for summary in summaries), summaries

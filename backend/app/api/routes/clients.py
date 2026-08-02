@@ -25,7 +25,10 @@ from app.schemas.client import (
 from app.schemas.common import Page
 from app.schemas.compliance import ComplianceGenerateRequest, ComplianceGenerateResponse
 from app.services import audit, firms
-from app.services.compliance_generator import generate_compliance_items
+from app.services.compliance_generator import (
+    generate_compliance_items,
+    reconcile_applicability,
+)
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -326,6 +329,7 @@ def update_client(
     created = 0
     restored = 0
     shelved = 0
+    withdrawn = 0
     if deactivating:
         shelved = shelve_open_items(db, client)
     if reactivating:
@@ -340,7 +344,17 @@ def update_client(
     registrations_changed = any(
         key in updates and before[key] != updates[key] for key in REGISTRATION_FLAGS
     )
-    if registrations_changed and not reactivating:
+    # Both directions, and the close before the top-up. Generation only ever
+    # added, so surrendering a GST registration — or moving to QRMP, or
+    # converting to an LLP — left a year of filings the client no longer owes
+    # sitting pending on the calendar, going overdue, raising tasks and asking
+    # the client for the paperwork behind them. Only on an active client: while
+    # one is off-boarded every open filing is already closed, and reinstating
+    # here would undo that.
+    if registrations_changed and client.is_active:
+        reconciled = reconcile_applicability(db, client)
+        withdrawn = reconciled.withdrawn
+        restored += reconciled.reinstated
         created = generate_compliance_items(db, client).created_count
 
     audit.record(
@@ -351,6 +365,7 @@ def update_client(
         actor=practitioner,
         summary=f"Updated client {client.name}"
         + (f"; closed {shelved} open filing(s)" if shelved else "")
+        + (f"; withdrew {withdrawn} filing(s) no longer applicable" if withdrawn else "")
         + (f"; reopened {restored} filing(s)" if restored else "")
         + (f"; generated {created} new compliance item(s)" if created else ""),
         changes=audit.diff(before, audit.snapshot(client, updates)),

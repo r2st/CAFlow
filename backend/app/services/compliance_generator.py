@@ -16,11 +16,12 @@ from dataclasses import dataclass
 from datetime import date
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
 from app.core import clock
 from app.core.periods import add_months, compute_due_date, periods_for_frequency
+from app.models.base import ComplianceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem, ComplianceType
 from app.services.applicability import applies_to
@@ -153,6 +154,74 @@ def generate_compliance_items(
     return GenerationResult(
         created=created, skipped_existing=skipped, window_start=start, window_end=end
     )
+
+
+@dataclass
+class ReconcileResult:
+    withdrawn: int
+    reinstated: int
+
+
+# Statuses a change of registration may close. A filed return is a record of
+# what was lodged and stays one; an item already ruled out has nothing to do.
+OPEN_STATUSES = (ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS)
+
+
+def reconcile_applicability(
+    db: Session, client: Client, *, today: date | None = None
+) -> ReconcileResult:
+    """Close the filings a client's registrations no longer call for, reopen those they do.
+
+    Generation only ever added. A client who surrenders their GST registration —
+    or moves to QRMP, or converts from a company to an LLP — kept every filing
+    the old registration had already materialised, a year of them: pending on
+    the calendar, counted on the dashboard, going overdue one by one, raising
+    tasks, and emailing the client to ask for the paperwork behind a return
+    nobody owes. Marked filed by someone working down the list, each one then
+    carries a fee onto an invoice.
+
+    Only periods that have not begun. A registration surrendered in the middle
+    of a month still owes that month's return, and the period a change lands
+    inside is precisely the one this cannot decide — so it is left for the
+    practitioner, who knows the effective date, and only obligations that
+    cannot have arisen are closed.
+
+    ``offboarded_from_status`` records what the item was, which is what makes
+    this reversible: a flag switched back on reinstates exactly the filings it
+    closed, at the status they held. Reinstatement is needed for the same
+    reason it is after an off-boarding — generation skips a (type, period) that
+    already exists whatever its status, so nothing else would ever bring them
+    back.
+    """
+    today = today or clock.today()
+    applicable = {ct.id for ct in applicable_types(db, client)}
+    items = list(
+        db.scalars(
+            select(ComplianceItem)
+            .options(selectinload(ComplianceItem.compliance_type))
+            .where(ComplianceItem.client_id == client.id)
+        ).all()
+    )
+
+    withdrawn = reinstated = 0
+    for item in items:
+        applies = item.compliance_type_id in applicable
+        if not applies and item.status in OPEN_STATUSES and item.period_start > today:
+            item.offboarded_from_status = item.status
+            item.status = ComplianceStatus.NOT_APPLICABLE
+            withdrawn += 1
+        elif (
+            applies
+            and item.status == ComplianceStatus.NOT_APPLICABLE
+            and item.offboarded_from_status is not None
+        ):
+            item.status = item.offboarded_from_status
+            item.offboarded_from_status = None
+            reinstated += 1
+
+    if withdrawn or reinstated:
+        db.flush()
+    return ReconcileResult(withdrawn=withdrawn, reinstated=reinstated)
 
 
 def regenerate_for_firm(db: Session, firm_id: uuid.UUID, today: date | None = None) -> int:
