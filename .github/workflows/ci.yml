@@ -254,6 +254,106 @@ jobs:
           docker rm -f caflow-web-smoke
           exit $status
 
+  deploy:
+    name: Deployment config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # These files are only ever exercised on the production box, by systemd,
+    # at the moment someone is deploying. A typo in the overlay or the site
+    # config is otherwise found by `systemctl start caflow` failing on a host
+    # that is already serving — which is the worst place to find it.
+    #
+    # backend/tests/test_deployment.py asserts what these files *mean*; this
+    # asserts that the tools which read them accept them at all.
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The base stack composes
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: The overlay refuses to resolve without its secrets
+        # The point of ${VAR:?message} is that a missing secret stops the
+        # deploy instead of starting it on a development default. That is only
+        # worth having if something checks it still fires — and checks it
+        # fires for each secret on its own, since one guard covering for a
+        # missing sibling is exactly the failure this would miss.
+        run: |
+          set +e
+          status=0
+          for missing in SECRET_KEY POSTGRES_PASSWORD; do
+            # Set both, then unset the one under test, in a subshell. Not
+            # `env -u NAME NAME=value`: env applies -u before the assignment,
+            # so the variable would arrive set and this would test nothing.
+            output=$(
+              export SECRET_KEY=ci-secret-not-used-in-production-0123456789
+              export POSTGRES_PASSWORD=ci-postgres-password
+              unset "$missing"
+              docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml \
+                config 2>&1
+            )
+            if [ $? -eq 0 ]; then
+              echo "::error::The overlay resolved with no ${missing}"
+              status=1
+              continue
+            fi
+            if ! grep -q "required variable ${missing} is missing a value" <<< "$output"; then
+              echo "::error::The overlay was rejected, but not for the missing ${missing}"
+              echo "$output"
+              status=1
+              continue
+            fi
+            echo "Missing ${missing} rejected as expected."
+          done
+          exit $status
+
+      - name: The overlay resolves once they are set
+        run: |
+          SECRET_KEY=ci-secret-not-used-in-production-0123456789 \
+          POSTGRES_PASSWORD=ci-postgres-password \
+          docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml \
+            config --quiet
+
+      - name: Caddy accepts the site config
+        # The file is a site block meant to be imported from the main
+        # Caddyfile, and validates standalone as one. A syntax error here is a
+        # `systemctl reload caddy` that refuses, taking every other site on the
+        # box down with it.
+        run: |
+          docker run --rm \
+            -v "$PWD/deploy/caflow.aiknol.com.caddy:/etc/caddy/Caddyfile:ro" \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      - name: The backup script is valid POSIX sh
+        # It runs as root, from a timer, unattended, and its output is the only
+        # copy of a CA firm's records. `sh -n` is cheap next to that.
+        run: |
+          sh -n deploy/caflow-backup.sh
+          shellcheck --shell=sh deploy/caflow-backup.sh
+
+      - name: The systemd units parse
+        # systemd-analyze verify resolves a unit the way systemd will, which
+        # catches the typo class these files are most exposed to — a misspelled
+        # directive is accepted silently by everything else until the deploy.
+        #
+        # It also reports what it cannot resolve *on the runner*: caddy.service
+        # is not installed here, and /usr/local/bin/caflow-backup is only in
+        # place on the real host. Those make it exit non-zero every time, so
+        # the exit code says nothing and only the parse diagnostics are read.
+        run: |
+          set +e
+          status=0
+          for unit in deploy/caflow.service deploy/caflow-backup.service deploy/caflow-backup.timer; do
+            echo "--- ${unit} ---"
+            output=$(systemd-analyze verify "$unit" 2>&1)
+            echo "$output"
+            if grep -qiE 'unknown lvalue|invalid value|failed to parse|bad setting|ignoring' <<< "$output"; then
+              echo "::error::${unit} has a directive systemd does not understand"
+              status=1
+            fi
+          done
+          exit $status
+
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest

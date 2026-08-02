@@ -23,6 +23,12 @@ interface — Caddy is the whole front door.
 | `caflow.env.example` | `/etc/caflow/caflow.env` | the secrets, mode 0600 |
 | `caflow.aiknol.com.caddy` | `/etc/caddy/conf.d/` | the site: TLS, HSTS, the real client address |
 
+Every file here is checked by CI before it reaches this page: the overlay is
+resolved both with and without its secrets, Caddy adapts the site config, the
+units go through `systemd-analyze verify` and the backup script through
+`shellcheck`. What CI cannot check is the box — that the A record resolves,
+that port 80 is open for ACME, and that `/etc/caflow/caflow.env` is filled in.
+
 ## First deploy
 
 Assumes Debian or Ubuntu with Docker Engine and the Compose plugin installed,
