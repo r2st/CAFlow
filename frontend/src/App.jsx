@@ -7,6 +7,7 @@ import AuditLog from './pages/AuditLog'
 import Billing from './pages/Billing'
 import Calendar from './pages/Calendar'
 import ClientDetail from './pages/ClientDetail'
+import ClientEdit from './pages/ClientEdit'
 import ClientNew from './pages/ClientNew'
 import Clients from './pages/Clients'
 import Dashboard from './pages/Dashboard'
@@ -55,6 +56,7 @@ export default function App() {
           <Route path="/clients" element={<Clients />} />
           <Route path="/clients/new" element={<ClientNew />} />
           <Route path="/clients/:clientId" element={<ClientDetail />} />
+          <Route path="/clients/:clientId/edit" element={<ClientEdit />} />
           <Route path="/documents" element={<Documents />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/reminders" element={<Reminders />} />

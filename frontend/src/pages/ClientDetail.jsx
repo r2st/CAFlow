@@ -3,6 +3,7 @@ import { Link, useLocation, useParams } from 'react-router-dom'
 import api from '../api/client'
 import ComplianceTable from '../components/ComplianceTable'
 import PortalAccessCard from '../components/PortalAccessCard'
+import { useAuth } from '../context/AuthContext'
 import {
   Alert,
   DetailItem,
@@ -49,9 +50,28 @@ function WorkPanel({ title, to, linkLabel, items, empty, renderItem }) {
   )
 }
 
+/**
+ * What to say on arrival, when we got here from creating or saving.
+ *
+ * The filing count matters more than the save itself: changing a registration
+ * silently adds filings, and a firm that is not told has no reason to look.
+ */
+function openingNotice(state) {
+  if (state?.created > 0) {
+    const what = state.saved ? 'Client saved' : 'Client created'
+    return `${what} — ${state.created} compliance item(s) generated.`
+  }
+  if (state?.saved) return 'Client saved.'
+  if (state?.created === 0) return 'Client created.'
+  return ''
+}
+
 export default function ClientDetail() {
   const { clientId } = useParams()
   const location = useLocation()
+  // Editing, deactivating and regenerating are all manager-and-above on the
+  // API; a junior sees the record without the controls that would 403.
+  const { canManageClients } = useAuth()
 
   const [client, setClient] = useState(null)
   const [calendar, setCalendar] = useState(null)
@@ -59,13 +79,10 @@ export default function ClientDetail() {
   const [documents, setDocuments] = useState([])
   const [invoices, setInvoices] = useState([])
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState(
-    location.state?.created
-      ? `Client created — ${location.state.created} compliance item(s) generated.`
-      : '',
-  )
+  const [notice, setNotice] = useState(() => openingNotice(location.state))
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [confirmingDeactivate, setConfirmingDeactivate] = useState(false)
 
   const load = useCallback(async () => {
     setError('')
@@ -100,6 +117,24 @@ export default function ClientDetail() {
     load()
     loadWork()
   }, [load, loadWork])
+
+  async function deactivate() {
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      await api.deactivateClient(clientId)
+      setConfirmingDeactivate(false)
+      setNotice(
+        'Client deactivated. Their open filings are no longer tracked, and their records stay on file.',
+      )
+      await load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   async function regenerate() {
     setBusy(true)
@@ -161,13 +196,61 @@ export default function ClientDetail() {
             {client.is_active ? '' : ' · Inactive'}
           </p>
         </div>
-        <button className="secondary" onClick={regenerate} disabled={busy}>
-          {busy ? 'Generating…' : 'Regenerate compliance items'}
-        </button>
+        {canManageClients && (
+          <div className="button-row">
+            <Link to={`/clients/${clientId}/edit`}>
+              <button type="button" className="secondary">
+                Edit client
+              </button>
+            </Link>
+            <button className="secondary" onClick={regenerate} disabled={busy}>
+              {busy ? 'Generating…' : 'Regenerate compliance items'}
+            </button>
+            {client.is_active && (
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setConfirmingDeactivate(true)}
+                disabled={busy}
+              >
+                Deactivate
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
-      <Alert kind="error">{error}</Alert>
-      <Alert kind="success">{notice}</Alert>
+      <Alert kind="error" onDismiss={() => setError('')}>
+        {error}
+      </Alert>
+      <Alert kind="success" onDismiss={() => setNotice('')}>
+        {notice}
+      </Alert>
+
+      {/* Asked before it happens rather than offered as an undo: deactivating
+          writes off every pending filing this client has, and nothing in the
+          app puts those back. */}
+      {confirmingDeactivate && (
+        <Alert kind="warning">
+          <span>
+            Deactivate {client.name}? Their {summary.pending} open filing(s) stop being tracked.
+            The record and its history stay.
+            <span className="button-row" style={{ marginTop: 8 }}>
+              <button type="button" onClick={deactivate} disabled={busy}>
+                {busy ? 'Deactivating…' : 'Yes, deactivate'}
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setConfirmingDeactivate(false)}
+                disabled={busy}
+              >
+                Keep active
+              </button>
+            </span>
+          </span>
+        </Alert>
+      )}
 
       <div className="stat-grid">
         <Stat label="Total filings" value={summary.total} />
