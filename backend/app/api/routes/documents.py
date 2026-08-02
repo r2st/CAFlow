@@ -58,6 +58,20 @@ def _get_item_or_404(db: Session, firm_id: uuid.UUID, item_id: uuid.UUID) -> Com
     return item
 
 
+def clean_requirement_or_422(value: str | None) -> str | None:
+    """The service's requirement check, reported as a 422 on the form field.
+
+    Shared with the portal upload, which takes the same field from a party
+    outside the firm entirely.
+    """
+    try:
+        return document_service.clean_requirement(value)
+    except document_service.InvalidRequirement as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+
 def compliance_label(item: ComplianceItem | None) -> str | None:
     if item is None:
         return None
@@ -165,6 +179,7 @@ def upload_document(
     share_with_client: bool = Form(default=False),
 ):
     """Upload a document on the client's behalf and categorise it."""
+    requirement = clean_requirement_or_422(requirement)
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
     item = (
         _get_item_or_404(db, practitioner.firm_id, compliance_item_id)
@@ -307,6 +322,22 @@ def update_document(
     """Correct a category, re-link a document to a filing, or share it."""
     document = _get_document_or_404(db, practitioner.firm_id, document_id)
     updates = payload.model_dump(exclude_unset=True)
+
+    if updates.get("satisfies_requirements") is not None:
+        # Same column, same reasoning as the upload form — this is the other
+        # way a caller writes into it.
+        keys = updates["satisfies_requirements"]
+        if len(keys) > document_service.MAX_SATISFIED_REQUIREMENTS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "A document can answer at most "
+                    f"{document_service.MAX_SATISFIED_REQUIREMENTS} requirements"
+                ),
+            )
+        # Blanks drop out rather than being stored as keys nothing can match.
+        cleaned = [clean_requirement_or_422(key) for key in keys]
+        updates["satisfies_requirements"] = sorted({key for key in cleaned if key})
 
     if updates.get("compliance_item_id") is not None:
         item = _get_item_or_404(db, practitioner.firm_id, updates["compliance_item_id"])

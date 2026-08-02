@@ -5,8 +5,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import Field
-
 from app.models.base import DocumentCategory, DocumentStatus
 from app.schemas.common import ORMModel, SanitizedModel
 
@@ -92,10 +90,8 @@ class SharedDocumentOut(SanitizedModel):
     compliance_label: str | None = None
 
 
-class PractitionerUploadRequest(SanitizedModel):
-    """Multipart form fields accepted alongside the file itself."""
-
-    compliance_item_id: uuid.UUID | None = None
-    requirement: str | None = Field(default=None, max_length=64)
-    category: DocumentCategory | None = None
-    share_with_client: bool = False
+# There is deliberately no model for the upload form. Multipart fields are
+# declared on the route as ``Form(...)`` parameters and never pass through a
+# schema, so a model here would look like validation while enforcing nothing —
+# which is exactly what the unused ``max_length=64`` that used to live here
+# did. ``services.documents.clean_requirement`` is where that check now runs.

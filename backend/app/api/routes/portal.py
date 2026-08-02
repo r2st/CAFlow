@@ -19,7 +19,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession, Manager, PortalClient
-from app.api.routes.documents import compliance_label, serialise_checklist
+from app.api.routes.documents import (
+    clean_requirement_or_422,
+    compliance_label,
+    serialise_checklist,
+)
 from app.config import settings
 from app.models.base import ComplianceStatus, InvoiceStatus
 from app.models.client import Client
@@ -445,6 +449,7 @@ def portal_upload(
     requirement: str | None = Form(default=None),
 ):
     """Client-side upload against a checklist row."""
+    requirement = clean_requirement_or_422(requirement)
     if compliance_item_id is not None:
         item = db.get(ComplianceItem, compliance_item_id)
         if item is None or item.client_id != client.id:

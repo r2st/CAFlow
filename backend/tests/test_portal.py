@@ -426,6 +426,34 @@ class TestPortalUploads:
         assert response.json()["uploaded_via_portal"] is True
         assert response.json()["category"] == "bank_statement"
 
+    def test_a_client_cannot_write_free_text_into_the_requirement_column(
+        self, client, portal_headers
+    ):
+        """The portal is reachable by anyone holding a link, and the column is JSON."""
+        response = client.post(
+            "/api/v1/portal/documents",
+            files={"file": ("bank.pdf", io.BytesIO(PDF_BYTES), "application/pdf")},
+            data={"requirement": "x" * 100_000},
+            headers=portal_headers,
+        )
+        assert response.status_code == 422, response.text
+
+    def test_a_client_requirement_is_normalised_like_a_practitioner_one(
+        self, client, auth_headers, portal_headers
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR1_MONTHLY")
+        response = client.post(
+            "/api/v1/portal/documents",
+            files={"file": ("exports.pdf", io.BytesIO(PDF_BYTES), "application/pdf")},
+            data={"compliance_item_id": item["id"], "requirement": " Export_Invoices "},
+            headers=portal_headers,
+        )
+        assert response.status_code == 201, response.text
+        checklist = client.get(
+            f"/api/v1/documents/checklist/{item['id']}", headers=auth_headers
+        ).json()
+        assert "export_invoices" not in checklist["missing"]
+
     def test_the_upload_clears_the_requirement_for_the_firm_too(
         self, client, auth_headers, portal_headers, client_id
     ):

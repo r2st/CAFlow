@@ -10,6 +10,7 @@ values, a few are not.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -21,6 +22,7 @@ from app.models.base import ComplianceStatus, DocumentCategory, DocumentStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
 from app.models.document import Document
+from app.schemas.common import sanitize_text
 from app.services import storage
 from app.services.ai import categorise_document, regex_extract
 
@@ -53,6 +55,52 @@ def requirement_label(requirement: str) -> str:
 
 def is_category_requirement(requirement: str) -> bool:
     return requirement in {category.value for category in DocumentCategory}
+
+
+# A requirement key is this system's own vocabulary — the snake_case labels a
+# ``ComplianceType`` declares — not free text. It arrives as a multipart form
+# field, which is the one inbound string that never passes through a Pydantic
+# model, so nothing else caps its length, strips its control characters or
+# folds its case.
+#
+# It reaches ``Document.satisfies_requirements``, a JSON column, and the portal
+# upload that writes it is reachable by anyone holding a client's magic link.
+# Unbounded, that is a megabyte of attacker-chosen text per upload sitting in a
+# column the checklist reads on every page load; unfolded, "Bank_Statement"
+# silently satisfies nothing while looking to the uploader like it did.
+REQUIREMENT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+MAX_REQUIREMENT_KEY_LENGTH = 64
+# One document answering more than this many checklist rows is not a document,
+# it is someone filling the column.
+MAX_SATISFIED_REQUIREMENTS = 20
+
+
+class InvalidRequirement(ValueError):
+    """A requirement key that is not shaped like one."""
+
+
+def clean_requirement(value: str | None) -> str | None:
+    """Normalise a caller-supplied requirement key, refusing free text.
+
+    Blank (and whitespace-only) is ``None`` rather than an error: a form that
+    submits an empty field means "no requirement", which is the same thing as
+    omitting it.
+    """
+    if value is None:
+        return None
+    candidate = sanitize_text(value).lower()
+    if not candidate:
+        return None
+    if len(candidate) > MAX_REQUIREMENT_KEY_LENGTH:
+        raise InvalidRequirement(
+            f"A requirement key is at most {MAX_REQUIREMENT_KEY_LENGTH} characters"
+        )
+    if not REQUIREMENT_KEY_RE.match(candidate):
+        raise InvalidRequirement(
+            f"{value!r} is not a requirement key — expected lower-case letters, "
+            "digits and underscores, as in 'bank_statement'"
+        )
+    return candidate
 
 
 @dataclass

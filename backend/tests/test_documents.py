@@ -466,3 +466,151 @@ class TestRequirementLabels:
     def test_category_requirements_are_recognised(self):
         assert document_service.is_category_requirement("bank_statement") is True
         assert document_service.is_category_requirement("export_invoices") is False
+
+
+class TestRequirementKeys:
+    """A requirement key is this system's vocabulary, not free text.
+
+    It arrives as a multipart form field — the one inbound string that never
+    passes through a Pydantic model — and lands in a JSON column that the
+    portal, which anyone holding a magic link can reach, also writes.
+    """
+
+    @pytest.mark.parametrize(
+        ("supplied", "expected"),
+        [
+            ("bank_statement", "bank_statement"),
+            ("  bank_statement  ", "bank_statement"),
+            ("Bank_Statement", "bank_statement"),
+            ("form_26as", "form_26as"),
+            # An empty field means "no requirement", the same as omitting it.
+            ("", None),
+            ("   ", None),
+            (None, None),
+        ],
+    )
+    def test_a_key_is_normalised_rather_than_taken_as_typed(self, supplied, expected):
+        assert document_service.clean_requirement(supplied) == expected
+
+    @pytest.mark.parametrize(
+        "supplied",
+        [
+            "bank statement",  # spaces
+            "bank-statement",  # hyphen
+            "../../etc/passwd",
+            "9_lives",  # must start with a letter
+            "_leading",
+            "<script>alert(1)</script>",
+            "बैंक",  # not our vocabulary, however legitimate the script
+        ],
+    )
+    def test_anything_not_shaped_like_a_key_is_refused(self, supplied):
+        with pytest.raises(document_service.InvalidRequirement):
+            document_service.clean_requirement(supplied)
+
+    def test_a_key_longer_than_the_cap_is_refused(self):
+        limit = document_service.MAX_REQUIREMENT_KEY_LENGTH
+        assert document_service.clean_requirement("a" * limit) == "a" * limit
+        with pytest.raises(document_service.InvalidRequirement, match="at most"):
+            document_service.clean_requirement("a" * (limit + 1))
+
+    def test_every_seeded_requirement_survives_the_check(self):
+        """The guard must not refuse the vocabulary the seed itself uses."""
+        from app.seeds.compliance_types import COMPLIANCE_TYPE_SEEDS
+
+        seeded = {
+            requirement
+            for seed in COMPLIANCE_TYPE_SEEDS
+            for requirement in seed.get("required_documents", [])
+        }
+        assert seeded
+        for requirement in seeded:
+            assert document_service.clean_requirement(requirement) == requirement
+
+    def test_every_document_category_survives_the_check(self):
+        for category in DocumentCategory:
+            assert document_service.clean_requirement(category.value) == category.value
+
+
+class TestRequirementValidationOnUpload:
+    def test_free_text_is_refused_rather_than_stored(
+        self, client, auth_headers, client_id
+    ):
+        response = upload(
+            client, auth_headers, client_id=client_id, requirement="a" * 5000
+        )
+        assert response.status_code == 422, response.text
+        assert "at most" in response.json()["detail"]
+
+    def test_a_junk_key_names_what_a_key_looks_like(self, client, auth_headers, client_id):
+        response = upload(
+            client, auth_headers, client_id=client_id, requirement="not a key!"
+        )
+        assert response.status_code == 422
+        assert "bank_statement" in response.json()["detail"]
+
+    def test_a_miscased_key_still_satisfies_its_row(self, client, auth_headers, client_id):
+        """Normalising is what keeps the fix from silently losing the upload."""
+        item = first_item_of_type(client, auth_headers, "GSTR1_MONTHLY")
+        response = upload(
+            client,
+            auth_headers,
+            client_id=client_id,
+            filename="exports.pdf",
+            compliance_item_id=item["id"],
+            requirement="Export_Invoices",
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["document"]["satisfies_requirements"] == ["export_invoices"]
+        assert "export_invoices" not in response.json()["checklist"]["missing"]
+
+    def test_an_empty_requirement_field_falls_back_to_categorisation(
+        self, client, auth_headers, client_id
+    ):
+        response = upload(
+            client,
+            auth_headers,
+            client_id=client_id,
+            filename="my_bank_statement.pdf",
+            requirement="",
+        )
+        assert response.status_code == 201, response.text
+        document = response.json()["document"]
+        assert document["satisfies_requirements"] == []
+        assert document["category"] == "bank_statement"
+
+
+class TestRequirementValidationOnUpdate:
+    def test_free_text_cannot_be_patched_into_the_column(
+        self, client, auth_headers, client_id
+    ):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        response = client.patch(
+            f"/api/v1/documents/{document['id']}",
+            json={"satisfies_requirements": ["fine", "not a key"]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+
+    def test_more_keys_than_the_cap_is_refused(self, client, auth_headers, client_id):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        over = document_service.MAX_SATISFIED_REQUIREMENTS + 1
+        response = client.patch(
+            f"/api/v1/documents/{document['id']}",
+            json={"satisfies_requirements": [f"req_{n}" for n in range(over)]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+        assert str(document_service.MAX_SATISFIED_REQUIREMENTS) in response.json()["detail"]
+
+    def test_keys_are_normalised_deduplicated_and_ordered(
+        self, client, auth_headers, client_id
+    ):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        response = client.patch(
+            f"/api/v1/documents/{document['id']}",
+            json={"satisfies_requirements": ["Export_Invoices", "export_invoices", "", "ais_tis"]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["satisfies_requirements"] == ["ais_tis", "export_invoices"]
