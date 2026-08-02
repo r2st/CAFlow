@@ -9,11 +9,25 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.base import ComplianceStatus, EntityType, GSTFilingFrequency
+from app.config import settings
+from app.core.periods import add_months
+from app.models.base import (
+    ComplianceCategory,
+    ComplianceStatus,
+    EntityType,
+    Frequency,
+    GSTFilingFrequency,
+)
 from app.models.client import Client as ClientModel
 from app.models.compliance import ComplianceItem, ComplianceType
 from app.services.applicability import applies_to
-from app.services.compliance_generator import applicable_types, generate_compliance_items
+from app.services.compliance_generator import (
+    applicable_types,
+    default_window,
+    generate_compliance_items,
+    max_lookback_months,
+    regenerate_for_firm,
+)
 from tests.conftest import make_client_payload
 
 API = "/api/v1"
@@ -27,6 +41,21 @@ def codes_generated(db: Session, client_id: str) -> set[str]:
         .distinct()
     ).all()
     return {row[0] for row in rows}
+
+
+def items_of(db: Session, client_id: uuid.UUID) -> list[ComplianceItem]:
+    return list(
+        db.scalars(select(ComplianceItem).where(ComplianceItem.client_id == client_id)).all()
+    )
+
+
+SECOND_FIRM = {
+    "firm_name": "Iyer & Co",
+    "firm_email": "office@iyer-ca.in",
+    "owner_full_name": "Suresh Iyer",
+    "owner_email": "suresh@iyer-ca.in",
+    "owner_password": "another-strong-password",
+}
 
 
 def make_model_client(**overrides) -> ClientModel:
@@ -464,6 +493,367 @@ class TestComplianceGeneration:
         due_dates = [item.due_date for item in result.created]
         assert due_dates, "expected at least one item in April"
         assert all(date(2026, 4, 1) <= d <= date(2026, 4, 30) for d in due_dates)
+
+
+class TestTheDefaultGenerationWindow:
+    """What gets generated when nobody names a window — which is every real run.
+
+    The API passes a window only on the explicit top-up endpoint. Onboarding, a
+    registration change and the nightly job all take the default, and none of
+    it was covered: the run date could be ignored in favour of the wall clock
+    and the back-fill could reach two months or four instead of three, with the
+    suite none the wiser. The span decides which deadlines a firm is shown at
+    all, so it is pinned to exact dates here rather than to a shape.
+    """
+
+    def test_the_window_reaches_three_months_back_and_the_configured_span_forward(self):
+        # Three months of back-fill is what puts the quarter a client onboarded
+        # mid-way through on their calendar instead of only the next one.
+        established = make_model_client(onboarded_on=date(2020, 1, 1))
+        start, end = default_window(established, today=date(2026, 7, 15))
+
+        assert start == date(2026, 4, 15)
+        assert end == add_months(date(2026, 7, 15), settings.compliance_generation_months)
+
+    def test_a_client_onboarded_inside_that_reach_starts_at_onboarding(self):
+        # The firm was not acting for them before this date, so the deadlines
+        # that passed beforehand are not theirs to have missed.
+        recent = make_model_client(onboarded_on=date(2026, 6, 1))
+        start, _ = default_window(recent, today=date(2026, 7, 15))
+        assert start == date(2026, 6, 1)
+
+    def test_the_run_date_decides_the_window_rather_than_the_wall_clock(
+        self, db: Session, registered_firm: dict
+    ):
+        # The nightly job passes its run date down. Reading the clock instead
+        # makes the job untestable and a replay of a missed night wrong.
+        model_client = make_model_client(
+            firm_id=uuid.UUID(registered_firm["firm"]["id"]),
+            gst_registered=True,
+            onboarded_on=date(2020, 1, 1),
+        )
+        db.add(model_client)
+        db.flush()
+
+        result = generate_compliance_items(db, model_client, today=date(2026, 7, 15))
+        assert result.window_start == date(2026, 4, 15)
+
+
+class TestLookingBackFarEnoughForLateDeadlines:
+    """A period can end long before the window and still fall due inside it.
+
+    The generator searches back ``max_lookback_months`` before the window and
+    lets the due-date filter trim the excess. Reading only ``due_month_offset``
+    and ignoring the per-period overrides survived the suite — and the override
+    is precisely where the long gaps live. The TDS return for Q4 is the case:
+    the quarter ends 31 March and the return is due 31 May, two months out
+    rather than one, so a lookback built from the default alone stops a month
+    short and the filing is never generated at all.
+    """
+
+    def test_the_lookback_takes_the_longest_override_not_the_default(self):
+        quarterly_with_a_long_q4 = ComplianceType(
+            due_month_offset=1, due_overrides={"Q4": {"month_offset": 2, "day": 31}}
+        )
+        assert max_lookback_months(quarterly_with_a_long_q4) == 2
+
+    def test_an_override_that_shortens_the_gap_does_not_shorten_the_lookback(self):
+        # max over every offset, not the last one read: a short override must
+        # not pull the reach in for the periods that still need the long one.
+        mixed = ComplianceType(
+            due_month_offset=3, due_overrides={"Q1": {"month_offset": 0}}
+        )
+        assert max_lookback_months(mixed) == 3
+
+    def test_a_type_with_no_overrides_looks_back_by_its_own_offset(self):
+        assert max_lookback_months(ComplianceType(due_month_offset=4, due_overrides={})) == 4
+
+    def test_the_q4_tds_return_is_generated_from_a_window_after_its_quarter(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """End to end: the filing the short lookback would have lost.
+
+        Q4 of FY2025-26 ends 31 March 2026 and its 24Q is due 31 May 2026. A
+        window opening in May is after the period, after the ordinary one-month
+        deadline, and inside the overridden one.
+        """
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(generate_compliance_items=False),
+        ).json()
+        client_id = created["client"]["id"]
+
+        response = client.post(
+            f"{API}/clients/{client_id}/compliance-items",
+            headers=auth_headers,
+            json={"window_start": "2026-05-01", "window_end": "2026-05-31"},
+        )
+        assert response.status_code == 200, response.text
+
+        q4 = db.scalars(
+            select(ComplianceItem)
+            .join(ComplianceType)
+            .where(
+                ComplianceItem.client_id == uuid.UUID(client_id),
+                ComplianceType.code == "TDS_RETURN_24Q",
+                ComplianceItem.period_label == "FY2025-26-Q4",
+            )
+        ).all()
+        assert len(q4) == 1, "the Q4 TDS return fell outside the lookback"
+        assert q4[0].due_date == date(2026, 5, 31)
+
+
+class TestTheEdgesOfTheGenerationWindow:
+    def test_a_filing_due_on_the_first_day_of_the_window_is_generated(
+        self, db: Session, registered_firm: dict
+    ):
+        """The window is inclusive at both ends, and the start is the risky one.
+
+        A top-up run picks up where the last one stopped, so the first day is a
+        day some filing falls due on eventually. Excluding it drops that return
+        from the calendar with nothing to say it happened — and the next run,
+        starting later still, never looks back at it either.
+        """
+        model_client = make_model_client(
+            firm_id=uuid.UUID(registered_firm["firm"]["id"]),
+            gst_registered=True,
+            onboarded_on=date(2026, 1, 1),
+        )
+        db.add(model_client)
+        db.flush()
+
+        # GSTR-3B for 2026-03 is due on the 20th of the following month.
+        result = generate_compliance_items(
+            db, model_client, window_start=date(2026, 4, 20), window_end=date(2026, 4, 20)
+        )
+        assert result.created, "a filing due on the opening day was dropped"
+        assert {item.due_date for item in result.created} == {date(2026, 4, 20)}
+
+    def test_a_filing_due_on_the_last_day_of_the_window_is_generated(
+        self, db: Session, registered_firm: dict
+    ):
+        model_client = make_model_client(
+            firm_id=uuid.UUID(registered_firm["firm"]["id"]),
+            gst_registered=True,
+            onboarded_on=date(2026, 1, 1),
+        )
+        db.add(model_client)
+        db.flush()
+
+        result = generate_compliance_items(
+            db, model_client, window_start=date(2026, 4, 11), window_end=date(2026, 4, 11)
+        )
+        assert {item.due_date for item in result.created} == {date(2026, 4, 11)}
+
+    def test_a_second_run_in_the_same_transaction_creates_nothing(
+        self, db: Session, registered_firm: dict
+    ):
+        """Idempotency has to hold before the commit, not only across two of them.
+
+        The already-generated lookup is a query, and the session runs with
+        ``autoflush=False``, so what the first run only added to the session is
+        invisible to the second unless it was flushed. Unflushed, the second run
+        creates every filing again: the client's calendar shows each statutory
+        deadline twice, and each duplicate carries its own fee onto the billable
+        pile. The endpoints commit between runs and would never have shown it.
+        """
+        model_client = make_model_client(
+            firm_id=uuid.UUID(registered_firm["firm"]["id"]),
+            gst_registered=True,
+            onboarded_on=date(2026, 1, 1),
+        )
+        db.add(model_client)
+        db.flush()
+
+        window = {"window_start": date(2026, 4, 1), "window_end": date(2026, 4, 30)}
+        first = generate_compliance_items(db, model_client, **window)
+        second = generate_compliance_items(db, model_client, **window)
+
+        assert first.created
+        assert second.created == []
+        assert second.skipped_existing == len(first.created)
+
+    def test_a_fee_the_firm_has_zeroed_is_generated_at_zero(
+        self, db: Session, registered_firm: dict
+    ):
+        """Not one paise, which would put no-charge work back on the bill.
+
+        A firm zero-rates a filing when it is covered by a retainer or done as
+        a courtesy. The billable pile is "filed, unbilled, fee above zero", so
+        a fee that rounds up to a stray paise anywhere puts that filing on an
+        invoice the client was told they would not get.
+        """
+        model_client = make_model_client(
+            firm_id=uuid.UUID(registered_firm["firm"]["id"]),
+            gst_registered=True,
+            onboarded_on=date(2026, 1, 1),
+            service_fees={"GSTR3B_MONTHLY": 0},
+        )
+        db.add(model_client)
+        db.flush()
+
+        result = generate_compliance_items(
+            db, model_client, window_start=date(2026, 4, 20), window_end=date(2026, 4, 20)
+        )
+        zeroed = [
+            item
+            for item in result.created
+            if item.compliance_type_id
+            == db.scalar(
+                select(ComplianceType.id).where(ComplianceType.code == "GSTR3B_MONTHLY")
+            )
+        ]
+        assert zeroed, "expected the zero-rated GSTR-3B in this window"
+        assert all(item.fee_paise == 0 for item in zeroed)
+
+
+class TestAFirmsOwnComplianceTypes:
+    """A firm may add types of its own, and only it should ever see them.
+
+    Every seeded type is system-wide, so a suite exercising only the seeds
+    never puts a row with a ``firm_id`` in front of the query — and the
+    firm-matching half of that filter survived being inverted. Inverted, a
+    firm's own type is withheld from the firm that defined it and handed to
+    everyone else, which is both a missing filing and a leak of what a
+    competitor files for their clients.
+    """
+
+    def make_custom_type(self, db: Session, firm_id: uuid.UUID) -> ComplianceType:
+        custom = ComplianceType(
+            firm_id=firm_id,
+            code="RETAINER_REVIEW",
+            name="Quarterly retainer review",
+            category=ComplianceCategory.OTHER,
+            frequency=Frequency.QUARTERLY,
+            due_day=15,
+            due_month_offset=1,
+            due_overrides={},
+            applicability_rule="always",
+            default_fee_paise=500_000,
+            reminder_offsets_days=[7],
+            required_documents=[],
+            is_system=False,
+        )
+        db.add(custom)
+        db.flush()
+        return custom
+
+    def test_the_defining_firms_client_gets_it(self, db: Session, registered_firm: dict):
+        firm_id = uuid.UUID(registered_firm["firm"]["id"])
+        self.make_custom_type(db, firm_id)
+
+        model_client = make_model_client(firm_id=firm_id)
+        codes = {ct.code for ct in applicable_types(db, model_client)}
+        assert "RETAINER_REVIEW" in codes
+
+    def test_another_firms_client_does_not(
+        self, client: TestClient, registered_firm: dict, db: Session
+    ):
+        self.make_custom_type(db, uuid.UUID(registered_firm["firm"]["id"]))
+
+        other = client.post(f"{API}/auth/register", json=SECOND_FIRM).json()
+
+        theirs = make_model_client(firm_id=uuid.UUID(other["firm"]["id"]))
+        codes = {ct.code for ct in applicable_types(db, theirs)}
+        assert "RETAINER_REVIEW" not in codes
+        assert "GSTR3B_MONTHLY" not in codes  # not GST-registered
+        assert codes, "the system-wide calendar should still reach them"
+
+    def test_a_type_the_firm_switched_off_is_not_generated(
+        self, db: Session, registered_firm: dict
+    ):
+        firm_id = uuid.UUID(registered_firm["firm"]["id"])
+        custom = self.make_custom_type(db, firm_id)
+        custom.is_active = False
+        db.flush()
+
+        model_client = make_model_client(firm_id=firm_id)
+        assert "RETAINER_REVIEW" not in {ct.code for ct in applicable_types(db, model_client)}
+
+
+class TestToppingUpAWholeFirm:
+    """``regenerate_for_firm``, which the nightly job and the CLI both run.
+
+    It selects the clients to top up, and both halves of that selection went
+    untested: the firm it belongs to and whether the client is still active.
+    Either one inverted and the job writes compliance items for clients that
+    are not the caller's — across a tenant boundary, unattended, every night.
+    """
+
+    def add_client(self, db: Session, firm_id: uuid.UUID, name: str, **overrides) -> ClientModel:
+        model_client = make_model_client(
+            firm_id=firm_id, name=name, gst_registered=True, onboarded_on=date(2026, 4, 1), **overrides
+        )
+        db.add(model_client)
+        db.flush()
+        return model_client
+
+    def two_firms(
+        self, client: TestClient, registered_firm: dict
+    ) -> tuple[uuid.UUID, uuid.UUID]:
+        other = client.post(f"{API}/auth/register", json=SECOND_FIRM).json()
+        return uuid.UUID(registered_firm["firm"]["id"]), uuid.UUID(other["firm"]["id"])
+
+    def test_only_the_named_firms_clients_are_topped_up(
+        self, client: TestClient, registered_firm: dict, db: Session
+    ):
+        mine, theirs = self.two_firms(client, registered_firm)
+        ours = self.add_client(db, mine, "Ours Ltd")
+        not_ours = self.add_client(db, theirs, "Theirs Ltd")
+
+        created = regenerate_for_firm(db, mine, today=date(2026, 7, 1))
+        db.flush()
+
+        assert created > 0
+        assert items_of(db, ours.id), "the firm's own client was not topped up"
+        assert not items_of(db, not_ours.id), "another firm's client was written to"
+
+    def test_a_deactivated_client_is_left_alone(
+        self, client: TestClient, registered_firm: dict, db: Session
+    ):
+        """Deactivation is how a firm records that a client has left.
+
+        Generating for them puts deadlines back on the calendar the firm just
+        cleared, and each one carries a fee onto the billable pile.
+        """
+        mine, _ = self.two_firms(client, registered_firm)
+        active = self.add_client(db, mine, "Still With Us Ltd")
+        departed = self.add_client(db, mine, "Moved On Ltd", is_active=False)
+
+        regenerate_for_firm(db, mine, today=date(2026, 7, 1))
+        db.flush()
+
+        assert items_of(db, active.id)
+        assert not items_of(db, departed.id)
+
+    def test_a_firm_with_no_clients_creates_nothing_and_says_so(
+        self, db: Session, registered_firm: dict
+    ):
+        firm_id = uuid.UUID(registered_firm["firm"]["id"])
+        assert regenerate_for_firm(db, firm_id, today=date(2026, 7, 1)) == 0
+
+    def test_the_count_is_the_rows_actually_written(
+        self, client: TestClient, registered_firm: dict, db: Session
+    ):
+        mine, _ = self.two_firms(client, registered_firm)
+        first = self.add_client(db, mine, "One Ltd")
+        second = self.add_client(db, mine, "Two Ltd")
+
+        created = regenerate_for_firm(db, mine, today=date(2026, 7, 1))
+        db.flush()
+
+        assert created == len(items_of(db, first.id)) + len(items_of(db, second.id))
+
+    def test_a_second_run_on_the_same_date_adds_nothing(
+        self, client: TestClient, registered_firm: dict, db: Session
+    ):
+        mine, _ = self.two_firms(client, registered_firm)
+        self.add_client(db, mine, "One Ltd")
+
+        assert regenerate_for_firm(db, mine, today=date(2026, 7, 1)) > 0
+        db.commit()
+        assert regenerate_for_firm(db, mine, today=date(2026, 7, 1)) == 0
 
 
 class TestClientListingAndDetail:

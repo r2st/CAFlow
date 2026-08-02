@@ -83,13 +83,17 @@ def generate_compliance_items(
     window_start: date | None = None,
     window_end: date | None = None,
     today: date | None = None,
-    flush: bool = True,
 ) -> GenerationResult:
     """Create the compliance items a client owes over the window.
 
     Only periods whose due date falls inside the window are materialised, so a
     client onboarded mid-year does not inherit deadlines that already passed
     before the firm took them on.
+
+    What is created is flushed before returning. The session runs with
+    ``autoflush=False``, so an unflushed row is one the next call's
+    already-generated lookup cannot see — and a second run inside the same
+    transaction would then create every filing a second time.
     """
     today = today or date.today()
     default_start, default_end = default_window(client, today)
@@ -103,6 +107,9 @@ def generate_compliance_items(
     for compliance_type in applicable_types(db, client):
         # Search back far enough to catch periods that ended before the window
         # but fall due inside it; the due-date filter below trims the excess.
+        # The extra month is slack, and only slack: searching further back is
+        # not observable in the result, just slower. Nothing pins that +1, and
+        # nothing can.
         search_start = add_months(start, -(max_lookback_months(compliance_type) + 1))
         periods = periods_for_frequency(
             compliance_type.frequency,
@@ -139,7 +146,7 @@ def generate_compliance_items(
             created.append(item)
             existing.add((compliance_type.id, period.label))
 
-    if flush and created:
+    if created:
         db.flush()
 
     return GenerationResult(
