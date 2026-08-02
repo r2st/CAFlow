@@ -155,7 +155,11 @@ recorded against a client label rather than a practitioner id.
 (`STORAGE_DIR`). The storage module is the only thing that touches the
 filesystem, so swapping it for S3-compatible object storage is a single-file
 change. Content types are checked against the leading bytes, not the declared
-type — an executable is an executable whatever the upload claims.
+type — an executable is an executable whatever the upload claims. Archives and
+the legacy Office formats are refused on the same evidence: `.doc` and `.xls`
+are OLE containers and can carry macros, so the refusal names both formats and
+asks for `.docx`, `.xlsx` or PDF instead. The portal's file picker offers only
+what the server will take, so a client cannot pick a file that cannot be sent.
 
 **Dependency advisories.** `npm audit` reports an RSC-mode CSRF advisory against
 `react-router >= 7.12`. This app is a client-rendered SPA with no RSC and no

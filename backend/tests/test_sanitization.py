@@ -89,6 +89,73 @@ class TestUploadSignatures:
             storage.validate_upload("application/pdf", 10**12, b"%PDF-1.7")
 
 
+class TestLegacyOfficeUploads:
+    """.doc and .xls are OLE containers, and OLE containers carry macros.
+
+    A CA's client sends these constantly — bank statements, Tally exports,
+    Form 26AS — so the refusal has to say what to do instead, and nothing in
+    the app may invite one in the first place.
+    """
+
+    # D0CF11E0A1B11AE1, then the 16-byte CLSID that is zero in an ordinary
+    # Word or Excel document.
+    OLE_HEADER = bytes.fromhex("d0cf11e0a1b11ae1") + b"\x00" * 16
+
+    def test_a_legacy_excel_file_is_refused_however_it_is_declared(self):
+        for declared in ("application/vnd.ms-excel", "application/octet-stream", None):
+            with pytest.raises(storage.UnsupportedFileType, match="legacy Word or Excel"):
+                storage.validate_upload(declared, 64, self.OLE_HEADER + b"workbook")
+
+    def test_the_refusal_says_what_to_send_instead(self):
+        # "an OLE container" is true and useless: it leaves a client holding a
+        # bank statement with nowhere to go.
+        with pytest.raises(storage.UnsupportedFileType) as refusal:
+            storage.validate_upload("application/msword", 64, self.OLE_HEADER + b"document")
+
+        message = str(refusal.value)
+        assert ".doc or .xls" in message
+        assert ".docx, .xlsx or PDF" in message
+
+    def test_the_allow_list_does_not_promise_what_the_bytes_refuse(self):
+        # Listing these accepted an upload the signature check then turned
+        # away, which is a promise the server cannot keep.
+        assert "application/msword" not in storage.ALLOWED_CONTENT_TYPES
+        assert "application/vnd.ms-excel" not in storage.ALLOWED_CONTENT_TYPES
+
+    def test_the_modern_formats_are_still_accepted(self):
+        # .docx / .xlsx are zip containers, and the point of refusing OLE is to
+        # push senders here rather than to refuse spreadsheets.
+        storage.validate_upload(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            8,
+            b"PK\x03\x04\x14\x00\x06\x00",
+        )
+
+    def test_an_archive_is_refused_with_somewhere_to_go_too(self):
+        with pytest.raises(storage.UnsupportedFileType, match="rather than an archive"):
+            storage.validate_upload("application/zip", 64, b"Rar!\x1a\x07\x00payload")
+
+
+class TestRefusalOrder:
+    def test_the_bytes_are_read_before_the_declared_type_is_believed(self):
+        """The declaration is a claim; the signature is evidence.
+
+        Checking the claim first would answer a legacy .xls with "files of type
+        application/vnd.ms-excel are not accepted" — naming a MIME type the
+        sender never chose and cannot change, instead of the file they picked.
+        """
+        with pytest.raises(storage.UnsupportedFileType, match="legacy Word or Excel"):
+            storage.validate_upload(
+                "application/vnd.ms-excel",
+                64,
+                TestLegacyOfficeUploads.OLE_HEADER + b"workbook",
+            )
+
+    def test_an_unknown_type_with_no_signature_is_still_refused_by_type(self):
+        with pytest.raises(storage.UnsupportedFileType, match="video/mp4"):
+            storage.validate_upload("video/mp4", 16, b"not a known signature")
+
+
 class TestContentTypeSniffing:
     def test_a_pdf_is_recognised_from_its_bytes(self):
         assert storage.sniff_content_type(b"%PDF-1.4 ...") == "application/pdf"

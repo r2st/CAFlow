@@ -34,10 +34,12 @@ ALLOWED_CONTENT_TYPES = frozenset(
         "text/plain",
         "text/csv",
         "application/json",
-        "application/vnd.ms-excel",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/msword",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        # No application/msword or application/vnd.ms-excel: .doc and .xls are
+        # OLE containers, refused below whatever they are declared as, and
+        # listing them here promised an acceptance the signature check never
+        # honoured.
         "application/zip",  # some browsers send this for .xlsx/.docx
         "application/octet-stream",
     }
@@ -50,17 +52,30 @@ TEXT_CONTENT_TYPES = frozenset({"text/plain", "text/csv", "application/json"})
 # The declared Content-Type is whatever the client chose to send, so it is not
 # evidence of anything. These leading bytes are: an executable is an
 # executable regardless of what the upload claims to be.
-EXECUTABLE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
-    (b"MZ", "a Windows executable"),
-    (b"\x7fELF", "a Linux executable"),
-    (b"\xca\xfe\xba\xbe", "a Mach-O binary"),
-    (b"\xcf\xfa\xed\xfe", "a Mach-O binary"),
-    (b"\xce\xfa\xed\xfe", "a Mach-O binary"),
-    (b"#!", "a shell script"),
-    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1\x00", "an OLE container"),
-    (b"Rar!", "a RAR archive"),
-    (b"\x37\x7a\xbc\xaf\x27\x1c", "a 7-Zip archive"),
-    (b"\x1f\x8b", "a gzip archive"),
+#
+# Each entry is (signature, what it is, what the sender can do instead). The
+# advice matters for the formats a CA's client plausibly sends by accident —
+# being told a bank statement "looks like an OLE container" leaves them with
+# nowhere to go.
+REFUSED_SIGNATURES: tuple[tuple[bytes, str, str], ...] = (
+    (b"MZ", "a Windows executable", ""),
+    (b"\x7fELF", "a Linux executable", ""),
+    (b"\xca\xfe\xba\xbe", "a Mach-O binary", ""),
+    (b"\xcf\xfa\xed\xfe", "a Mach-O binary", ""),
+    (b"\xce\xfa\xed\xfe", "a Mach-O binary", ""),
+    (b"#!", "a shell script", ""),
+    (
+        b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1\x00",
+        "a legacy Word or Excel file (.doc or .xls)",
+        "Those can carry macros. Save it as .docx, .xlsx or PDF and upload that.",
+    ),
+    (b"Rar!", "a RAR archive", "Upload the documents themselves rather than an archive."),
+    (
+        b"\x37\x7a\xbc\xaf\x27\x1c",
+        "a 7-Zip archive",
+        "Upload the documents themselves rather than an archive.",
+    ),
+    (b"\x1f\x8b", "a gzip archive", "Upload the documents themselves rather than an archive."),
 )
 
 # Signature -> the content type we record, whatever the upload declared.
@@ -127,17 +142,21 @@ def validate_upload(content_type: str | None, size_bytes: int, data: bytes = b""
         raise UploadTooLarge(f"File exceeds the {limit_mb:.0f} MB upload limit")
     if data and not data.strip():
         raise UnsupportedFileType("The file is empty")
+
+    # The signature is read before the declared type, because it is evidence
+    # and the declaration is only a claim. It also gives the better message: a
+    # .xls is turned away as a legacy Excel file with somewhere to go, rather
+    # than as a MIME type the sender never chose and cannot change.
+    head = data[:32]
+    for signature, description, advice in REFUSED_SIGNATURES:
+        if head.startswith(signature):
+            refusal = f"This file looks like {description}, which cannot be accepted"
+            raise UnsupportedFileType(f"{refusal}. {advice}" if advice else refusal)
+
     # A missing content type is treated as octet-stream rather than rejected;
     # browsers omit it for unusual extensions.
     if content_type and content_type.split(";")[0].strip() not in ALLOWED_CONTENT_TYPES:
         raise UnsupportedFileType(f"Files of type {content_type} are not accepted")
-
-    head = data[:32]
-    for signature, description in EXECUTABLE_SIGNATURES:
-        if head.startswith(signature):
-            raise UnsupportedFileType(
-                f"This file looks like {description}, which cannot be accepted"
-            )
 
 
 def effective_content_type(declared: str | None, data: bytes) -> str | None:
