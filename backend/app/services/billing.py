@@ -38,6 +38,10 @@ class BillingError(ValueError):
     """Raised when an operation is not valid for the invoice's current state."""
 
 
+class UnknownComplianceItem(BillingError):
+    """A line pointed at a filing this firm and client do not own."""
+
+
 # --------------------------------------------------------------- numbering --
 
 
@@ -284,6 +288,85 @@ def release_items(db: Session, invoice: Invoice) -> int:
     for item in items:
         item.is_billed = False
     return len(items)
+
+
+# -------------------------------------------------------------- line edits --
+# Hand-written lines (an ad-hoc invoice, or an edited draft) may cite a filing
+# just as a generated line does. Both paths below exist so that citing one has
+# the same consequences either way: the filing leaves the billable pile, and it
+# cannot be cited by two invoices at once.
+
+
+def referenced_items(
+    db: Session,
+    *,
+    firm_id: uuid.UUID,
+    client_id: uuid.UUID,
+    lines,
+) -> dict[uuid.UUID, ComplianceItem]:
+    """Load the filings a set of lines cites, refusing anything not ours.
+
+    A compliance item is addressable by id alone, so without this an invoice
+    could cite another firm's filing — and cancelling it would then write
+    ``is_billed`` onto their row. Being unreachable and not existing are
+    reported identically, so an id cannot be probed for existence.
+    """
+    wanted = {line.compliance_item_id for line in lines if line.compliance_item_id}
+    if not wanted:
+        return {}
+
+    found = {
+        item.id: item
+        for item in db.scalars(
+            select(ComplianceItem)
+            .options(selectinload(ComplianceItem.compliance_type))
+            .where(
+                ComplianceItem.id.in_(wanted),
+                ComplianceItem.firm_id == firm_id,
+                ComplianceItem.client_id == client_id,
+            )
+        ).all()
+    }
+    missing = wanted - found.keys()
+    if missing:
+        raise UnknownComplianceItem(
+            f"No filing for this client matches {sorted(str(i) for i in missing)[0]}"
+        )
+    return found
+
+
+def set_lines(db: Session, invoice: Invoice, lines, items: dict[uuid.UUID, ComplianceItem]):
+    """Replace an invoice's lines, keeping ``is_billed`` in step.
+
+    The invoice's existing claim is released *first*, so re-sending the same
+    lines back — which is exactly what an editor round-trip does — is a no-op
+    rather than a release. Anything still marked billed after that release is
+    billed by some *other* invoice, and citing it again would bill the client
+    twice for one filing.
+    """
+    release_items(db, invoice)
+    invoice.lines.clear()
+
+    for line in lines:
+        item = items.get(line.compliance_item_id) if line.compliance_item_id else None
+        if item is not None:
+            if item.is_billed:
+                raise BillingError(
+                    f"{line_description(item)} is already on another invoice"
+                )
+            item.is_billed = True
+        invoice.lines.append(
+            InvoiceLine(
+                compliance_item_id=line.compliance_item_id,
+                description=line.description,
+                quantity=line.quantity,
+                unit_price_paise=line.unit_price_paise,
+                amount_paise=line.quantity * line.unit_price_paise,
+                sac_code=line.sac_code or DEFAULT_SAC_CODE,
+            )
+        )
+
+    return recalculate(invoice)
 
 
 # ----------------------------------------------------------------- revenue --

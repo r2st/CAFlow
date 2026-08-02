@@ -14,7 +14,7 @@ from app.config import settings
 from app.core.periods import fiscal_year_start
 from app.models.base import InvoiceStatus
 from app.models.client import Client
-from app.models.invoice import Invoice, InvoiceLine
+from app.models.invoice import Invoice
 from app.schemas.common import Page
 from app.schemas.invoice import (
     BillableClientOut,
@@ -58,19 +58,22 @@ def serialise_detail(invoice: Invoice, today: date | None = None) -> InvoiceDeta
     )
 
 
-def _replace_lines(invoice: Invoice, lines) -> None:
-    invoice.lines.clear()
-    for line in lines:
-        invoice.lines.append(
-            InvoiceLine(
-                compliance_item_id=line.compliance_item_id,
-                description=line.description,
-                quantity=line.quantity,
-                unit_price_paise=line.unit_price_paise,
-                amount_paise=line.quantity * line.unit_price_paise,
-                sac_code=line.sac_code or billing.DEFAULT_SAC_CODE,
-            )
+def _apply_lines(db: Session, invoice: Invoice, lines, firm_id: uuid.UUID) -> None:
+    """Set an invoice's lines, translating billing refusals into HTTP.
+
+    A line citing a filing the caller cannot reach is a 404 — the same answer
+    an unknown id gets — while citing one that is already invoiced is a 409,
+    because that is a conflict with the firm's own records.
+    """
+    try:
+        items = billing.referenced_items(
+            db, firm_id=firm_id, client_id=invoice.client_id, lines=lines
         )
+        billing.set_lines(db, invoice, lines, items)
+    except billing.UnknownComplianceItem as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except billing.BillingError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------- billable / stats --
@@ -209,8 +212,7 @@ def create_invoice(payload: InvoiceCreate, practitioner: Manager, db: DbSession)
         status=InvoiceStatus.DRAFT,
         notes=payload.notes,
     )
-    _replace_lines(invoice, payload.lines)
-    billing.recalculate(invoice)
+    _apply_lines(db, invoice, payload.lines, practitioner.firm_id)
     db.add(invoice)
     db.flush()
 
@@ -290,8 +292,7 @@ def update_invoice(
         if key in updates and updates[key] is not None:
             setattr(invoice, key, updates[key])
     if payload.lines is not None:
-        billing.release_items(db, invoice)
-        _replace_lines(invoice, payload.lines)
+        _apply_lines(db, invoice, payload.lines, practitioner.firm_id)
     billing.recalculate(invoice)
 
     audit.record(

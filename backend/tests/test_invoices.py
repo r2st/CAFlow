@@ -10,6 +10,7 @@ import pytest
 from app.models.base import InvoiceStatus
 from app.models.invoice import Invoice, InvoiceLine
 from app.services import billing
+from tests.conftest import make_client_payload
 
 
 def file_everything(client, auth_headers) -> list[dict]:
@@ -427,3 +428,238 @@ class TestAccessControl:
         assert body["total"] == 1
         assert body["items"][0]["status"] == status_filter
         assert draft["id"] is not None
+
+
+class TestLinesCitingFilings:
+    """A hand-written line may cite a filing, and citing one has consequences.
+
+    Generated lines have always marked the work billed. These cover the other
+    way in — an ad-hoc invoice, or an edited draft — where citing a filing has
+    to mean the same thing, or the firm bills the same work twice.
+    """
+
+    @staticmethod
+    def _billable(client, auth_headers) -> dict:
+        return client.get("/api/v1/invoices/billable", headers=auth_headers).json()
+
+    @staticmethod
+    def _lines_of(invoice: dict) -> list[dict]:
+        """The invoice's own lines, in the shape a PATCH sends back."""
+        return [
+            {
+                "description": line["description"],
+                "quantity": line["quantity"],
+                "unit_price_paise": line["unit_price_paise"],
+                "compliance_item_id": line["compliance_item_id"],
+            }
+            for line in invoice["lines"]
+        ]
+
+    def test_citing_a_filing_takes_it_out_of_the_billable_pile(
+        self, client, auth_headers, client_id
+    ):
+        file_everything(client, auth_headers)
+        before = self._billable(client, auth_headers)
+        cited = before["clients"][0]["items"][0]
+
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[
+                {
+                    "description": "Agreed fee for the year",
+                    "quantity": 1,
+                    "unit_price_paise": 500_000,
+                    "compliance_item_id": cited["compliance_item_id"],
+                }
+            ],
+        )
+        assert response.status_code == 201
+
+        after = self._billable(client, auth_headers)
+        assert after["total_items"] == before["total_items"] - 1
+        assert cited["compliance_item_id"] not in [
+            item["compliance_item_id"]
+            for group in after["clients"]
+            for item in group["items"]
+        ]
+
+    def test_two_invoices_cannot_cite_the_same_filing(
+        self, client, auth_headers, client_id
+    ):
+        file_everything(client, auth_headers)
+        cited = self._billable(client, auth_headers)["clients"][0]["items"][0]
+        line = {
+            "description": "Billed once",
+            "quantity": 1,
+            "unit_price_paise": 100_000,
+            "compliance_item_id": cited["compliance_item_id"],
+        }
+
+        assert make_invoice(client, auth_headers, client_id, lines=[line]).status_code == 201
+        second = make_invoice(client, auth_headers, client_id, lines=[line])
+        assert second.status_code == 409
+        assert "already on another invoice" in second.json()["detail"]
+
+    def test_resending_a_drafts_own_lines_does_not_release_its_work(
+        self, client, auth_headers, client_id
+    ):
+        """The round-trip an editor makes: read the draft, PATCH it back.
+
+        The draft still bills that work, so it must not reappear as billable —
+        that is how the same filing ends up on a second invoice.
+        """
+        file_everything(client, auth_headers)
+        generated = client.post(
+            "/api/v1/invoices/generate", json={}, headers=auth_headers
+        ).json()["invoices"][0]
+        draft = client.get(
+            f"/api/v1/invoices/{generated['id']}", headers=auth_headers
+        ).json()
+        assert self._billable(client, auth_headers)["total_items"] == 0
+
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"lines": self._lines_of(draft)},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        assert self._billable(client, auth_headers)["total_items"] == 0
+
+    def test_dropping_a_line_returns_that_filing_to_the_billable_pile(
+        self, client, auth_headers, client_id
+    ):
+        file_everything(client, auth_headers)
+        generated = client.post(
+            "/api/v1/invoices/generate", json={}, headers=auth_headers
+        ).json()["invoices"][0]
+        draft = client.get(
+            f"/api/v1/invoices/{generated['id']}", headers=auth_headers
+        ).json()
+        kept = self._lines_of(draft)[:-1]
+
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"lines": kept},
+            headers=auth_headers,
+        )
+        assert self._billable(client, auth_headers)["total_items"] == 1
+
+    def test_a_line_may_cite_no_filing_at_all(self, client, auth_headers, client_id):
+        """Ad-hoc work — advisory, a certificate — has no compliance item."""
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[
+                {
+                    "description": "Advisory on the new TDS rates",
+                    "quantity": 3,
+                    "unit_price_paise": 150_000,
+                    "sac_code": "998311",
+                }
+            ],
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["subtotal_paise"] == 450_000
+        assert body["lines"][0]["compliance_item_id"] is None
+        assert body["lines"][0]["sac_code"] == "998311"
+
+    def test_a_filing_belonging_to_another_client_is_a_404(
+        self, client, auth_headers, client_id
+    ):
+        """Same firm, wrong client — the fee would land on the wrong ledger."""
+        other = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(
+                name="Meridian Exports LLP", pan="AACCM7788K", gstin="27AACCM7788K1Z9"
+            ),
+            headers=auth_headers,
+        ).json()["client"]
+        their_item = client.get(
+            "/api/v1/compliance/calendar",
+            params={"client_id": other["id"], "limit": 1},
+            headers=auth_headers,
+        ).json()["items"][0]
+
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[
+                {
+                    "description": "Wrong ledger",
+                    "quantity": 1,
+                    "unit_price_paise": 100_000,
+                    "compliance_item_id": their_item["id"],
+                }
+            ],
+        )
+        assert response.status_code == 404
+
+    def test_a_filing_belonging_to_another_firm_is_a_404(
+        self, client, auth_headers, client_id
+    ):
+        """A compliance item is addressable by id alone, so this is the guard
+        that stops one firm reaching into another's records — cancelling such
+        an invoice would write ``is_billed`` onto their row."""
+        outsider = client.post(
+            "/api/v1/auth/register",
+            json={
+                "firm_name": "Meridian & Co",
+                "icai_registration_number": "998877W",
+                "firm_email": "office@meridian-ca.in",
+                "pan": "AAACM7788K",
+                "owner_full_name": "Vikram Rao",
+                "owner_email": "vikram@meridian-ca.in",
+                "owner_password": "another-correct-horse",
+            },
+        ).json()
+        outsider_headers = {"Authorization": f"Bearer {outsider['access_token']}"}
+        their_client = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(pan="AAECM3456L", gstin="27AAECM3456L1Z2"),
+            headers=outsider_headers,
+        ).json()["client"]
+        their_item = client.get(
+            "/api/v1/compliance/calendar",
+            params={"client_id": their_client["id"], "limit": 1},
+            headers=outsider_headers,
+        ).json()["items"][0]
+
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[
+                {
+                    "description": "Reaching into another firm",
+                    "quantity": 1,
+                    "unit_price_paise": 100_000,
+                    "compliance_item_id": their_item["id"],
+                }
+            ],
+        )
+        assert response.status_code == 404
+
+        # The refusal is total: no half-built invoice is left behind.
+        ours = client.get("/api/v1/invoices", headers=auth_headers).json()
+        assert ours["total"] == 0
+
+    def test_an_unknown_filing_id_is_a_404(self, client, auth_headers, client_id):
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[
+                {
+                    "description": "Nothing there",
+                    "quantity": 1,
+                    "unit_price_paise": 100_000,
+                    "compliance_item_id": str(uuid.uuid4()),
+                }
+            ],
+        )
+        assert response.status_code == 404
