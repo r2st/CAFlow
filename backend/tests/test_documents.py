@@ -107,6 +107,22 @@ class TestUpload:
         assert response.status_code == 413
         assert "upload limit" in response.json()["detail"]
 
+    def test_a_zero_byte_upload_is_refused(self, client, auth_headers, client_id):
+        """An empty file is not the paperwork, and storing one says it arrived."""
+        response = client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("bank_statement.pdf", io.BytesIO(b""), "application/pdf")},
+            data={"client_id": client_id},
+            headers=auth_headers,
+        )
+        assert response.status_code == 415
+        assert "empty" in response.json()["detail"]
+
+        listed = client.get(
+            "/api/v1/documents", params={"client_id": client_id}, headers=auth_headers
+        ).json()["items"]
+        assert listed == []
+
     def test_an_unsupported_file_type_is_refused(self, client, auth_headers, client_id):
         response = client.post(
             "/api/v1/documents/upload",

@@ -73,6 +73,21 @@ class TestUploadSignatures:
         with pytest.raises(storage.UnsupportedFileType, match="empty"):
             storage.validate_upload("application/pdf", 3, b"   ")
 
+    def test_a_file_with_no_bytes_at_all_is_refused(self):
+        """The emptiest case used to be the one that got through.
+
+        The guard read ``data and not data.strip()``, so whitespace was turned
+        away while a genuinely zero-byte upload skipped the check entirely and
+        was stored — and a stored document is what marks a checklist
+        requirement satisfied, so the firm would see the paperwork as received.
+        """
+        with pytest.raises(storage.UnsupportedFileType, match="empty"):
+            storage.validate_upload("application/pdf", 0, b"")
+
+    def test_a_zero_byte_upload_is_refused_whatever_it_is_named(self):
+        with pytest.raises(storage.UnsupportedFileType, match="empty"):
+            storage.validate_upload(None, 0, b"", "bank-statement.pdf")
+
     def test_a_real_pdf_is_accepted(self):
         storage.validate_upload("application/pdf", 8, b"%PDF-1.7\n...")
 

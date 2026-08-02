@@ -163,7 +163,12 @@ def validate_upload(
     if size_bytes > settings.max_upload_bytes:
         limit_mb = settings.max_upload_bytes / (1024 * 1024)
         raise UploadTooLarge(f"File exceeds the {limit_mb:.0f} MB upload limit")
-    if data and not data.strip():
+    # Size rather than the bytes, so the emptiest upload is not the one that
+    # gets through: guarding on `data` alone skipped a zero-byte file entirely
+    # while turning whitespace away. A stored document is what marks a
+    # checklist requirement satisfied, so the firm would have seen paperwork
+    # as received that nobody sent.
+    if size_bytes <= 0 or (data and not data.strip()):
         raise UnsupportedFileType("The file is empty")
 
     # The signature is read before the declared type, because it is evidence

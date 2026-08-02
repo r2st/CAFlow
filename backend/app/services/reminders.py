@@ -25,7 +25,6 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import settings
 from app.models.base import ReminderChannel, ReminderStatus, ReminderType
 from app.models.client import Client
-from app.models.invoice import Invoice
 from app.models.reminder import Reminder
 from app.services import billing, documents, firms
 from app.services.ai import draft_client_message
@@ -307,7 +306,3 @@ def with_related(db: Session, firm_id: uuid.UUID, **filters) -> list[Reminder]:
             .order_by(Reminder.scheduled_for.desc())
         ).all()
     )
-
-
-def invoice_for(db: Session, invoice_id: uuid.UUID) -> Invoice | None:
-    return db.get(Invoice, invoice_id)
