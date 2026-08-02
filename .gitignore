@@ -22,6 +22,8 @@ dist/
 .env
 .env.local
 *.local
+# keys/ holds the deploy private key — never commit it.
+keys/
 
 # --- Local databases ---
 *.db
