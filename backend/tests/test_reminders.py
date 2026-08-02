@@ -227,6 +227,29 @@ class TestDocumentReminders:
             db, firm_id=uuid.UUID(firm_id), offsets=[]
         ) == []
 
+    def test_a_client_switched_off_with_an_open_filing_is_still_skipped(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        """The guard on the client, not the one on the filing's status.
+
+        Deactivating through the API also closes the client's open items, so
+        the sweep never reaches a live filing belonging to an inactive client
+        and the check that would skip them is never the reason nothing is
+        queued. The two are worth separating: a filing reopened afterwards, or
+        a client switched off by any route that leaves its work alone, puts a
+        deactivated client back in front of this loop.
+        """
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+
+        db.get(Client, uuid.UUID(client_id)).is_active = False
+        db.commit()
+
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        assert queued == []
+
 
 class TestPaymentReminders:
     @pytest.fixture
@@ -306,6 +329,83 @@ class TestPaymentReminders:
             db, firm_id=uuid.UUID(firm_id), offsets=[15, 30]
         )
         assert queued == []
+
+    def test_a_client_who_has_left_is_not_chased_for_the_debt(
+        self, db, firm_id, client_id, sent_invoice
+    ):
+        """The debt survives the relationship; chasing them for it does not.
+
+        Unlike the document sweep, nothing upstream filters this one — an
+        unpaid invoice stays unpaid whatever the client's status, so a
+        deactivated client goes on receiving fee reminders on a schedule
+        nobody is watching. The firm stopped acting for them; a WhatsApp
+        message every seven days in the firm's name is not what that means.
+        """
+        db.get(Client, uuid.UUID(client_id)).is_active = False
+        db.commit()
+
+        queued = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        assert queued == []
+
+    def test_the_subject_quotes_the_balance_in_rupees(self, db, firm_id, sent_invoice):
+        """The line the client reads first, and the one nothing checked.
+
+        The body's figure was pinned; the subject carries the same number
+        through its own conversion from paise, and got it wrong unnoticed. A
+        fee reminder whose subject says a different amount from its body is
+        one the firm has to explain.
+        """
+        queued = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        assert sent_invoice["total_paise"] == 236_000  # 2,000.00 plus 18% GST
+        assert "₹2,360.00 outstanding" in queued[0].subject
+
+
+class TestManualReminders:
+    """A practitioner composing one by hand, where the choices are theirs.
+
+    ``preferred_channel`` is a default, not a policy: the whole point of the
+    parameter is that a practitioner can send by email to a client who would
+    ordinarily be reached on WhatsApp — a fee dispute they want in writing, a
+    document the client asked for by mail. Nothing had ever passed one, so
+    ignoring the choice and falling back to the default went unnoticed, and
+    the recipient follows the channel.
+    """
+
+    def test_an_explicit_channel_beats_the_clients_usual_one(self, db, client_id):
+        on_whatsapp = db.get(Client, uuid.UUID(client_id))
+        on_whatsapp.whatsapp = "+919900112233"
+        db.flush()
+        assert reminder_service.preferred_channel(on_whatsapp) == ReminderChannel.WHATSAPP
+
+        reminder = reminder_service.build_manual_reminder(
+            db,
+            client=on_whatsapp,
+            reminder_type=ReminderType.CUSTOM,
+            subject="Confirming in writing",
+            body="As discussed.",
+            channel=ReminderChannel.EMAIL,
+        )
+        assert reminder.channel == ReminderChannel.EMAIL
+        assert reminder.recipient == on_whatsapp.email
+
+    def test_no_channel_falls_back_to_the_clients_usual_one(self, db, client_id):
+        on_whatsapp = db.get(Client, uuid.UUID(client_id))
+        on_whatsapp.whatsapp = "+919900112233"
+        db.flush()
+
+        reminder = reminder_service.build_manual_reminder(
+            db,
+            client=on_whatsapp,
+            reminder_type=ReminderType.CUSTOM,
+            subject="s",
+            body="b",
+        )
+        assert reminder.channel == ReminderChannel.WHATSAPP
+        assert reminder.recipient == "+919900112233"
 
 
 class TestReminderApi:

@@ -20,7 +20,7 @@ import uuid
 from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.base import ReminderChannel, ReminderStatus, ReminderType
@@ -290,19 +290,3 @@ def build_manual_reminder(
     db.add(reminder)
     db.flush()
     return reminder
-
-
-def with_related(db: Session, firm_id: uuid.UUID, **filters) -> list[Reminder]:
-    """Reminders for a firm with client/item eagerly loaded, newest first."""
-    conditions = [Reminder.firm_id == firm_id]
-    for column, value in filters.items():
-        if value is not None:
-            conditions.append(getattr(Reminder, column) == value)
-    return list(
-        db.scalars(
-            select(Reminder)
-            .options(selectinload(Reminder.client))
-            .where(*conditions)
-            .order_by(Reminder.scheduled_for.desc())
-        ).all()
-    )
