@@ -319,7 +319,11 @@ class TestTwoInvoicesAtOnce:
         monkeypatch.setattr(firms, "lock_firm", lambda db, fid: locked.append(fid))
 
         assert make_invoice(client, auth_headers, client_id).status_code == 201
-        assert locked == [uuid.UUID(firm_id)]
+        # Asked for, and only ever for this firm. Not *how many times*: the
+        # line edit takes the same row for its own read-decide-write, and
+        # re-acquiring a lock the transaction already holds costs nothing.
+        assert locked
+        assert set(locked) == {uuid.UUID(firm_id)}
 
     @staticmethod
     def committed_by_another_request(firm_id, client_id, number, issue_date=date(2026, 7, 1)):
@@ -1192,6 +1196,40 @@ class TestLinesCitingFilings:
             headers=auth_headers,
         )
         assert self._billable(client, auth_headers)["total_items"] == 1
+
+    def test_editing_a_draft_holds_the_firm_while_it_claims_a_filing(
+        self, client, auth_headers, client_id, firm_id, monkeypatch
+    ):
+        """Reading ``is_billed`` and then writing it has to be one step.
+
+        Creating an invoice already ran inside the lock ``insert_numbered``
+        takes. Editing a draft did not, so two managers each adding the same
+        filed return to their own draft both read it unbilled, both claimed it,
+        and both invoices went out citing the one filing.
+        """
+        file_everything(client, auth_headers)
+        cited = self._billable(client, auth_headers)["clients"][0]["items"][0]
+        draft = make_invoice(client, auth_headers, client_id).json()
+
+        locked = []
+        monkeypatch.setattr(firms, "lock_firm", lambda session, fid: locked.append(fid))
+
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={
+                "lines": [
+                    {
+                        "description": "Agreed fee",
+                        "quantity": 1,
+                        "unit_price_paise": 500_000,
+                        "compliance_item_id": cited["compliance_item_id"],
+                    }
+                ]
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert uuid.UUID(firm_id) in locked
 
     def test_a_line_may_cite_no_filing_at_all(self, client, auth_headers, client_id):
         """Ad-hoc work — advisory, a certificate — has no compliance item."""

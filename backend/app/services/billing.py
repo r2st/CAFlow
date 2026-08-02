@@ -508,7 +508,15 @@ def set_lines(db: Session, invoice: Invoice, lines, items: dict[uuid.UUID, Compl
     rather than a release. Anything still marked billed after that release is
     billed by some *other* invoice, and citing it again would bill the client
     twice for one filing.
+
+    The firm's row is held for the whole of that, because reading ``is_billed``
+    and then writing it is the same read-decide-write the plan limits and the
+    invoice numbering both had to be ordered for. Creation was already inside
+    the lock ``insert_numbered`` takes; editing a draft was not, and two
+    managers each adding the same filed return to their own draft both saw it
+    unbilled, both claimed it, and both invoices went out citing it.
     """
+    firms.lock_firm(db, invoice.firm_id)
     release_items(db, invoice)
     invoice.lines.clear()
 
