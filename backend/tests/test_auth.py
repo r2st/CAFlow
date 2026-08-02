@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import bcrypt
 import pytest
 from fastapi.testclient import TestClient
 
 from app.core.security import (
     TokenError,
+    _absent_account_hash,
     create_access_token,
     decode_token,
     hash_password,
@@ -115,6 +117,81 @@ class TestLogin:
         )
         assert response.status_code == 401
         assert response.json()["detail"] == "Incorrect email or password"
+
+
+class TestSignInDoesNotSayWhichEmailsAreCustomers:
+    """The two ways to fail a sign-in have to be indistinguishable — by the clock too.
+
+    An identical status code and detail message settle it for anyone reading
+    the response. They settle nothing for anyone timing it: bcrypt costs about
+    a quarter of a second, so skipping it when the email matched nobody makes
+    "no such account" return in a handful of milliseconds while "wrong
+    password" takes 250. Anyone with a list of email addresses and a stopwatch
+    can then read off which firms bank here.
+
+    Asserted by counting the hashing rather than by the wall clock, which is
+    both flaky under a loaded CI box and vague about what went wrong. One
+    bcrypt round per attempt, whichever way the attempt fails, is the property
+    that closes the gap — and it fails loudly the moment a short-circuit is
+    reintroduced.
+    """
+
+    @staticmethod
+    def _count_password_checks(monkeypatch) -> list:
+        checked = []
+        real_checkpw = bcrypt.checkpw
+
+        def counting_checkpw(password: bytes, hashed: bytes):
+            checked.append(hashed)
+            return real_checkpw(password, hashed)
+
+        monkeypatch.setattr(bcrypt, "checkpw", counting_checkpw)
+        return checked
+
+    def test_a_wrong_password_costs_one_hash(
+        self, client: TestClient, registered_firm: dict, monkeypatch
+    ):
+        checked = self._count_password_checks(monkeypatch)
+
+        response = client.post(
+            f"{API}/auth/login",
+            json={"email": "anita@sharma-ca.in", "password": "nope-nope-nope"},
+        )
+
+        assert response.status_code == 401
+        assert len(checked) == 1
+
+    def test_an_email_nobody_holds_costs_exactly_the_same(
+        self, client: TestClient, registered_firm: dict, monkeypatch
+    ):
+        checked = self._count_password_checks(monkeypatch)
+
+        response = client.post(
+            f"{API}/auth/login",
+            json={"email": "ghost@nowhere.in", "password": "correct-horse-battery"},
+        )
+
+        assert response.status_code == 401
+        # The row lookup found nothing, and a full round is spent regardless.
+        assert len(checked) == 1
+
+    def test_the_stand_in_hash_costs_what_a_real_password_costs(self):
+        # Same algorithm and same work factor, or the timing gap simply
+        # reappears smaller: bcrypt encodes both in the "$2b$12$" prefix.
+        assert _absent_account_hash()[:7] == hash_password("correct-horse-battery")[:7]
+
+    def test_the_stand_in_hash_is_built_once_and_reused(self):
+        # Minting a fresh one per attempt would put the salt generation on only
+        # one of the two paths, and cost a quarter-second of CPU per probe to
+        # an endpoint that attackers are the heaviest users of.
+        assert _absent_account_hash() is _absent_account_hash()
+
+    def test_no_password_ever_matches_the_stand_in(self):
+        # It hashes a random secret, so there is nothing to guess — but a
+        # sign-in that succeeded against a missing account would be the worst
+        # possible way to find that out.
+        assert not verify_password("correct-horse-battery", None)
+        assert not verify_password("", None)
 
 
 class TestProtectedRoutes:

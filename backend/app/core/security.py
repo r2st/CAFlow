@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import Any
 
 import bcrypt
@@ -26,7 +28,35 @@ def hash_password(password: str) -> str:
     return bcrypt.hashpw(encoded, bcrypt.gensalt()).decode("utf-8")
 
 
-def verify_password(password: str, password_hash: str) -> bool:
+@lru_cache(maxsize=1)
+def _absent_account_hash() -> str:
+    """A real hash, of a secret nobody holds, to check against when there is no account.
+
+    Built once on first use and at the same cost factor as a real password, so
+    checking against it costs what checking a real one costs.
+    """
+    return bcrypt.hashpw(secrets.token_bytes(32), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str | None) -> bool:
+    """Check a password. ``None`` means no such account — and costs the same.
+
+    bcrypt is slow on purpose, about a quarter of a second here, and skipping
+    it when the email matched nobody makes the two failures tell themselves
+    apart by the clock: a wrong password takes 250ms, an address with no
+    account behind it comes back in a handful. That gap answers "is this firm a
+    customer" for anyone holding a list of emails and a stopwatch, and it holds
+    however carefully the status code and response body are kept identical.
+
+    So an absent account is checked too, against a hash of a random secret that
+    no password will ever match. The clock then says nothing either way.
+
+    This lives here rather than in the sign-in route because a caller should
+    not be able to skip it by accident: the only way to ask the question is to
+    spend the same time on the answer.
+    """
+    if password_hash is None:
+        password_hash = _absent_account_hash()
     try:
         return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
     except (ValueError, TypeError):

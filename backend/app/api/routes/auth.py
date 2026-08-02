@@ -103,8 +103,11 @@ def login(payload: LoginRequest, request: Request, db: DbSession):
     practitioner = db.scalar(
         select(Practitioner).where(func.lower(Practitioner.email) == payload.email.lower())
     )
-    # Constant-ish work either way: never reveal whether the email exists.
-    if practitioner is None or not verify_password(payload.password, practitioner.password_hash):
+    # Handing the absent case to verify_password rather than short-circuiting
+    # on it is what makes the claim true: both paths spend a full bcrypt round,
+    # so the reply takes the same time whether or not the email is known here.
+    stored_hash = practitioner.password_hash if practitioner is not None else None
+    if not verify_password(payload.password, stored_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password"
         )
