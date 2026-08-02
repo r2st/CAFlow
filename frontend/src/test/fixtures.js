@@ -310,6 +310,34 @@ export function invoice(overrides = {}) {
   }
 }
 
+/** An invoice as `GET /invoices/{id}` returns it — with its lines. */
+export function invoiceDetail(overrides = {}) {
+  const { lines, ...rest } = overrides
+  return {
+    ...invoice(rest),
+    lines: lines ?? [
+      {
+        id: 'line-1',
+        compliance_item_id: 'ci-1',
+        description: 'GSTR-3B (Monthly) — 2026-06',
+        quantity: 1,
+        unit_price_paise: 300000,
+        amount_paise: 300000,
+        sac_code: '998222',
+      },
+      {
+        id: 'line-2',
+        compliance_item_id: null,
+        description: 'Advisory on the new TDS rates',
+        quantity: 2,
+        unit_price_paise: 100000,
+        amount_paise: 200000,
+        sac_code: '998311',
+      },
+    ],
+  }
+}
+
 export const REVENUE = {
   from_date: '2026-04-01',
   to_date: '2027-03-31',

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import api from '../api/client'
+import { InvoiceForm, InvoiceLineTable } from '../components/InvoiceEditor'
 import {
   Alert,
   EmptyState,
@@ -141,6 +142,43 @@ function UnbilledPanel({ billable, onGenerate, busy }) {
   )
 }
 
+/**
+ * The lines behind one invoice, opened in place under its row.
+ *
+ * Lines are fetched rather than carried on the list row: the ledger shows
+ * dozens of invoices and almost none of them get opened, so their lines are
+ * not worth the payload.
+ */
+function InvoiceDetail({ invoice, detail, colSpan, onEdit, onCancel, busy }) {
+  if (!detail) {
+    return (
+      <tr className="detail-row">
+        <td colSpan={colSpan}>
+          <Skeleton rows={3} />
+        </td>
+      </tr>
+    )
+  }
+
+  return (
+    <tr className="detail-row">
+      <td colSpan={colSpan}>
+        <InvoiceLineTable invoice={detail} />
+        {invoice.status === 'draft' && (
+          <div className="button-row line-actions">
+            <button type="button" className="secondary small" onClick={onEdit} disabled={busy}>
+              Edit lines
+            </button>
+            <button type="button" className="link small" onClick={onCancel} disabled={busy}>
+              Cancel invoice
+            </button>
+          </div>
+        )}
+      </td>
+    </tr>
+  )
+}
+
 export default function Billing() {
   const [revenue, setRevenue] = useState(null)
   const [billable, setBillable] = useState(null)
@@ -153,6 +191,12 @@ export default function Billing() {
   const [unpaidOnly, setUnpaidOnly] = useState(false)
   const [offset, setOffset] = useState(0)
   const [expanded, setExpanded] = useState(null)
+  // Opening an invoice's lines and opening its payment form are separate: a
+  // partner often wants to see what is on an invoice before paying it off.
+  const [openLines, setOpenLines] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [creating, setCreating] = useState(false)
+  const [editing, setEditing] = useState(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -222,6 +266,57 @@ export default function Billing() {
     [loadAll],
   )
 
+  /** Toggle an invoice's lines open, fetching them the first time. */
+  const toggleLines = useCallback(
+    async (invoiceId) => {
+      if (openLines === invoiceId) {
+        setOpenLines(null)
+        return
+      }
+      setOpenLines(invoiceId)
+      setDetail(null)
+      try {
+        setDetail(await api.getInvoice(invoiceId))
+      } catch (err) {
+        setError(err.message)
+        setOpenLines(null)
+      }
+    },
+    [openLines],
+  )
+
+  const startEditing = useCallback(async (invoiceId) => {
+    setError('')
+    try {
+      // Always re-read: the row in the ledger has no lines on it, and the
+      // draft may have moved since the list was fetched.
+      setEditing(await api.getInvoice(invoiceId))
+      setCreating(false)
+    } catch (err) {
+      setError(err.message)
+    }
+  }, [])
+
+  const saveInvoice = (body) =>
+    act(async () => {
+      if (editing) {
+        const saved = await api.updateInvoice(editing.id, body)
+        setEditing(null)
+        if (openLines === saved.id) setDetail(saved)
+        return `${saved.invoice_number} updated.`
+      }
+      const created = await api.createInvoice(body)
+      setCreating(false)
+      return `${created.invoice_number} drafted for ${created.client_name}.`
+    })
+
+  const cancelInvoice = (invoice) =>
+    act(async () => {
+      const cancelled = await api.cancelInvoice(invoice.id)
+      setOpenLines(null)
+      return `${cancelled.invoice_number} cancelled.`
+    })
+
   const generate = () =>
     act(async () => {
       const result = await api.generateInvoices({})
@@ -240,6 +335,15 @@ export default function Billing() {
           <h1>Billing</h1>
           <p>Invoices, receivables and unbilled work for this financial year</p>
         </div>
+        <button
+          type="button"
+          onClick={() => {
+            setCreating(true)
+            setEditing(null)
+          }}
+        >
+          New invoice
+        </button>
       </div>
 
       <Alert kind="error" onDismiss={() => setError('')}>
@@ -265,6 +369,20 @@ export default function Billing() {
             <Stat label="Unbilled" value={formatRupees(revenue.unbilled_paise)} tone="upcoming" />
           </div>
         )
+      )}
+
+      {(creating || editing) && (
+        <InvoiceForm
+          key={editing?.id ?? 'new'}
+          clients={clients}
+          invoice={editing}
+          busy={busy}
+          onSubmit={saveInvoice}
+          onCancel={() => {
+            setCreating(false)
+            setEditing(null)
+          }}
+        />
       )}
 
       <UnbilledPanel billable={billable} onGenerate={generate} busy={busy} />
@@ -347,8 +465,10 @@ export default function Billing() {
                 <tbody>
                   {invoices.map((invoice) => {
                     const isOpen = expanded === invoice.id
+                    const linesOpen = openLines === invoice.id
                     return (
-                      <tr key={invoice.id} className={invoice.status === 'overdue' ? 'row-overdue' : ''}>
+                      <Fragment key={invoice.id}>
+                      <tr className={invoice.status === 'overdue' ? 'row-overdue' : ''}>
                         <td className="mono">{invoice.invoice_number}</td>
                         <td>
                           <Link to={`/clients/${invoice.client_id}`}>{invoice.client_name}</Link>
@@ -371,6 +491,13 @@ export default function Billing() {
                         </td>
                         <td>
                           <div className="button-row">
+                            <button
+                              className="link small"
+                              onClick={() => toggleLines(invoice.id)}
+                              aria-expanded={linesOpen}
+                            >
+                              {linesOpen ? 'Hide lines' : 'Lines'}
+                            </button>
                             {invoice.status === 'draft' && (
                               <button
                                 className="secondary small"
@@ -408,6 +535,17 @@ export default function Billing() {
                           )}
                         </td>
                       </tr>
+                      {linesOpen && (
+                        <InvoiceDetail
+                          invoice={invoice}
+                          detail={detail}
+                          colSpan={8}
+                          busy={busy}
+                          onEdit={() => startEditing(invoice.id)}
+                          onCancel={() => cancelInvoice(invoice)}
+                        />
+                      )}
+                      </Fragment>
                     )
                   })}
                 </tbody>
