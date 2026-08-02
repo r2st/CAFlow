@@ -204,7 +204,12 @@ def update_compliance_item(
     for key, value in updates.items():
         setattr(item, key, value)
 
-    _normalise_filing(item, updates)
+    if "status" in updates:
+        _normalise_filing(
+            item,
+            filed_on=updates.get("filed_on"),
+            filed_on_given="filed_on" in updates,
+        )
 
     audit.record(
         db,
@@ -229,6 +234,20 @@ def bulk_update_status(
     payload: BulkStatusUpdate, practitioner: CurrentPractitioner, db: DbSession
 ):
     """Mark many filings at once — the common end-of-deadline workflow."""
+    # ``filed_on`` here means "the date this batch was lodged", so it only says
+    # anything alongside a filed status. Accepting it with any other status
+    # would have to either discard it silently or record a filing date on
+    # something that was not filed; refusing says which of the two fields the
+    # caller got wrong.
+    if payload.filed_on is not None and payload.status not in FILED_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"filed_on cannot be set alongside status '{payload.status.value}' — "
+                "a filing date belongs to a filed or delayed_filed item"
+            ),
+        )
+
     items = list(
         db.scalars(
             select(ComplianceItem)
@@ -243,9 +262,9 @@ def bulk_update_status(
         item.status = payload.status
         if payload.acknowledgement_number:
             item.acknowledgement_number = payload.acknowledgement_number
-        _normalise_filing(
-            item, {"status": payload.status, "filed_on": payload.filed_on}, payload.filed_on
-        )
+        # Never "given" here: a non-filed status has just been refused a date
+        # above, so reverting a batch always clears the stale one.
+        _normalise_filing(item, filed_on=payload.filed_on, filed_on_given=False)
 
     audit.record(
         db,
@@ -323,18 +342,30 @@ def _get_item_or_404(db: Session, firm_id: uuid.UUID, item_id: uuid.UUID) -> Com
 
 
 def _normalise_filing(
-    item: ComplianceItem, updates: dict, filed_on: date | None = None
+    item: ComplianceItem, *, filed_on: date | None, filed_on_given: bool
 ) -> None:
-    """Keep ``filed_on`` and the filed/delayed distinction consistent."""
-    if "status" not in updates:
-        return
+    """Keep ``filed_on`` and the filed/delayed distinction consistent.
+
+    ``filed_on_given`` says whether the caller named a date, which is a
+    different question from whether the date is set: reverting a filing is
+    what clears the date, and only a caller who named one is overriding that.
+
+    The bulk endpoint used to pass its whole payload here as the "updates"
+    dict, so ``"filed_on" in updates`` was true even when the field had been
+    left out — and reverting a batch to pending left every stale filing date
+    in place. That is not merely untidy: marking the item filed again later
+    without naming a date reuses the stale one, and the stale date is what
+    decides ``filed`` against ``delayed_filed``. A return lodged on time gets
+    stamped as a late filing, in the record the firm would show an assessing
+    officer.
+    """
     if item.status in FILED_STATUSES:
-        item.filed_on = updates.get("filed_on") or filed_on or item.filed_on or date.today()
+        item.filed_on = filed_on or item.filed_on or date.today()
         # A filing lodged after the due date is recorded as delayed.
         item.status = (
             ComplianceStatus.DELAYED_FILED
             if item.filed_on > item.due_date
             else ComplianceStatus.FILED
         )
-    elif "filed_on" not in updates:
+    elif not filed_on_given:
         item.filed_on = None

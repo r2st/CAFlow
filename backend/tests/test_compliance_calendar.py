@@ -301,6 +301,124 @@ class TestFilingUpdates:
         ).json()
         assert refreshed["total"] == 4
 
+    def test_reverting_a_batch_to_pending_clears_the_filing_dates(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The single-item PATCH already did this; the batch quietly did not."""
+        client_id = create_client_record(client, auth_headers)
+        items = items_for(db, client_id)[:3]
+        ids = [str(i.id) for i in items]
+
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": ids, "status": "filed", "filed_on": "2024-01-15"},
+        )
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": ids, "status": "pending"},
+        )
+
+        for item_id in ids:
+            body = client.get(
+                f"{API}/compliance/items/{item_id}", headers=auth_headers
+            ).json()
+            assert body["status"] == "pending"
+            assert body["filed_on"] is None
+
+    def test_a_reverted_batch_refiled_today_is_not_stamped_with_the_old_date(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The stale date decided filed-vs-delayed, so this was a false record.
+
+        Mark a batch filed on a date long past its due date, revert it — the
+        deadline was mis-keyed, say — and file it for real today, on time. The
+        leftover date made every one of them ``delayed_filed``.
+        """
+        client_id = create_client_record(client, auth_headers)
+        item = next(i for i in items_for(db, client_id) if i.due_date > date.today())
+        ids = [str(item.id)]
+        long_past = item.due_date - timedelta(days=400)
+
+        for payload in (
+            {"item_ids": ids, "status": "filed", "filed_on": long_past.isoformat()},
+            {"item_ids": ids, "status": "pending"},
+            {"item_ids": ids, "status": "filed"},
+        ):
+            client.post(
+                f"{API}/compliance/items/bulk-status", headers=auth_headers, json=payload
+            )
+
+        body = client.get(f"{API}/compliance/items/{item.id}", headers=auth_headers).json()
+        assert body["filed_on"] == date.today().isoformat()
+        assert body["status"] == "filed"
+
+    def test_a_batch_filed_with_no_date_is_dated_today(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        item = next(i for i in items_for(db, client_id) if i.due_date > date.today())
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": [str(item.id)], "status": "filed"},
+        )
+        body = client.get(f"{API}/compliance/items/{item.id}", headers=auth_headers).json()
+        assert body["filed_on"] == date.today().isoformat()
+
+    def test_a_batch_filed_late_is_recorded_as_delayed(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        late = item.due_date + timedelta(days=3)
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": [str(item.id)], "status": "filed", "filed_on": late.isoformat()},
+        )
+        body = client.get(f"{API}/compliance/items/{item.id}", headers=auth_headers).json()
+        assert body["status"] == "delayed_filed"
+
+    def test_a_filing_date_on_a_non_filed_batch_is_refused(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The endpoint never stored it; saying so beats discarding it quietly."""
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(item.id)],
+                "status": "in_progress",
+                "filed_on": "2024-03-09",
+            },
+        )
+        assert response.status_code == 422
+        assert "filed_on" in response.json()["detail"]
+
+    def test_a_delayed_filed_batch_may_carry_a_date(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Both filed statuses are filed statuses, not just the on-time one."""
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        late = item.due_date + timedelta(days=9)
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(item.id)],
+                "status": "delayed_filed",
+                "filed_on": late.isoformat(),
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = client.get(f"{API}/compliance/items/{item.id}", headers=auth_headers).json()
+        assert body["filed_on"] == late.isoformat()
+
     def test_bulk_update_skips_items_from_other_firms(
         self, client: TestClient, auth_headers: dict, db: Session
     ):
