@@ -33,6 +33,11 @@ UNPAID_STATUSES = (
     InvoiceStatus.PARTIALLY_PAID,
     InvoiceStatus.OVERDUE,
 )
+# Neither is a bill the client has been asked to pay: a draft has not been sent,
+# and a cancelled one has been withdrawn. Both keep a due date and an unpaid
+# balance all the same, so anything deriving lateness from those two fields
+# alone has to exclude these first.
+NOT_OWED_STATUSES = (InvoiceStatus.DRAFT, InvoiceStatus.CANCELLED)
 # Professional services rendered by a chartered accountant.
 DEFAULT_SAC_CODE = "998222"
 
@@ -198,7 +203,7 @@ def refresh_status(invoice: Invoice, today: date | None = None) -> Invoice:
     chose, not states derived from money movement.
     """
     today = today or date.today()
-    if invoice.status in (InvoiceStatus.DRAFT, InvoiceStatus.CANCELLED):
+    if invoice.status in NOT_OWED_STATUSES:
         return invoice
 
     # A nil invoice is settled the moment it is issued. Firms raise them to put

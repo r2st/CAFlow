@@ -42,10 +42,23 @@ def _get_invoice_or_404(db: Session, firm_id: uuid.UUID, invoice_id: uuid.UUID) 
 
 
 def serialise(invoice: Invoice, today: date | None = None) -> InvoiceOut:
+    """Serialise an invoice, dating its lateness.
+
+    Only for an invoice that is actually owed. A draft and a cancelled invoice
+    both keep a due date and an unpaid balance, so lateness read off those two
+    fields alone reported a bill the client was never asked to pay — and the
+    billing table renders that as "75 days late" in red beside a *Draft* or
+    *Cancelled* pill. It is the same pair ``refresh_status`` refuses to derive
+    a status for, for the same reason: neither state follows from money.
+    """
     today = today or date.today()
     out = InvoiceOut.model_validate(invoice)
     out.client_name = invoice.client.name if invoice.client else None
-    if invoice.due_date is not None and invoice.balance_paise > 0:
+    if (
+        invoice.status not in billing.NOT_OWED_STATUSES
+        and invoice.due_date is not None
+        and invoice.balance_paise > 0
+    ):
         overdue = (today - invoice.due_date).days
         out.days_overdue = overdue if overdue > 0 else None
     return out

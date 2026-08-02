@@ -1486,3 +1486,61 @@ class TestAmountBounds:
             headers=auth_headers,
         )
         assert response.status_code == 422
+
+
+class TestOnlyABillThatIsOwedCanBeLate:
+    """``days_overdue`` is what the billing table renders as "N days late".
+
+    A draft and a cancelled invoice both keep a due date and an unpaid
+    balance, so lateness derived from those two fields alone reported one
+    against a bill the client was never asked to pay. The same pair
+    ``refresh_status`` refuses to touch, and for the same reason.
+    """
+
+    def _overdue_draft(self, client, auth_headers, client_id: str) -> dict:
+        long_ago = (date.today() - timedelta(days=90)).isoformat()
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=long_ago,
+            due_date=long_ago,
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    def test_an_unsent_draft_is_not_late(self, client, auth_headers, client_id: str):
+        draft = self._overdue_draft(client, auth_headers, client_id)
+
+        assert draft["status"] == "draft"
+        assert draft["days_overdue"] is None
+
+    def test_a_cancelled_invoice_is_not_late(self, client, auth_headers, client_id: str):
+        draft = self._overdue_draft(client, auth_headers, client_id)
+        client.post(f"/api/v1/invoices/{draft['id']}/send", headers=auth_headers)
+
+        cancelled = client.post(
+            f"/api/v1/invoices/{draft['id']}/cancel", headers=auth_headers
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["status"] == "cancelled"
+        # Still carries the balance and the passed due date it was cancelled with.
+        assert cancelled.json()["balance_paise"] > 0
+        assert cancelled.json()["days_overdue"] is None
+
+    def test_a_sent_invoice_past_its_due_date_still_is(
+        self, client, auth_headers, client_id: str
+    ):
+        draft = self._overdue_draft(client, auth_headers, client_id)
+
+        sent = client.post(f"/api/v1/invoices/{draft['id']}/send", headers=auth_headers)
+        assert sent.status_code == 200, sent.text
+        assert sent.json()["days_overdue"] == 90
+
+    def test_the_list_agrees_with_the_detail(self, client, auth_headers, client_id: str):
+        draft = self._overdue_draft(client, auth_headers, client_id)
+
+        listed = client.get("/api/v1/invoices", headers=auth_headers).json()["items"]
+        row = next(inv for inv in listed if inv["id"] == draft["id"])
+
+        assert row["days_overdue"] is None
