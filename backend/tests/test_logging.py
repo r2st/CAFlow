@@ -210,3 +210,98 @@ class TestConfigureLogging:
     def test_sqlalchemy_is_kept_quiet_unless_db_echo_is_on(self):
         configure_logging()
         assert logging.getLogger("sqlalchemy.engine").level == logging.WARNING
+
+
+class TestTheAccessLineIsTraceable:
+    """The one line that names the request has to carry its own identifiers.
+
+    Every other line of a request is only findable through the access line, and
+    the caller is only ever handed the ``X-Request-ID`` header. If that id is
+    missing from the log, a user quoting it has given support nothing to grep
+    for, and the request's own error lines cannot be tied back to it.
+    """
+
+    def access_record(self, caplog):
+        records = [rec for rec in caplog.records if rec.name == "app.access"]
+        assert records, "no access log line was written"
+        return records[-1]
+
+    def test_the_logged_id_is_the_one_the_caller_was_given(self, caplog, client):
+        with caplog.at_level(logging.INFO, logger="app.access"):
+            response = client.get("/api/v1/clients")
+
+        record = self.access_record(caplog)
+        assert record.request_id == response.headers["X-Request-ID"]
+        assert record.request_id != "-"
+
+    def test_the_access_line_names_the_caller(self, caplog, client, auth_headers):
+        with caplog.at_level(logging.INFO, logger="app.access"):
+            client.get("/api/v1/clients", headers=auth_headers)
+
+        assert self.access_record(caplog).actor.startswith("access:")
+
+    def test_the_actor_does_not_depend_on_rate_limiting_being_on(
+        self, caplog, client, auth_headers
+    ):
+        """The actor used to be a side effect of the rate limiter.
+
+        Turning limits off then quietly stripped the caller from every log
+        line, which is the opposite of what an operator would expect.
+        """
+        assert settings.rate_limit_enabled is False
+
+        with caplog.at_level(logging.INFO, logger="app.access"):
+            client.get("/api/v1/clients", headers=auth_headers)
+
+        assert self.access_record(caplog).actor.startswith("access:")
+
+    def test_a_portal_link_is_logged_as_its_own_kind_of_caller(
+        self, caplog, client, auth_headers, client_id
+    ):
+        """A client and a practitioner must be distinguishable in the log."""
+        token = client.post(
+            f"/api/v1/clients/{client_id}/portal-link", json={}, headers=auth_headers
+        ).json()["token"]
+
+        with caplog.at_level(logging.INFO, logger="app.access"):
+            client.get("/api/v1/portal/me", headers={"Authorization": f"Bearer {token}"})
+
+        assert self.access_record(caplog).actor.startswith("magic_link:")
+
+    def test_an_anonymous_request_says_so_rather_than_guessing(self, caplog, client):
+        with caplog.at_level(logging.INFO, logger="app.access"):
+            client.get("/api/v1/clients")
+
+        assert self.access_record(caplog).actor == "-"
+
+    def test_an_unverifiable_token_does_not_become_an_actor(self, caplog, client):
+        """A forged token names nobody; it must not name whoever it claims."""
+        with caplog.at_level(logging.INFO, logger="app.access"):
+            client.get("/api/v1/clients", headers={"Authorization": "Bearer not-a-token"})
+
+        assert self.access_record(caplog).actor == "-"
+
+    def test_the_id_survives_a_handler_that_raised(self, caplog):
+        """The 500 case is exactly when the id is needed most."""
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        @app.get("/api/v1/_trace_boom")
+        def boom():
+            raise RuntimeError("kaboom")
+
+        try:
+            with (
+                caplog.at_level(logging.WARNING, logger="app.access"),
+                TestClient(app, raise_server_exceptions=False) as bare,
+            ):
+                response = bare.get("/api/v1/_trace_boom")
+            assert response.status_code == 500
+            assert self.access_record(caplog).request_id == response.headers["X-Request-ID"]
+        finally:
+            app.router.routes = [
+                route
+                for route in app.router.routes
+                if getattr(route, "path", "") != "/api/v1/_trace_boom"
+            ]

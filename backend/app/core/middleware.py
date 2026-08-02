@@ -69,60 +69,76 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = self._inbound_id(request) or uuid.uuid4().hex
         token = request_id_var.set(request_id)
-        actor_token = actor_var.set("")
+        # Resolved here, in the outermost layer, rather than where it is first
+        # needed. A context variable set by an inner middleware is not visible
+        # to this one — ``call_next`` runs the rest of the stack in its own
+        # task — so an actor established further down would reach neither the
+        # access line below nor a log written before that layer runs. Setting
+        # it here means every line of the request carries it, and it no longer
+        # depends on rate limiting being switched on.
+        actor_token = actor_var.set(_token_subject(request) or "")
         request.state.request_id = request_id
         started = time.perf_counter()
 
+        # The context is reset only once the access line has been written.
+        # Resetting straight after ``call_next`` would strip the id from the
+        # one log line that names the request, leaving the caller holding an
+        # X-Request-ID that appears nowhere in the log.
         try:
-            response = await call_next(request)
-        except Exception as exc:
-            # Handled here rather than left to Starlette's ServerErrorMiddleware,
-            # which sits outside every application middleware: a response
-            # produced there would carry no request id, no CORS headers and no
-            # security headers. The registered ``Exception`` handler stays in
-            # place as a backstop for anything raised outside this middleware.
-            from app.core.errors import GENERIC_SERVER_ERROR, error_response
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                # Handled here rather than left to Starlette's
+                # ServerErrorMiddleware, which sits outside every application
+                # middleware: a response produced there would carry no request
+                # id, no CORS headers and no security headers. The registered
+                # ``Exception`` handler stays in place as a backstop for
+                # anything raised outside this middleware.
+                from app.core.errors import GENERIC_SERVER_ERROR, error_response
 
-            logger.exception(
-                "Unhandled %s on %s %s",
-                type(exc).__name__,
+                logger.exception(
+                    "Unhandled %s on %s %s",
+                    type(exc).__name__,
+                    request.method,
+                    request.url.path,
+                    extra={"method": request.method, "path": request.url.path},
+                )
+                response = error_response(
+                    status_code=500, detail=GENERIC_SERVER_ERROR, request=request
+                )
+
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            response.headers[REQUEST_ID_HEADER] = request_id
+            response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
+
+            if request.url.path.startswith("/health"):
+                level = logging.DEBUG  # probes would otherwise dominate the log
+            elif response.status_code >= 500 or elapsed_ms >= settings.slow_request_ms:
+                level = logging.WARNING
+            else:
+                level = logging.INFO
+            logger.log(
+                level,
+                "%s %s -> %d in %.1fms",
                 request.method,
                 request.url.path,
-                extra={"method": request.method, "path": request.url.path},
+                response.status_code,
+                elapsed_ms,
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": round(elapsed_ms, 1),
+                    "client_ip": client_ip(request),
+                    # Set by whichever layer resolved the caller; "-" until one
+                    # does, which is the honest answer for an anonymous call.
+                    "actor": actor_var.get() or "-",
+                },
             )
-            response = error_response(
-                status_code=500, detail=GENERIC_SERVER_ERROR, request=request
-            )
+            return response
         finally:
             request_id_var.reset(token)
             actor_var.reset(actor_token)
-
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        response.headers[REQUEST_ID_HEADER] = request_id
-        response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
-
-        if request.url.path.startswith("/health"):
-            level = logging.DEBUG  # probes would otherwise dominate the log
-        elif response.status_code >= 500 or elapsed_ms >= settings.slow_request_ms:
-            level = logging.WARNING
-        else:
-            level = logging.INFO
-        logger.log(
-            level,
-            "%s %s -> %d in %.1fms",
-            request.method,
-            request.url.path,
-            response.status_code,
-            elapsed_ms,
-            extra={
-                "method": request.method,
-                "path": request.url.path,
-                "status_code": response.status_code,
-                "duration_ms": round(elapsed_ms, 1),
-                "client_ip": client_ip(request),
-            },
-        )
-        return response
 
     def _inbound_id(self, request: Request) -> str | None:
         candidate = request.headers.get(REQUEST_ID_HEADER, "").strip()
@@ -206,9 +222,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
 
-        subject = _token_subject(request)
-        if subject:
-            actor_var.set(subject)
+        # Already resolved by RequestContextMiddleware, which runs outside this
+        # one — decoding the token a second time would buy nothing.
+        subject = actor_var.get()
         key_source = subject or f"ip:{client_ip(request)}"
         bucket = ratelimit.bucket_for(
             request.url.path, request.method, authenticated=bool(subject)
