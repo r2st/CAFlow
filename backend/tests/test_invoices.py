@@ -6,6 +6,8 @@ import uuid
 from datetime import date, timedelta
 
 import pytest
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 
 from app.models.base import InvoiceStatus
 from app.models.invoice import Invoice, InvoiceLine
@@ -140,6 +142,297 @@ class TestNumbering:
 
         third = make_invoice(client, auth_headers, client_id).json()
         assert third["invoice_number"] != second["invoice_number"]
+
+
+class TestTwoInvoicesAtOnce:
+    """Numbering is a read followed by a write, and something fits in between.
+
+    Two practitioners in one firm pressing *Create invoice* together both read
+    the same set of used numbers and both pick the next one. One of them then
+    lost the whole request to ``uq_invoice_firm_number`` — reported as "that
+    change conflicts with an existing record", about an invoice number the user
+    never chose and cannot see. A batch generate lost every draft in the run,
+    not only the one that clashed.
+
+    Two things close it. The firm's own row is held for the duration, which is
+    what actually orders the requests on PostgreSQL; and the insert retries on
+    a fresh number, which is both the belt to that braces and the whole
+    mechanism on a backend without row locks.
+    """
+
+    @staticmethod
+    def make_line():
+        return InvoiceLine(description="Advisory", quantity=1, unit_price_paise=100_000)
+
+    def build_for(self, firm_id, client_id):
+        def build(number: str) -> Invoice:
+            invoice = Invoice(
+                firm_id=uuid.UUID(firm_id),
+                client_id=uuid.UUID(client_id),
+                invoice_number=number,
+                issue_date=date(2026, 7, 1),
+                gst_rate_bps=1800,
+                status=InvoiceStatus.DRAFT,
+            )
+            invoice.lines.append(self.make_line())
+            return billing.recalculate(invoice)
+
+        return build
+
+    def test_the_lock_is_one_the_database_can_actually_honour(self, firm_id):
+        """Compiled for PostgreSQL, because SQLite has no row locks to assert on
+        and silently drops the clause — so running the suite proves nothing
+        about the statement unless the statement itself is inspected."""
+        statements = []
+
+        class Recorder:
+            def execute(self, statement):
+                statements.append(statement)
+
+        billing.lock_firm_numbering(Recorder(), uuid.UUID(firm_id))
+
+        sql = str(statements[0].compile(dialect=postgresql.dialect()))
+        assert "FROM firms" in sql
+        assert "FOR UPDATE" in sql
+
+    def test_creating_an_invoice_takes_that_lock(
+        self, client, auth_headers, client_id, firm_id, monkeypatch
+    ):
+        """The statement above is worth nothing if the write path never runs it."""
+        locked = []
+        monkeypatch.setattr(
+            billing, "lock_firm_numbering", lambda db, fid: locked.append(fid)
+        )
+
+        assert make_invoice(client, auth_headers, client_id).status_code == 201
+        assert locked == [uuid.UUID(firm_id)]
+
+    @staticmethod
+    def committed_by_another_request(firm_id, client_id, number, issue_date=date(2026, 7, 1)):
+        """Take ``number`` on a second connection, the way a second request does.
+
+        A different connection is the whole point. A row written inside our own
+        transaction goes back out again when the savepoint rolls the losing
+        attempt back, so the retry finds the number free and the test proves
+        nothing. Committed from outside, it stays taken — which is the
+        situation being defended against.
+        """
+        from app.database import SessionLocal
+
+        other = SessionLocal()
+        try:
+            other.add(
+                Invoice(
+                    firm_id=uuid.UUID(firm_id),
+                    client_id=uuid.UUID(client_id),
+                    invoice_number=number,
+                    issue_date=issue_date,
+                    gst_rate_bps=1800,
+                    status=InvoiceStatus.DRAFT,
+                )
+            )
+            other.commit()
+        finally:
+            other.close()
+
+    def test_a_number_taken_between_the_read_and_the_write_is_given_up(
+        self, db, firm_id, client_id, monkeypatch
+    ):
+        """The race itself, in the order it happens.
+
+        We read the used numbers and settle on 0001. Another request commits
+        0001. We then try to insert it. Before, that was the end of the
+        request; now the number is given up and the next free one taken.
+
+        Only the reading is staged — the number handed back is exactly what a
+        request that read a moment earlier would have got. The clash at flush
+        is a real unique-constraint violation against a row a real second
+        connection really committed.
+        """
+        stale = billing.next_invoice_number(db, uuid.UUID(firm_id), date(2026, 7, 1))
+        assert stale == "INV/FY2026-27/0001"
+        db.rollback()  # SQLite will not let another connection write past a held read
+        self.committed_by_another_request(firm_id, client_id, stale)
+
+        offered = []
+        real = billing.next_invoice_number
+
+        def as_read_a_moment_ago(session, fid, issue_date=None):
+            offered.append(1)
+            return stale if len(offered) == 1 else real(session, fid, issue_date)
+
+        monkeypatch.setattr(billing, "next_invoice_number", as_read_a_moment_ago)
+        invoice = billing.insert_numbered(
+            db,
+            firm_id=uuid.UUID(firm_id),
+            issue_date=date(2026, 7, 1),
+            build=self.build_for(firm_id, client_id),
+        )
+        db.commit()
+
+        assert len(offered) == 2
+        assert invoice.invoice_number == "INV/FY2026-27/0002"
+        # The other request keeps 0001; nothing was overwritten to make room.
+        assert db.query(Invoice).count() == 2
+
+    def test_the_abandoned_attempt_leaves_nothing_behind(
+        self, db, firm_id, client_id, monkeypatch
+    ):
+        """A retry that left its lines or its half-written invoice in the
+        session would bill the client twice for one piece of work."""
+        used = "INV/FY2026-27/0001"
+        db.add(
+            Invoice(
+                firm_id=uuid.UUID(firm_id),
+                client_id=uuid.UUID(client_id),
+                invoice_number=used,
+                issue_date=date(2026, 7, 1),
+                status=InvoiceStatus.DRAFT,
+            )
+        )
+        db.commit()
+
+        offered = []
+        real = billing.next_invoice_number
+
+        def offer_the_taken_one_first(session, fid, issue_date=None):
+            offered.append(1)
+            return used if len(offered) == 1 else real(session, fid, issue_date)
+
+        monkeypatch.setattr(billing, "next_invoice_number", offer_the_taken_one_first)
+        invoice = billing.insert_numbered(
+            db,
+            firm_id=uuid.UUID(firm_id),
+            issue_date=date(2026, 7, 1),
+            build=self.build_for(firm_id, client_id),
+        )
+        db.commit()
+
+        assert len(offered) == 2
+        assert invoice.invoice_number == "INV/FY2026-27/0002"
+        # Two invoices, one line each — not three lines shared between two.
+        assert db.query(Invoice).count() == 2
+        assert db.query(InvoiceLine).count() == 1
+        assert len(invoice.lines) == 1
+
+    def test_a_violation_that_is_not_the_number_is_reported_as_it_happened(
+        self, db, firm_id
+    ):
+        """Retrying a foreign-key violation four times would spend the attempts
+        on something no new number can fix, then blame the numbering."""
+        attempts = []
+
+        def build(number: str) -> Invoice:
+            attempts.append(number)
+            raise IntegrityError(
+                "INSERT INTO invoices ...", {}, Exception("FOREIGN KEY constraint failed")
+            )
+
+        with pytest.raises(IntegrityError) as raised:
+            billing.insert_numbered(
+                db, firm_id=uuid.UUID(firm_id), issue_date=date(2026, 7, 1), build=build
+            )
+
+        assert "FOREIGN KEY" in str(raised.value.orig)
+        assert len(attempts) == 1
+
+    def test_giving_up_surfaces_the_conflict_rather_than_looping(
+        self, db, firm_id, client_id, monkeypatch
+    ):
+        """Contention this durable is not contention. It stops, and says so."""
+        db.add(
+            Invoice(
+                firm_id=uuid.UUID(firm_id),
+                client_id=uuid.UUID(client_id),
+                invoice_number="INV/FY2026-27/0001",
+                issue_date=date(2026, 7, 1),
+                status=InvoiceStatus.DRAFT,
+            )
+        )
+        db.commit()
+
+        offered = []
+        monkeypatch.setattr(
+            billing,
+            "next_invoice_number",
+            lambda *a, **k: offered.append(1) or "INV/FY2026-27/0001",
+        )
+
+        with pytest.raises(IntegrityError):
+            billing.insert_numbered(
+                db,
+                firm_id=uuid.UUID(firm_id),
+                issue_date=date(2026, 7, 1),
+                build=self.build_for(firm_id, client_id),
+            )
+
+        assert len(offered) == billing.NUMBER_ATTEMPTS
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            'duplicate key value violates unique constraint "uq_invoice_firm_number"',
+            "UNIQUE constraint failed: invoices.firm_id, invoices.invoice_number",
+        ],
+        ids=["postgresql", "sqlite"],
+    )
+    def test_both_backends_say_taken_in_their_own_words(self, message):
+        """The suite runs on SQLite and production runs on PostgreSQL, so the
+        wording that matters most is the one never exercised here."""
+        assert billing.number_collision(IntegrityError("...", {}, Exception(message)))
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            'insert or update on table "invoices" violates foreign key constraint',
+            "UNIQUE constraint failed: clients.firm_id, clients.pan",
+        ],
+        ids=["foreign-key", "another-table"],
+    )
+    def test_nothing_else_is_mistaken_for_a_taken_number(self, message):
+        assert not billing.number_collision(IntegrityError("...", {}, Exception(message)))
+
+    def test_a_batch_generate_keeps_every_draft_it_started(
+        self, client, auth_headers, client_id, firm_id, db, monkeypatch
+    ):
+        """The failure that cost the most: one clash used to roll back the run,
+        so a firm that generated forty invoices got none of them."""
+        file_everything(client, auth_headers)
+        second = client.post(
+            "/api/v1/clients", json=make_client_payload(name="Kaveri Foods", pan="AAECK4321P"),
+            headers=auth_headers,
+        )
+        assert second.status_code == 201, second.text
+        file_everything(client, auth_headers)
+
+        stale = billing.next_invoice_number(db, uuid.UUID(firm_id))
+        db.rollback()
+        self.committed_by_another_request(
+            firm_id, client_id, stale, issue_date=date.today()
+        )
+
+        offered = []
+        real = billing.next_invoice_number
+
+        def as_read_a_moment_ago(session, fid, issue_date=None):
+            offered.append(1)
+            return stale if len(offered) == 1 else real(session, fid, issue_date)
+
+        monkeypatch.setattr(billing, "next_invoice_number", as_read_a_moment_ago)
+        response = client.post("/api/v1/invoices/generate", json={}, headers=auth_headers)
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        # Both drafts survive: the clash costs one number, not the run.
+        assert body["created"] == 2
+        numbers = [inv["invoice_number"] for inv in body["invoices"]]
+        assert len(set(numbers)) == 2
+        assert stale not in numbers
+        # And the work really is billed — a rolled-back run used to leave the
+        # filings marked unbilled while the caller was told nothing had failed.
+        assert client.get("/api/v1/invoices/billable", headers=auth_headers).json()[
+            "total_items"
+        ] == 0
 
 
 class TestBillableWork:

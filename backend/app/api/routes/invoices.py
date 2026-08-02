@@ -198,23 +198,28 @@ def create_invoice(payload: InvoiceCreate, practitioner: Manager, db: DbSession)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
 
     issue_date = payload.issue_date or date.today()
-    invoice = Invoice(
-        firm_id=practitioner.firm_id,
-        client_id=client.id,
-        invoice_number=billing.next_invoice_number(db, practitioner.firm_id, issue_date),
-        issue_date=issue_date,
-        due_date=payload.due_date,
-        gst_rate_bps=(
-            payload.gst_rate_bps
-            if payload.gst_rate_bps is not None
-            else settings.invoice_gst_rate_bps
-        ),
-        status=InvoiceStatus.DRAFT,
-        notes=payload.notes,
+
+    def build(invoice_number: str) -> Invoice:
+        invoice = Invoice(
+            firm_id=practitioner.firm_id,
+            client_id=client.id,
+            invoice_number=invoice_number,
+            issue_date=issue_date,
+            due_date=payload.due_date,
+            gst_rate_bps=(
+                payload.gst_rate_bps
+                if payload.gst_rate_bps is not None
+                else settings.invoice_gst_rate_bps
+            ),
+            status=InvoiceStatus.DRAFT,
+            notes=payload.notes,
+        )
+        _apply_lines(db, invoice, payload.lines, practitioner.firm_id)
+        return invoice
+
+    invoice = billing.insert_numbered(
+        db, firm_id=practitioner.firm_id, issue_date=issue_date, build=build
     )
-    _apply_lines(db, invoice, payload.lines, practitioner.firm_id)
-    db.add(invoice)
-    db.flush()
 
     audit.record(
         db,

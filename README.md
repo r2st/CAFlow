@@ -134,6 +134,19 @@ the broker's `visibility_timeout` so a slow task is never redelivered while it
 is still running, and the worker's `stop_grace_period` outlasts one SMTP
 timeout so a deploy does not kill a send it has already made.
 
+**Invoice numbers are allocated, not guessed.** The next number in a firm's
+financial-year sequence is a read followed by a write, and a second request
+fits between them: two practitioners pressing *Create invoice* together both
+read the same used set, both pick the same number, and one of them lost the
+whole request to `uq_invoice_firm_number` — reported as a conflict over a
+number the user never chose. A batch generate lost every draft in the run, not
+only the one that clashed. Numbering now holds the firm's own row with
+`SELECT … FOR UPDATE` for the rest of the transaction, which orders the
+requests without touching any other firm's billing, and the insert itself sits
+in a savepoint that retries on a fresh number if the row was taken anyway. A
+violation that is not the number — a filing that has gone, say — is reported as
+it happened rather than retried.
+
 **Rate limits.** Counters live in Redis when it is reachable, so limits hold
 across workers; otherwise they fall back to a per-process window. Credential
 endpoints get a much tighter bucket than the rest of the API. Responses carry
