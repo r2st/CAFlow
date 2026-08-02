@@ -12,6 +12,7 @@ import pytest
 from app.config import settings
 from app.core.security import create_access_token, create_magic_link_token
 from app.models.client import Client
+from app.models.firm import Firm
 from tests.conftest import first_item_of_type, make_client_payload
 
 PDF_BYTES = b"%PDF-1.4\n% ledger\n"
@@ -367,6 +368,47 @@ class TestRevocation:
             "portal_token_valid_from": None,
             "portal_last_seen_at": None,
         }
+
+
+class TestDeactivatingTheFirmClosesItsPortal:
+    """A firm this deployment no longer serves does not still answer its clients.
+
+    The portal dependency checked the client, the client's portal flag and the
+    link's issue time, but never the firm behind them — so a firm switched off
+    left every outstanding magic link live for the rest of its twelve hours,
+    still handing out that firm's filing status and taking uploads into that
+    firm's storage.
+    """
+
+    def test_a_live_link_stops_working(
+        self, client, auth_headers, portal_headers, client_id, db, firm_id
+    ):
+        assert client.get("/api/v1/portal/me", headers=portal_headers).status_code == 200
+
+        firm = db.get(Firm, uuid.UUID(firm_id))
+        firm.is_active = False
+        db.commit()
+
+        response = client.get("/api/v1/portal/me", headers=portal_headers)
+        assert response.status_code == 401
+        # Reported as a dead link, not as the firm's status: the client is not
+        # the party the decision was about, and asking their CA is the right
+        # next step either way.
+        assert "ask your ca" in response.json()["detail"].lower()
+
+    def test_uploading_is_refused_as_well_as_reading(
+        self, client, auth_headers, portal_headers, client_id, db, firm_id
+    ):
+        firm = db.get(Firm, uuid.UUID(firm_id))
+        firm.is_active = False
+        db.commit()
+
+        response = client.post(
+            "/api/v1/portal/documents",
+            files={"file": ("statement.pdf", io.BytesIO(b"%PDF-1.4 x"), "application/pdf")},
+            headers=portal_headers,
+        )
+        assert response.status_code == 401
 
 
 class TestPortalUploads:

@@ -147,6 +147,14 @@ Neither dependency will accept the other's token. Revocation needs no
 blocklist: `Client.portal_token_valid_from` is a cut-off instant, and a token
 is accepted only if it was minted at or after it.
 
+Both are resolved against current state rather than against what the token
+said. A practitioner deactivated, demoted, or belonging to a firm that has been
+switched off is refused on the next request, not when their token expires
+twelve hours later — the firm check sits in `get_current_practitioner`, so
+every endpoint taking a practitioner inherits it rather than only the few that
+ask for the firm object. The same applies to the portal: a deactivated firm's
+outstanding magic links stop resolving.
+
 **Roles.** Four, widening outward. `junior` reads everything in the firm and
 does the day-to-day work — updating filing status, uploading documents, creating
 and updating tasks. `manager` adds the paths that commit the firm to something:

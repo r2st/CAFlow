@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import uuid
+
 import bcrypt
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.api.deps import _active_firm
 from app.core.security import (
     TokenError,
     _absent_account_hash,
@@ -14,6 +18,7 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.models.firm import Firm
 from tests.conftest import FIRM_REGISTRATION
 
 API = "/api/v1"
@@ -206,6 +211,112 @@ class TestProtectedRoutes:
         response = client.get(f"{API}/auth/me", headers=auth_headers)
         assert response.status_code == 200
         assert response.json()["email"] == "anita@sharma-ca.in"
+
+
+class TestDeactivatingAFirmTakesEffectNow:
+    """A firm that is no longer served stops being served at once.
+
+    Sign-in has always refused a deactivated firm, and the Celery jobs have
+    always skipped one — but an access token lives twelve hours, and the
+    resolution of "is this firm still active?" sat in ``get_current_firm``,
+    which only the handful of endpoints that need the firm object declare. So a
+    firm switched off in the morning went on updating filings, issuing invoices
+    and handing out portal links all day, while nothing was generated for it
+    and no reminder went out: half switched off, in the half nobody sees.
+
+    The check belongs where the practitioner is resolved, so every endpoint
+    that takes a practitioner inherits it.
+    """
+
+    @pytest.fixture
+    def deactivate(self, db, firm_id):
+        def go():
+            firm = db.get(Firm, uuid.UUID(firm_id))
+            firm.is_active = False
+            db.commit()
+
+        return go
+
+    def test_a_token_issued_before_it_stops_working(
+        self, client: TestClient, auth_headers: dict, deactivate
+    ):
+        assert client.get(f"{API}/auth/me", headers=auth_headers).status_code == 200
+
+        deactivate()
+
+        response = client.get(f"{API}/auth/me", headers=auth_headers)
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Firm is not active"
+
+    def test_an_endpoint_that_never_asks_for_the_firm_refuses_too(
+        self, client: TestClient, auth_headers: dict, deactivate
+    ):
+        """The whole point: the old check was only on the endpoints that
+        happened to want the firm object, which is a small minority of them."""
+        deactivate()
+
+        assert client.get(f"{API}/clients", headers=auth_headers).status_code == 403
+        assert (
+            client.get(f"{API}/compliance/dashboard", headers=auth_headers).status_code == 403
+        )
+        assert client.get(f"{API}/tasks", headers=auth_headers).status_code == 403
+
+    def test_writes_are_refused_as_well_as_reads(
+        self, client: TestClient, auth_headers: dict, client_id: str, deactivate
+    ):
+        deactivate()
+
+        response = client.post(
+            f"{API}/tasks",
+            json={"title": "File GSTR-3B", "client_id": client_id},
+            headers=auth_headers,
+        )
+        assert response.status_code == 403
+
+    def test_signing_in_again_is_refused_too(self, client: TestClient, deactivate):
+        """The other half of the same rule, and the one that already held."""
+        deactivate()
+
+        response = client.post(
+            f"{API}/auth/login",
+            json={
+                "email": FIRM_REGISTRATION["owner_email"],
+                "password": FIRM_REGISTRATION["owner_password"],
+            },
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Firm is not active"
+
+    def test_reactivating_restores_the_same_token(
+        self, client: TestClient, auth_headers: dict, db, firm_id: str, deactivate
+    ):
+        """Deactivation is a state, not a revocation — nothing is blocklisted."""
+        deactivate()
+        assert client.get(f"{API}/auth/me", headers=auth_headers).status_code == 403
+
+        firm = db.get(Firm, uuid.UUID(firm_id))
+        firm.is_active = True
+        db.commit()
+
+        assert client.get(f"{API}/auth/me", headers=auth_headers).status_code == 200
+
+    def test_a_deleted_firm_takes_its_practitioners_credentials_with_it(
+        self, client: TestClient, auth_headers: dict, db, firm_id: str
+    ):
+        """Deletion cascades, so the token stops resolving to anyone at all."""
+        db.delete(db.get(Firm, uuid.UUID(firm_id)))
+        db.commit()
+
+        assert client.get(f"{API}/auth/me", headers=auth_headers).status_code == 401
+
+    def test_a_firm_row_that_is_simply_gone_is_refused_not_returned(self, db):
+        """Held here rather than through an endpoint, because the cascade above
+        means no request can reach this branch — which is exactly why a `None`
+        slipping through as "active" would go unnoticed."""
+        with pytest.raises(HTTPException) as raised:
+            _active_firm(db, uuid.uuid4())
+
+        assert raised.value.status_code == 403
 
 
 class TestPractitioners:

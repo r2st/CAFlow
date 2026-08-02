@@ -52,6 +52,22 @@ PORTAL_LINK_EXCEPTION = HTTPException(
     headers={"WWW-Authenticate": "Bearer"},
 )
 
+FIRM_INACTIVE_EXCEPTION = HTTPException(
+    status_code=status.HTTP_403_FORBIDDEN, detail="Firm is not active"
+)
+
+
+def _active_firm(db: Session, firm_id: uuid.UUID) -> Firm:
+    """The firm, if it is still one this deployment serves.
+
+    ``db.get`` reads the identity map first, so a request whose endpoint also
+    declares :data:`CurrentFirm` pays for this once rather than twice.
+    """
+    firm = db.get(Firm, firm_id)
+    if firm is None or not firm.is_active:
+        raise FIRM_INACTIVE_EXCEPTION
+    return firm
+
 
 def get_current_practitioner(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
@@ -70,6 +86,13 @@ def get_current_practitioner(
         raise CREDENTIALS_EXCEPTION
     if str(practitioner.firm_id) != payload.get("firm_id"):
         raise CREDENTIALS_EXCEPTION
+    # Checked here rather than only in ``get_current_firm``: an access token
+    # lives twelve hours, and most endpoints have no reason to ask for the firm
+    # object, so a firm deactivated at nine in the morning went on filing,
+    # invoicing and granting portal links until the last token issued before it
+    # expired. Sign-in already refuses — this is what makes the refusal apply
+    # to credentials that were minted before the decision.
+    _active_firm(db, practitioner.firm_id)
     return practitioner
 
 
@@ -78,10 +101,7 @@ DbSession = Annotated[Session, Depends(get_db)]
 
 
 def get_current_firm(practitioner: CurrentPractitioner, db: DbSession) -> Firm:
-    firm = db.get(Firm, practitioner.firm_id)
-    if firm is None or not firm.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Firm is not active")
-    return firm
+    return _active_firm(db, practitioner.firm_id)
 
 
 CurrentFirm = Annotated[Firm, Depends(get_current_firm)]
@@ -111,6 +131,12 @@ def get_portal_client(
     if str(client.firm_id) != payload.get("firm_id"):
         raise PORTAL_LINK_EXCEPTION
     if not token_is_current(client, issued_at_ms(payload)):
+        raise PORTAL_LINK_EXCEPTION
+    # A firm that is no longer served has no portal either. Reported as a dead
+    # link rather than as the firm's status: the client is not the party this
+    # decision was about, and "ask your CA" is the right next step regardless.
+    firm = db.get(Firm, client.firm_id)
+    if firm is None or not firm.is_active:
         raise PORTAL_LINK_EXCEPTION
     return client
 
