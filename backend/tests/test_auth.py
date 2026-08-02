@@ -252,3 +252,177 @@ class TestPractitioners:
             json={"email": "temp@sharma-ca.in", "password": "temp-password-123"},
         )
         assert response.status_code == 403
+
+
+class TestThePlanCeilingIsVisible:
+    """A firm should see the ceiling before it hits it.
+
+    The limit is enforced when a practitioner is added, and a 402 at that
+    moment is the worst time to learn the plan is full. Serving the number
+    alongside the firm lets the team screen say how many seats are left.
+    """
+
+    def test_the_firm_reports_its_seat_and_client_ceilings(
+        self, client: TestClient, auth_headers: dict
+    ):
+        firm = client.get(f"{API}/auth/firm", headers=auth_headers).json()
+
+        # The fixture firm is on the "practice" plan: 5 users, 200 clients.
+        assert firm["user_limit"] == 5
+        assert firm["client_limit"] == 200
+
+    def test_an_unlimited_plan_says_so_rather_than_naming_a_number(
+        self, client: TestClient, db
+    ):
+        """The top plan has no ceiling, and ``null`` is how that is said."""
+        from sqlalchemy import select
+
+        from app.models.base import FirmPlan
+        from app.models.firm import Firm
+
+        registration = dict(FIRM_REGISTRATION)
+        registration.update(
+            firm_name="Unlimited & Co",
+            firm_email="office@unlimited-ca.in",
+            owner_email="owner@unlimited-ca.in",
+        )
+        token = client.post(f"{API}/auth/register", json=registration).json()["access_token"]
+
+        firm = db.scalars(select(Firm).where(Firm.name == "Unlimited & Co")).one()
+        firm.plan = FirmPlan.FIRM
+        db.commit()
+
+        response = client.get(f"{API}/auth/firm", headers={"Authorization": f"Bearer {token}"})
+        assert response.json()["user_limit"] is None
+        assert response.json()["client_limit"] is None
+
+    def test_the_ceiling_is_the_one_the_add_endpoint_enforces(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """A number that disagrees with the guard would be worse than none."""
+        limit = client.get(f"{API}/auth/firm", headers=auth_headers).json()["user_limit"]
+
+        # The owner already occupies one seat, so `limit - 1` more must fit.
+        for index in range(limit - 1):
+            created = client.post(
+                f"{API}/auth/practitioners",
+                headers=auth_headers,
+                json={
+                    "full_name": f"Seat {index}",
+                    "email": f"seat{index}@sharma-ca.in",
+                    "password": "seat-password-123",
+                    "role": "junior",
+                },
+            )
+            assert created.status_code == 201, created.text
+
+        overflow = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Over The Line",
+                "email": "over@sharma-ca.in",
+                "password": "seat-password-123",
+                "role": "junior",
+            },
+        )
+        assert overflow.status_code == 402
+
+
+class TestTheFirmKeepsAnAdministrator:
+    """The owner must not be able to lock the firm out of its own account.
+
+    Every other practitioner can be repaired by an admin, but the owner is
+    protected from being edited by anyone else — so a change the owner makes to
+    their own role or status is one nobody has the standing to undo. Left
+    unguarded, a single PATCH strands the firm with no one who can add staff,
+    read the audit trail, or reach the owner-only endpoints again.
+    """
+
+    def owner_id(self, client: TestClient, auth_headers: dict) -> str:
+        return client.get(f"{API}/auth/me", headers=auth_headers).json()["id"]
+
+    def test_the_owner_cannot_deactivate_themselves(
+        self, client: TestClient, auth_headers: dict
+    ):
+        owner_id = self.owner_id(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/auth/practitioners/{owner_id}",
+            headers=auth_headers,
+            json={"is_active": False},
+        )
+
+        assert response.status_code == 400
+        assert "owner" in response.json()["detail"].lower()
+
+    def test_a_refused_deactivation_leaves_the_owner_able_to_sign_in(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The guard is only worth having if the refusal also rolls back."""
+        owner_id = self.owner_id(client, auth_headers)
+        client.patch(
+            f"{API}/auth/practitioners/{owner_id}",
+            headers=auth_headers,
+            json={"is_active": False},
+        )
+
+        response = client.post(
+            f"{API}/auth/login",
+            json={
+                "email": FIRM_REGISTRATION["owner_email"],
+                "password": FIRM_REGISTRATION["owner_password"],
+            },
+        )
+        assert response.status_code == 200
+
+    def test_the_owner_cannot_demote_themselves(self, client: TestClient, auth_headers: dict):
+        """Demotion is deactivation by another name — it drops admin rights."""
+        owner_id = self.owner_id(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/auth/practitioners/{owner_id}",
+            headers=auth_headers,
+            json={"role": "junior"},
+        )
+
+        assert response.status_code == 400
+        assert client.get(f"{API}/auth/me", headers=auth_headers).json()["role"] == "owner"
+
+    def test_the_owner_may_still_correct_their_own_details(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The guard covers standing, not the whole record."""
+        owner_id = self.owner_id(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/auth/practitioners/{owner_id}",
+            headers=auth_headers,
+            json={"full_name": "Rohit Sharma", "phone": "+91 98200 11111"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["full_name"] == "Rohit Sharma"
+        assert response.json()["role"] == "owner"
+
+    def test_a_partner_may_still_be_deactivated(self, client: TestClient, auth_headers: dict):
+        """Only the owner is irreplaceable; the rest of the team is not."""
+        partner = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Partner Patel",
+                "email": "partner@sharma-ca.in",
+                "password": "partner-password-1",
+                "role": "partner",
+            },
+        ).json()
+
+        response = client.patch(
+            f"{API}/auth/practitioners/{partner['id']}",
+            headers=auth_headers,
+            json={"is_active": False},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["is_active"] is False

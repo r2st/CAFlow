@@ -240,6 +240,29 @@ def update_practitioner(
             status_code=status.HTTP_400_BAD_REQUEST, detail="A firm can only have one owner"
         )
 
+    # The owner is the one practitioner nobody else may edit, so a change they
+    # make to their own standing is a change no one has the standing to undo.
+    # Stepping down or switching themselves off would leave the firm with no
+    # one who can administer it and no way back in. Their own details stay
+    # editable — it is only the standing that is frozen.
+    if target.role == PractitionerRole.OWNER:
+        if updates.get("is_active") is False:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "The firm owner cannot be deactivated — no one else could "
+                    "reactivate the account."
+                ),
+            )
+        if "role" in updates and updates["role"] != PractitionerRole.OWNER:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "The firm owner cannot change their own role — the firm "
+                    "would be left without an administrator."
+                ),
+            )
+
     before = {key: getattr(target, key) for key in updates}
     for key, value in updates.items():
         setattr(target, key, value)

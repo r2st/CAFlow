@@ -80,6 +80,11 @@ class FirmOut(ORMModel):
     plan: FirmPlan
     is_active: bool
     created_at: datetime
+    # Derived from the plan. Sent so the team screen can show what is left
+    # before it is spent, rather than letting the firm discover the ceiling
+    # by being refused at the point of adding someone. ``None`` is unlimited.
+    user_limit: int | None
+    client_limit: int | None
 
 
 class TokenResponse(SanitizedModel):
