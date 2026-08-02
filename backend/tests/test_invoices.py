@@ -870,6 +870,111 @@ class TestPayments:
         assert paid["days_overdue"] is None
 
 
+class TestTwoReceiptsAtOnce:
+    """A payment is a read, a decision and a write, and money rides on the gap.
+
+    Recording one reads what has been paid so far, checks the new amount fits
+    inside the balance, and writes the sum back. Nothing held the row across
+    those three steps, so two ₹5,000 receipts against a ₹10,000 invoice —
+    the practitioner who took the call and the one reconciling the bank feed,
+    within the same minute — both read ``0`` paid, both passed the overpayment
+    check, and both wrote ``5,000``. The client has paid in full; the firm's
+    books say half, and go on chasing them for a balance already settled.
+    """
+
+    def test_the_row_lock_is_one_the_database_can_honour(self, db):
+        """Compiled for PostgreSQL: SQLite drops the clause silently."""
+        from sqlalchemy.dialects import postgresql
+
+        statements = []
+        original = db.scalars
+
+        def record(statement, *args, **kwargs):
+            statements.append(statement)
+            return original(statement, *args, **kwargs)
+
+        db.scalars = record
+        try:
+            billing.load_for_update(db, uuid.uuid4())
+        finally:
+            del db.scalars
+
+        sql = str(statements[0].compile(dialect=postgresql.dialect()))
+        assert "FROM invoices" in sql
+        assert "FOR UPDATE" in sql
+        # Narrowed to the one invoice: without the WHERE, every firm's
+        # receipting would queue behind every other firm's.
+        assert "WHERE invoices.id" in sql
+
+    def test_the_locked_read_sees_a_receipt_the_session_has_not_heard_about(
+        self, client, auth_headers, client_id, db
+    ):
+        """Holding the row is worth nothing if the balance predates the lock.
+
+        Sessions here do not expire what they have loaded on commit, so a
+        second read of a row already in the session is answered from memory —
+        with the amounts as they were. That is the same stale balance a
+        concurrent transaction reads from its own snapshot, and deciding an
+        overpayment from it is how a receipt gets written over. The locked
+        read is asked to repopulate what it loads for exactly that reason.
+        """
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        sent = client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+        invoice_id = uuid.UUID(invoice["id"])
+        total = sent["total_paise"]
+
+        # Our copy, taken before the competing receipt exists. Held onto, or
+        # the session lets go of it and the staleness never arises.
+        ours = db.get(Invoice, invoice_id)
+        assert ours.amount_paid_paise == 0
+        db.commit()  # SQLite will not let another connection write past a read
+
+        from app.database import SessionLocal
+
+        other = SessionLocal()
+        try:
+            theirs = billing.load_for_update(other, invoice_id)
+            billing.record_payment(theirs, amount_paise=total, reference="NEFT-1")
+            other.commit()
+        finally:
+            other.close()
+
+        # The plain read still answers with what we loaded first.
+        assert db.get(Invoice, invoice_id).amount_paid_paise == 0
+        # The locked one is what the balance is decided from.
+        assert billing.load_for_update(db, invoice_id).amount_paid_paise == total
+
+    def test_a_receipt_is_decided_from_the_locked_read(
+        self, client, auth_headers, client_id, monkeypatch
+    ):
+        """The endpoint has to take its invoice through the lock, not past it.
+
+        Asserted on the route rather than left to the service: the guard is a
+        keyword on a shared lookup, and dropping it is a one-character
+        regression that every other test here would still pass.
+        """
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+
+        locked = []
+        real = billing.load_for_update
+        monkeypatch.setattr(
+            billing,
+            "load_for_update",
+            lambda session, invoice_id: (locked.append(invoice_id), real(session, invoice_id))[1],
+        )
+
+        response = client.post(
+            f"/api/v1/invoices/{invoice['id']}/payments",
+            json={"amount_paise": 1000},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert locked == [uuid.UUID(invoice["id"])]
+
+
 class TestAnInvoiceWithNothingToPay:
     """A waived fee is still an invoice, and it has to be able to settle.
 

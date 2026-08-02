@@ -381,6 +381,36 @@ def generate_invoices_for_firm(
 # ---------------------------------------------------------------- payments --
 
 
+def load_for_update(db: Session, invoice_id: uuid.UUID) -> Invoice | None:
+    """Read an invoice with its row held for the rest of the transaction.
+
+    Recording a payment reads what has been paid so far, decides whether the
+    new amount fits inside the balance, and writes the sum back — the same
+    read-decide-write the invoice numbering and the plan limits both had to be
+    ordered for, except that this one is the money itself.
+
+    A plain read leaves the two halves apart. Two ₹5,000 receipts against a
+    ₹10,000 invoice, entered at the same moment by the practitioner who took
+    the call and the one reconciling the bank feed, both read ``0`` paid, both
+    pass the overpayment check, and both write ``5,000`` — the second over the
+    first. The client has paid in full, the firm's books say half, and the
+    invoice stays on the chase list with a balance the client has already
+    settled. Nothing in the trail says a payment was lost; there is simply one
+    fewer than was recorded.
+
+    ``populate_existing`` is the other half of the fix. The session keeps
+    loaded rows without expiring them on commit, so the identity map answers a
+    second read out of memory with the values from the first — and holding the
+    row would then guard a decision taken from a copy older than the lock.
+    """
+    return db.scalars(
+        select(Invoice)
+        .where(Invoice.id == invoice_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).first()
+
+
 def record_payment(
     invoice: Invoice,
     *,

@@ -35,8 +35,21 @@ from app.services import audit, billing
 router = APIRouter(prefix="/invoices", tags=["billing"])
 
 
-def _get_invoice_or_404(db: Session, firm_id: uuid.UUID, invoice_id: uuid.UUID) -> Invoice:
-    invoice = db.get(Invoice, invoice_id)
+def _get_invoice_or_404(
+    db: Session, firm_id: uuid.UUID, invoice_id: uuid.UUID, *, for_update: bool = False
+) -> Invoice:
+    """The invoice, or a 404 that does not say whose it was.
+
+    ``for_update`` holds the row while the caller decides something from what
+    it reads — see :func:`billing.load_for_update`. The tenancy check is the
+    same either way, and comes after the lock: a row this firm cannot reach is
+    one it was never told about, lock or no lock.
+    """
+    invoice = (
+        billing.load_for_update(db, invoice_id)
+        if for_update
+        else db.get(Invoice, invoice_id)
+    )
     if invoice is None or invoice.firm_id != firm_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
     return invoice
@@ -385,7 +398,11 @@ def record_payment(
     practitioner: Manager,
     db: DbSession,
 ):
-    invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id)
+    # Held before the balance is read, not merely before it is written: the
+    # overpayment check and the sum it writes back have to be one step, or two
+    # receipts entered at once each overwrite the other's. See
+    # ``billing.load_for_update``.
+    invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id, for_update=True)
     try:
         billing.record_payment(
             invoice,
