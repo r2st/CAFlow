@@ -46,6 +46,69 @@ def _claim_client_slot(db: Session, firm) -> None:
             status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)
         ) from exc
 
+
+# Statuses an off-boarding closes. A filed return is a record and stays one; a
+# not-applicable item was already ruled out.
+OFFBOARDABLE_STATUSES = (ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS)
+
+
+def shelve_open_items(db: Session, client: Client) -> int:
+    """Close a departing client's open filings, remembering what they were.
+
+    ``offboarded_from_status`` is what makes this reversible. Without it the
+    close is indistinguishable from a practitioner marking an item
+    not-applicable by hand, so there is nothing to put back — see
+    :func:`restore_shelved_items`.
+
+    Row by row rather than a bulk ``UPDATE``: each row's new marker is its own
+    old status, and the session runs with ``expire_on_commit=False``, so a bulk
+    write that does not synchronise leaves objects already loaded holding a
+    status the database no longer has. One client's filings are tens of rows.
+    """
+    items = list(
+        db.scalars(
+            select(ComplianceItem).where(
+                ComplianceItem.client_id == client.id,
+                ComplianceItem.status.in_(OFFBOARDABLE_STATUSES),
+            )
+        ).all()
+    )
+    for item in items:
+        item.offboarded_from_status = item.status
+        item.status = ComplianceStatus.NOT_APPLICABLE
+    return len(items)
+
+
+def restore_shelved_items(db: Session, client: Client) -> int:
+    """Reopen the filings that off-boarding closed. Returns how many.
+
+    Only the ones still sitting where off-boarding left them: an item someone
+    has since filed or ruled out by hand keeps that, and only loses the marker.
+
+    Without this, taking a client back on left them with no compliance calendar
+    at all. Generation is idempotent per (type, period) and reads every item
+    whatever its status, so the closed rows counted as already generated and
+    were never replaced — the client was active, occupying a plan slot, and
+    silently owed nothing for the twelve months already materialised. Nothing
+    was chased, no task was raised, and no fee was billed.
+    """
+    shelved = list(
+        db.scalars(
+            select(ComplianceItem).where(
+                ComplianceItem.client_id == client.id,
+                ComplianceItem.offboarded_from_status.is_not(None),
+            )
+        ).all()
+    )
+    restored = 0
+    for item in shelved:
+        if item.status == ComplianceStatus.NOT_APPLICABLE:
+            item.status = item.offboarded_from_status
+            restored += 1
+        item.offboarded_from_status = None
+    return restored
+
+
 # Flags that change which compliance types apply — a change means we re-generate.
 REGISTRATION_FLAGS = (
     "entity_type",
@@ -228,7 +291,8 @@ def update_client(
     # Before the flag is applied, so the count is of what the firm holds
     # without this one. Only on the transition: re-saving an already-active
     # client must not be charged a slot it is already occupying.
-    if updates.get("is_active") is True and not client.is_active:
+    reactivating = updates.get("is_active") is True and not client.is_active
+    if reactivating:
         _claim_client_slot(db, firm)
 
     if "assigned_practitioner_id" in updates:
@@ -253,10 +317,20 @@ def update_client(
     db.flush()
 
     created = 0
+    restored = 0
+    if reactivating:
+        # A client back on the books owes what they owed. Both halves are
+        # needed: the reopen covers the periods off-boarding closed, and the
+        # top-up covers everything that has fallen due since — generation only
+        # ever ran for active clients, so a client away for six months has a
+        # six-month hole no reopen can fill.
+        restored = restore_shelved_items(db, client)
+        created = generate_compliance_items(db, client).created_count
+
     registrations_changed = any(
         key in updates and before[key] != updates[key] for key in REGISTRATION_FLAGS
     )
-    if registrations_changed:
+    if registrations_changed and not reactivating:
         created = generate_compliance_items(db, client).created_count
 
     audit.record(
@@ -266,6 +340,7 @@ def update_client(
         entity_id=client.id,
         actor=practitioner,
         summary=f"Updated client {client.name}"
+        + (f"; reopened {restored} filing(s)" if restored else "")
         + (f"; generated {created} new compliance item(s)" if created else ""),
         changes=audit.diff(before, audit.snapshot(client, updates)),
     )
@@ -318,17 +393,16 @@ def deactivate_client(client_id: uuid.UUID, practitioner: Manager, db: DbSession
     """Soft-delete: clients are deactivated, never destroyed (audit trail)."""
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
     client.is_active = False
-    # Outstanding obligations for an off-boarded client are no longer tracked.
-    db.query(ComplianceItem).filter(
-        ComplianceItem.client_id == client.id,
-        ComplianceItem.status.in_([ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS]),
-    ).update({ComplianceItem.status: ComplianceStatus.NOT_APPLICABLE})
+    # Outstanding obligations for an off-boarded client are no longer tracked,
+    # but the close is recorded so that taking them back on can undo it.
+    shelved = shelve_open_items(db, client)
     audit.record(
         db,
         action="client.deactivate",
         entity_type="client",
         entity_id=client.id,
         actor=practitioner,
-        summary=f"Deactivated client {client.name}",
+        summary=f"Deactivated client {client.name}"
+        + (f"; closed {shelved} open filing(s)" if shelved else ""),
     )
     db.commit()

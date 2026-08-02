@@ -1091,3 +1091,192 @@ class TestClientRolePermissions:
             client.delete(f"{API}/clients/{created_client['id']}", headers=headers).status_code
             == 204
         )
+
+
+class TestTakingAClientBackOn:
+    """Off-boarding is reversible, and reversing it has to restore the calendar.
+
+    Deactivating a client closes every open filing as ``not_applicable``.
+    Generation is idempotent per (compliance type, period) and reads every item
+    whatever its status, so those closed rows count as already generated and are
+    never replaced. Reactivation therefore left a client on the books —
+    occupying a plan slot, listed as active — owing nothing at all for the
+    twelve months already materialised: nothing chased, no task raised, no fee
+    billed.
+    """
+
+    def _onboard(self, client: TestClient, auth_headers: dict) -> str:
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        assert created["compliance_items_created"] > 0
+        return created["client"]["id"]
+
+    def _statuses(self, db: Session, client_id: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in db.scalars(
+            select(ComplianceItem).where(ComplianceItem.client_id == uuid.UUID(client_id))
+        ).all():
+            counts[item.status.value] = counts.get(item.status.value, 0) + 1
+        return counts
+
+    def _reactivate(self, client: TestClient, auth_headers: dict, client_id: str):
+        response = client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": True}
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_the_filings_off_boarding_closed_are_open_again(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = self._onboard(client, auth_headers)
+        before = self._statuses(db, client_id)[ComplianceStatus.PENDING.value]
+
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        assert self._statuses(db, client_id) == {
+            ComplianceStatus.NOT_APPLICABLE.value: before
+        }
+
+        self._reactivate(client, auth_headers, client_id)
+
+        assert self._statuses(db, client_id) == {ComplianceStatus.PENDING.value: before}
+
+    def test_a_reopened_filing_comes_back_on_the_calendar(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The calendar is the thing a CA actually looks at, so check it there."""
+        client_id = self._onboard(client, auth_headers)
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        self._reactivate(client, auth_headers, client_id)
+
+        summary = client.get(
+            f"{API}/compliance/calendar",
+            params={"from_date": "2020-01-01", "to_date": "2035-12-31", "limit": 1000},
+            headers=auth_headers,
+        ).json()["summary"]
+
+        assert summary["upcoming"] + summary["due_soon"] + summary["overdue"] > 0
+
+    def test_work_already_under_way_comes_back_as_in_progress(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Not collapsed into pending — a junior's half-done return stays that.
+
+        Off-boarding writes one status over two, so restoring needs the one it
+        overwrote rather than a single default.
+        """
+        client_id = self._onboard(client, auth_headers)
+        started = db.scalars(
+            select(ComplianceItem).where(ComplianceItem.client_id == uuid.UUID(client_id))
+        ).first()
+        started.status = ComplianceStatus.IN_PROGRESS
+        db.commit()
+
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        self._reactivate(client, auth_headers, client_id)
+
+        db.refresh(started)
+        assert started.status == ComplianceStatus.IN_PROGRESS
+
+    def test_a_filing_the_firm_ruled_out_by_hand_stays_ruled_out(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The distinction the marker exists for.
+
+        ``not_applicable`` is both "this client does not file this" and "we no
+        longer act for them". Reopening everything not-applicable would undo a
+        judgement the firm made about the filing itself.
+        """
+        client_id = self._onboard(client, auth_headers)
+        ruled_out = db.scalars(
+            select(ComplianceItem).where(ComplianceItem.client_id == uuid.UUID(client_id))
+        ).first()
+        ruled_out.status = ComplianceStatus.NOT_APPLICABLE
+        db.commit()
+
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        self._reactivate(client, auth_headers, client_id)
+
+        db.refresh(ruled_out)
+        assert ruled_out.status == ComplianceStatus.NOT_APPLICABLE
+        assert ruled_out.offboarded_from_status is None
+
+    def test_a_filing_recorded_while_they_were_away_is_not_reopened(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A return lodged after off-boarding is a record, not an open job."""
+        client_id = self._onboard(client, auth_headers)
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+
+        item = db.scalars(
+            select(ComplianceItem).where(ComplianceItem.client_id == uuid.UUID(client_id))
+        ).first()
+        item.status = ComplianceStatus.FILED
+        item.filed_on = date(2026, 5, 1)
+        db.commit()
+
+        self._reactivate(client, auth_headers, client_id)
+
+        db.refresh(item)
+        assert item.status == ComplianceStatus.FILED
+        assert item.offboarded_from_status is None
+
+    def test_the_gap_they_were_away_for_is_filled_in(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Reopening covers the periods off-boarding closed, and nothing later.
+
+        Generation only ever runs for active clients, so a client away while new
+        periods fell due has a hole that no reopen can fill. Reactivation tops
+        up as well, and reports how many that was.
+        """
+        client_id = self._onboard(client, auth_headers)
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+
+        # Drop the far end of the calendar, standing in for periods that had
+        # not been generated yet when they left.
+        horizon = add_months(date.today(), settings.compliance_generation_months - 1)
+        dropped = (
+            db.query(ComplianceItem)
+            .filter(
+                ComplianceItem.client_id == uuid.UUID(client_id),
+                ComplianceItem.due_date > horizon,
+            )
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        assert dropped > 0
+
+        response = self._reactivate(client, auth_headers, client_id)
+
+        assert response["compliance_items_created"] == dropped
+
+    def test_switching_them_off_again_closes_and_marks_afresh(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Off, on, off — the second close has to record itself like the first."""
+        client_id = self._onboard(client, auth_headers)
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        self._reactivate(client, auth_headers, client_id)
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+
+        self._reactivate(client, auth_headers, client_id)
+
+        assert ComplianceStatus.PENDING.value in self._statuses(db, client_id)
+
+    def test_an_ordinary_edit_does_not_reopen_anything(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Only the transition. Re-saving an active client changes no statuses."""
+        client_id = self._onboard(client, auth_headers)
+        before = self._statuses(db, client_id)
+
+        patched = client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"is_active": True, "contact_person": "Someone New"},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["compliance_items_created"] == 0
+        assert self._statuses(db, client_id) == before

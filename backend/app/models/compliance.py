@@ -125,6 +125,18 @@ class ComplianceItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     status: Mapped[ComplianceStatus] = mapped_column(
         EnumString(ComplianceStatus, 32), default=ComplianceStatus.PENDING, nullable=False
     )
+    # What ``status`` was when the client was off-boarded, if that is why this
+    # item is now ``not_applicable``. Null on everything else — including an
+    # item a practitioner marked not-applicable themselves, which is a judgement
+    # about the filing and must survive the client coming back.
+    #
+    # Off-boarding is reversible and the statuses it overwrites are not
+    # recoverable from anything else: a firm that takes a client back on has to
+    # get its filing obligations back, and get them back as they were rather
+    # than collapsed into one status.
+    offboarded_from_status: Mapped[ComplianceStatus | None] = mapped_column(
+        EnumString(ComplianceStatus, 32)
+    )
     filed_on: Mapped[date | None] = mapped_column(Date)
     acknowledgement_number: Mapped[str | None] = mapped_column(String(128))
     fee_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
