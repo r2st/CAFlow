@@ -5,10 +5,37 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
+from app.core import clock
 from app.models.base import ComplianceCategory, ComplianceStatus, Frequency
 from app.schemas.common import MAX_AMOUNT_PAISE, ORMModel, SanitizedModel
+
+
+def validate_filed_on(value: date | None) -> date | None:
+    """Refuse a filing date that has not happened yet.
+
+    A return cannot have been lodged on a day that has not arrived, so a date
+    in the future is always a typo — and the year is the digit that gets
+    mistyped, which puts it twelve months out rather than one day.
+
+    Nothing downstream treats it as one. The item is marked filed, so it drops
+    off the chase list and out of the reminder sweeps; ``_normalise_filing``
+    compares the date with the due date and records the return as
+    ``delayed_filed``; and the work becomes billable that moment, so the client
+    is invoiced for a filing nobody has made. The record the firm would show an
+    assessing officer then says a return was lodged on a date still in the
+    future.
+
+    Today is today in India — see :mod:`app.core.clock`. A practitioner filing
+    at 01:00 IST on the 20th means the 20th, and bounding this by the server's
+    own date would refuse it.
+    """
+    if value is not None and value > clock.today():
+        raise ValueError(
+            "filed_on cannot be in the future — a return is filed on or before today"
+        )
+    return value
 
 
 class ComplianceTypeOut(ORMModel):
@@ -66,12 +93,16 @@ class ComplianceItemUpdate(SanitizedModel):
     fee_paise: int | None = Field(default=None, ge=0, le=MAX_AMOUNT_PAISE)
     notes: str | None = None
 
+    _validate_filed_on = field_validator("filed_on")(validate_filed_on)
+
 
 class BulkStatusUpdate(SanitizedModel):
     item_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
     status: ComplianceStatus
     filed_on: date | None = None
     acknowledgement_number: str | None = Field(default=None, max_length=128)
+
+    _validate_filed_on = field_validator("filed_on")(validate_filed_on)
 
 
 class BulkStatusUpdateResult(SanitizedModel):

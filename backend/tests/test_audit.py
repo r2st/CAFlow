@@ -15,7 +15,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.models.audit import AuditLog
-from tests.conftest import FIRM_REGISTRATION, first_item_of_type, make_client_payload
+from tests.conftest import (
+    FIRM_REGISTRATION,
+    first_item_of_type,
+    first_lapsed_item_of_type,
+    make_client_payload,
+)
 
 API = "/api/v1"
 
@@ -451,9 +456,9 @@ class TestTheTrailRecordsWhatHappened:
         return [e for e in response.json()["items"] if e["changes"]]
 
     def test_a_late_filing_is_recorded_as_delayed_not_as_filed(
-        self, client: TestClient, auth_headers: dict, client_id: str
+        self, client: TestClient, auth_headers: dict, long_standing_client_id: str
     ):
-        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        item = first_lapsed_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
         late = date.fromisoformat(item["due_date"]) + timedelta(days=5)
 
         response = client.patch(
@@ -470,9 +475,9 @@ class TestTheTrailRecordsWhatHappened:
         assert diff["after"]["filed_on"] == late.isoformat()
 
     def test_correcting_only_the_date_records_the_reclassification(
-        self, client: TestClient, auth_headers: dict, client_id: str
+        self, client: TestClient, auth_headers: dict, long_standing_client_id: str
     ):
-        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        item = first_lapsed_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
         due = date.fromisoformat(item["due_date"])
 
         on_time = client.patch(
@@ -496,9 +501,9 @@ class TestTheTrailRecordsWhatHappened:
         assert latest["after"]["status"] == "delayed_filed"
 
     def test_a_bulk_revert_does_not_claim_a_status_the_items_do_not_have(
-        self, client: TestClient, auth_headers: dict, client_id: str
+        self, client: TestClient, auth_headers: dict, long_standing_client_id: str
     ):
-        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        item = first_lapsed_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
         late = date.fromisoformat(item["due_date"]) + timedelta(days=2)
 
         response = client.post(

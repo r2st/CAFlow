@@ -34,6 +34,30 @@ def items_for(db: Session, client_id: str) -> list[ComplianceItem]:
     )
 
 
+def client_of_long_standing(client: TestClient, auth_headers: dict, **overrides) -> str:
+    """A client the firm has acted for a year, so its calendar reaches back.
+
+    A client onboarded this morning has no deadline that has already passed —
+    generation starts at the onboarding date — and a filing date cannot be in
+    the future, so a test about the filed/delayed split has nowhere to put one.
+    Anything exercising a lodged return wants a deadline behind it, which is
+    also the only shape the question arises in for a real firm.
+    """
+    return create_client_record(
+        client,
+        auth_headers,
+        onboarded_on=(clock.today() - timedelta(days=365)).isoformat(),
+        **overrides,
+    )
+
+
+def lapsed_items(db: Session, client_id: str) -> list[ComplianceItem]:
+    """That client's filings whose statutory deadline has already passed."""
+    items = [item for item in items_for(db, client_id) if item.due_date < clock.today()]
+    assert items, "expected at least one filing whose deadline has passed"
+    return items
+
+
 class TestComplianceTypes:
     def test_seeded_calendar_is_listed(self, client: TestClient, auth_headers: dict):
         response = client.get(f"{API}/compliance/types", headers=auth_headers)
@@ -224,8 +248,8 @@ class TestFilingUpdates:
     def test_marking_filed_on_time_sets_filed_status(
         self, client: TestClient, auth_headers: dict, db: Session
     ):
-        client_id = create_client_record(client, auth_headers)
-        item = items_for(db, client_id)[0]
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
         on_time = item.due_date - timedelta(days=1)
 
         response = client.patch(
@@ -242,8 +266,8 @@ class TestFilingUpdates:
     def test_filing_after_the_due_date_is_recorded_as_delayed(
         self, client: TestClient, auth_headers: dict, db: Session
     ):
-        client_id = create_client_record(client, auth_headers)
-        item = items_for(db, client_id)[0]
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
         late = item.due_date + timedelta(days=5)
 
         body = client.patch(
@@ -317,8 +341,8 @@ class TestFilingUpdates:
         out of the patch, and the item stayed `filed` while carrying a date
         after its own deadline.
         """
-        client_id = create_client_record(client, auth_headers)
-        item = items_for(db, client_id)[0]
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
         on_time = item.due_date - timedelta(days=1)
         late = item.due_date + timedelta(days=3)
 
@@ -341,8 +365,8 @@ class TestFilingUpdates:
         self, client: TestClient, auth_headers: dict, db: Session
     ):
         """A correction the other way is the one that matters to the client."""
-        client_id = create_client_record(client, auth_headers)
-        item = items_for(db, client_id)[0]
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
         late = item.due_date + timedelta(days=3)
         on_time = item.due_date - timedelta(days=1)
 
@@ -372,8 +396,8 @@ class TestFilingUpdates:
         while the due date still said the 20th: the firm's own record calling a
         filing late that was five days inside the window.
         """
-        client_id = create_client_record(client, auth_headers)
-        item = items_for(db, client_id)[0]
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
         statutory = item.due_date
         filed_on = statutory + timedelta(days=5)
         extended = statutory + timedelta(days=10)
@@ -403,8 +427,8 @@ class TestFilingUpdates:
         reading ``filed`` — the record understating a late filing, which is the
         worse way for it to be wrong.
         """
-        client_id = create_client_record(client, auth_headers)
-        item = items_for(db, client_id)[0]
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
         filed_on = item.due_date - timedelta(days=1)
         corrected_due = filed_on - timedelta(days=2)
 
@@ -427,8 +451,8 @@ class TestFilingUpdates:
         self, client: TestClient, auth_headers: dict, db: Session
     ):
         """The re-derived status is the half of the change the trail most needs."""
-        client_id = create_client_record(client, auth_headers)
-        item = items_for(db, client_id)[0]
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
         filed_on = item.due_date + timedelta(days=5)
 
         client.patch(
@@ -466,6 +490,74 @@ class TestFilingUpdates:
         assert after["status"] == "pending"
         assert after["filed_on"] is None
 
+    def test_a_filing_date_in_the_future_is_refused(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A return cannot have been lodged on a day that has not arrived.
+
+        The year is the digit that gets mistyped, so the mistake lands twelve
+        months out rather than one day, and nothing downstream reads it as a
+        mistake: the item drops off the chase list, the split records it as
+        delayed_filed against its own deadline, and the work becomes billable
+        that moment — so the client is invoiced for a filing nobody has made.
+        """
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        next_year = clock.today() + timedelta(days=365)
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": next_year.isoformat()},
+        )
+        assert response.status_code == 422
+        assert "future" in response.json()["detail"]
+
+        after = client.get(
+            f"{API}/compliance/items/{item.id}", headers=auth_headers
+        ).json()
+        assert after["status"] == "pending"
+        assert after["filed_on"] is None
+
+    def test_a_batch_cannot_be_filed_in_the_future_either(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The bulk endpoint is where a mistyped year reaches a hundred rows."""
+        client_id = client_of_long_standing(client, auth_headers)
+        items = lapsed_items(db, client_id)[:3]
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(i.id) for i in items],
+                "status": "filed",
+                "filed_on": (clock.today() + timedelta(days=1)).isoformat(),
+            },
+        )
+        assert response.status_code == 422
+        assert "future" in response.json()["detail"]
+
+    def test_filing_today_is_still_allowed(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The bound is today in India, not the server's own date.
+
+        A practitioner lodging a return at 01:00 IST on the 20th means the
+        20th; measuring this against UTC would refuse them for five and a half
+        hours of every working day.
+        """
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+
+        body = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": clock.today().isoformat()},
+        )
+        assert body.status_code == 200, body.text
+        assert body.json()["filed_on"] == clock.today().isoformat()
+
     def test_a_filing_date_on_an_item_that_was_never_filed_is_refused(
         self, client: TestClient, auth_headers: dict, db: Session
     ):
@@ -481,8 +573,8 @@ class TestFilingUpdates:
         assert response.status_code == 422
 
     def test_bulk_status_update(self, client: TestClient, auth_headers: dict, db: Session):
-        client_id = create_client_record(client, auth_headers)
-        items = items_for(db, client_id)[:4]
+        client_id = client_of_long_standing(client, auth_headers)
+        items = lapsed_items(db, client_id)[:4]
         filed_on = min(i.due_date for i in items) - timedelta(days=1)
 
         response = client.post(
@@ -573,8 +665,8 @@ class TestFilingUpdates:
     def test_a_batch_filed_late_is_recorded_as_delayed(
         self, client: TestClient, auth_headers: dict, db: Session
     ):
-        client_id = create_client_record(client, auth_headers)
-        item = items_for(db, client_id)[0]
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
         late = item.due_date + timedelta(days=3)
         client.post(
             f"{API}/compliance/items/bulk-status",
@@ -606,8 +698,8 @@ class TestFilingUpdates:
         self, client: TestClient, auth_headers: dict, db: Session
     ):
         """Both filed statuses are filed statuses, not just the on-time one."""
-        client_id = create_client_record(client, auth_headers)
-        item = items_for(db, client_id)[0]
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
         late = item.due_date + timedelta(days=9)
         response = client.post(
             f"{API}/compliance/items/bulk-status",

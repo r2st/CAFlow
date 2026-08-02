@@ -29,10 +29,13 @@ os.environ["REDIS_URL"] = "memory://"
 os.environ["CELERY_BROKER_URL"] = "memory://"
 os.environ["CELERY_RESULT_BACKEND"] = "memory://"
 
+from datetime import timedelta  # noqa: E402
+
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
+from app.core import clock  # noqa: E402
 from app.database import Base, SessionLocal, engine, get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Client, ComplianceItem, Firm, Practitioner  # noqa: E402,F401
@@ -114,6 +117,17 @@ def client_id(created_client: dict) -> str:
     return created_client["id"]
 
 
+def _calendar_items(client: TestClient, auth_headers: dict[str, str]) -> list[dict]:
+    """Every generated compliance item, earliest deadline first."""
+    response = client.get(
+        "/api/v1/compliance/calendar",
+        params={"from_date": "2020-01-01", "to_date": "2035-12-31", "limit": 1000},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["items"]
+
+
 def first_item_of_type(
     client: TestClient, auth_headers: dict[str, str], code: str
 ) -> dict:
@@ -122,17 +136,55 @@ def first_item_of_type(
     Tests need a real item id, and which ones exist depends on today's date, so
     they are looked up rather than hard-coded.
     """
-    response = client.get(
-        "/api/v1/compliance/calendar",
-        params={"from_date": "2020-01-01", "to_date": "2035-12-31", "limit": 1000},
-        headers=auth_headers,
-    )
-    assert response.status_code == 200, response.text
     matches = [
-        item for item in response.json()["items"] if item["compliance_type_code"] == code
+        item
+        for item in _calendar_items(client, auth_headers)
+        if item["compliance_type_code"] == code
     ]
     assert matches, f"No compliance item generated for {code}"
     return matches[0]
+
+
+@pytest.fixture
+def long_standing_client_id(client: TestClient, auth_headers: dict[str, str]) -> str:
+    """A client the firm has acted for a year, so its calendar reaches back.
+
+    A client onboarded this morning has no deadline that has already passed —
+    generation starts at the onboarding date — and a filing date cannot be in
+    the future, so a test about a lodged return has nowhere to put one.
+    """
+    response = client.post(
+        "/api/v1/clients",
+        json=make_client_payload(
+            onboarded_on=(clock.today() - timedelta(days=365)).isoformat()
+        ),
+        headers=auth_headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["client"]["id"]
+
+
+def first_lapsed_item_of_type(
+    client: TestClient, auth_headers: dict[str, str], code: str
+) -> dict:
+    """The earliest item of that type whose statutory deadline has passed.
+
+    The counterpart to :func:`first_item_of_type` for tests that file a return:
+    filing happens on or before today, so the deadline has to be behind us for
+    both the on-time and the delayed side of the split to be reachable.
+    """
+    today = clock.today().isoformat()
+    item = next(
+        (
+            candidate
+            for candidate in _calendar_items(client, auth_headers)
+            if candidate["compliance_type_code"] == code
+            and candidate["due_date"] < today
+        ),
+        None,
+    )
+    assert item is not None, f"No lapsed compliance item generated for {code}"
+    return item
 
 
 def make_client_payload(**overrides) -> dict:
