@@ -2,8 +2,8 @@
  * Thin fetch wrapper around the CAFlow API.
  *
  * Holds the JWT in localStorage, attaches it to every request, and surfaces
- * API errors as `ApiError` so callers get the server's `detail` message
- * rather than a bare "Failed to fetch".
+ * every failure as `ApiError` — the server's own `detail` message when there
+ * was a reply, and a sentence about the connection when there was not.
  *
  * Two credentials live here, and they are deliberately kept apart. A
  * practitioner token is the signed-in CA and reaches the whole firm; a portal
@@ -17,11 +17,56 @@ const TOKEN_KEY = 'caflow.token'
 const PORTAL_TOKEN_KEY = 'caflow.portal_token'
 
 export class ApiError extends Error {
-  constructor(message, status, body) {
-    super(message)
+  constructor(message, status, body, options) {
+    super(message, options)
     this.name = 'ApiError'
     this.status = status
     this.body = body
+  }
+}
+
+/**
+ * The status given to a request that never got a reply at all.
+ *
+ * Zero is the usual convention for it, and having a name for it is what lets a
+ * caller tell "the server said no" from "we never reached the server" — two
+ * situations that deserve opposite responses. A 401 means the credential is
+ * spent and should be dropped; a connection that failed says nothing about the
+ * credential and dropping it would cost someone their password for no reason.
+ */
+export const NETWORK_ERROR_STATUS = 0
+
+/**
+ * Turn a transport failure into an `ApiError` that can be shown to a person.
+ *
+ * `fetch` rejects with a TypeError when the request never left the ground —
+ * offline, DNS gone, the API down, a proxy that hung up mid-flight — and the
+ * message it carries is the browser's own wording: "Failed to fetch" in
+ * Chrome, "Load failed" in Safari, "NetworkError when attempting to fetch
+ * resource" in Firefox. Every page in this app renders `err.message` straight
+ * into an alert, so left alone, a train going into a tunnel reads as a bug in
+ * CAFlow — and reads differently depending on the browser it broke in.
+ *
+ * The original is kept as `cause`, because it is the useful thing in a console.
+ */
+function networkError(cause) {
+  const offline = window.navigator?.onLine === false
+  return new ApiError(
+    offline
+      ? 'You appear to be offline. Check your connection and try again.'
+      : 'Could not reach CAFlow. Check your connection and try again.',
+    NETWORK_ERROR_STATUS,
+    null,
+    { cause },
+  )
+}
+
+/** `fetch`, but its one non-HTTP failure mode arrives as an `ApiError` like everything else. */
+async function send(url, options) {
+  try {
+    return await fetch(url, options)
+  } catch (cause) {
+    throw networkError(cause)
   }
 }
 
@@ -148,7 +193,7 @@ async function request(path, { method = 'GET', body, params, auth = true } = {})
   const headers = authHeaders(auth)
   if (body !== undefined) headers['Content-Type'] = 'application/json'
 
-  const response = await fetch(buildUrl(path, params), {
+  const response = await send(buildUrl(path, params), {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -165,7 +210,7 @@ async function request(path, { method = 'GET', body, params, auth = true } = {})
  * browser has to set it itself so the multipart boundary matches the body.
  */
 async function upload(path, formData, { auth = true } = {}) {
-  const response = await fetch(buildUrl(path), {
+  const response = await send(buildUrl(path), {
     method: 'POST',
     headers: authHeaders(auth),
     body: formData,
@@ -177,7 +222,7 @@ async function upload(path, formData, { auth = true } = {}) {
 
 /** Fetch a file as a Blob. Downloads need the Authorization header, so a plain <a href> won't do. */
 async function download(path, { auth = true } = {}) {
-  const response = await fetch(buildUrl(path), { headers: authHeaders(auth) })
+  const response = await send(buildUrl(path), { headers: authHeaders(auth) })
   if (!response.ok) throw failed(response, await readBody(response), auth)
   return response.blob()
 }

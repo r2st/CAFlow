@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import api, {
   ApiError,
+  NETWORK_ERROR_STATUS,
   getPortalToken,
   getToken,
   setPortalToken,
@@ -93,6 +94,113 @@ describe('request handling', () => {
   it('returns null for 204 responses', async () => {
     mockFetch(204, undefined)
     await expect(api.deactivateClient('c-1')).resolves.toBeNull()
+  })
+})
+
+/**
+ * A request that never reaches the server.
+ *
+ * Every page renders `err.message` into an alert, so whatever comes out of a
+ * dropped connection is what a practitioner reads. Browsers word it for
+ * browser authors, and differently in each one.
+ */
+describe('a connection that fails before the server answers', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    window.sessionStorage.clear()
+  })
+
+  /** How `fetch` reports a request that never got a reply: a bare TypeError. */
+  function mockUnreachable(message = 'Failed to fetch') {
+    const spy = vi.fn().mockRejectedValue(new TypeError(message))
+    vi.stubGlobal('fetch', spy)
+    return spy
+  }
+
+  function pretendOnline(online) {
+    vi.spyOn(window.navigator, 'onLine', 'get').mockReturnValue(online)
+  }
+
+  it('says something a practitioner can act on, not the browser wording', async () => {
+    mockUnreachable()
+    pretendOnline(true)
+
+    await expect(api.listClients()).rejects.toThrow(/Could not reach CAFlow/i)
+  })
+
+  it('does not leak the browser-specific phrasing into the message', async () => {
+    // The same outage says "Load failed" in Safari and "NetworkError when
+    // attempting to fetch resource" in Firefox. None of the three belong on
+    // screen, and a support call should not depend on which browser it was.
+    mockUnreachable('Load failed')
+    pretendOnline(true)
+
+    await expect(api.listClients()).rejects.not.toThrow(/Load failed/)
+  })
+
+  it('names the likelier cause when the browser knows it is offline', async () => {
+    mockUnreachable()
+    pretendOnline(false)
+
+    await expect(api.listClients()).rejects.toThrow(/You appear to be offline/i)
+  })
+
+  it('arrives as an ApiError, so callers need no second kind of catch', async () => {
+    mockUnreachable()
+
+    await expect(api.me()).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it('marks it status 0 — no reply came back to have a status', async () => {
+    mockUnreachable()
+
+    await expect(api.me()).rejects.toMatchObject({ status: NETWORK_ERROR_STATUS })
+  })
+
+  it('keeps the original failure as the cause, for the console', async () => {
+    const original = new TypeError('Failed to fetch')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(original))
+
+    await expect(api.me()).rejects.toMatchObject({ cause: original })
+  })
+
+  it('keeps the token: an unanswered request says nothing about the credential', async () => {
+    setToken('perfectly-good-token')
+    mockUnreachable()
+
+    await expect(api.me()).rejects.toBeInstanceOf(ApiError)
+
+    // Only a server that rejects the credential is evidence against it. Losing
+    // Wi-Fi in a lift would otherwise cost the practitioner their session.
+    expect(getToken()).toBe('perfectly-good-token')
+  })
+
+  it('keeps a portal token through an outage too', async () => {
+    setPortalToken('magic-link-token')
+    mockUnreachable()
+
+    await expect(api.portalOverview()).rejects.toBeInstanceOf(ApiError)
+
+    // A client on hotel Wi-Fi should not have to ask their CA for a new link.
+    expect(getPortalToken()).toBe('magic-link-token')
+  })
+
+  it('covers uploads, which fail the same way and are worth more to lose', async () => {
+    setToken('practitioner-token')
+    mockUnreachable()
+
+    await expect(
+      api.uploadDocument(new File(['x'], 'ledger.pdf'), { clientId: 'c-1' }),
+    ).rejects.toThrow(/Could not reach CAFlow|You appear to be offline/i)
+  })
+
+  it('covers downloads', async () => {
+    setToken('practitioner-token')
+    mockUnreachable()
+
+    await expect(api.downloadDocument('d-1')).rejects.toThrow(
+      /Could not reach CAFlow|You appear to be offline/i,
+    )
   })
 })
 
