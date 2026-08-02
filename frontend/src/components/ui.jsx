@@ -162,6 +162,128 @@ export function DetailItem({ label, children }) {
   )
 }
 
+export const TASK_STATUS_LABELS = {
+  todo: 'To do',
+  in_progress: 'In progress',
+  blocked: 'Blocked',
+  review: 'In review',
+  done: 'Done',
+  cancelled: 'Cancelled',
+}
+
+export const TASK_PRIORITY_LABELS = {
+  low: 'Low',
+  normal: 'Normal',
+  high: 'High',
+  urgent: 'Urgent',
+}
+
+export const INVOICE_STATUS_LABELS = {
+  draft: 'Draft',
+  sent: 'Sent',
+  partially_paid: 'Part paid',
+  paid: 'Paid',
+  overdue: 'Overdue',
+  cancelled: 'Cancelled',
+}
+
+export const DOCUMENT_CATEGORY_LABELS = {
+  bank_statement: 'Bank statement',
+  purchase_invoice: 'Purchase invoice',
+  sales_invoice: 'Sales invoice',
+  form_16: 'Form 16',
+  form_26as: 'Form 26AS',
+  ais_tis: 'AIS / TIS',
+  salary_register: 'Salary register',
+  gst_return: 'GST return',
+  tds_challan: 'TDS challan',
+  balance_sheet: 'Balance sheet',
+  profit_and_loss: 'Profit & loss',
+  pan_card: 'PAN card',
+  aadhaar: 'Aadhaar',
+  incorporation_doc: 'Incorporation document',
+  other: 'Other',
+}
+
+export const REMINDER_TYPE_LABELS = {
+  document: 'Document request',
+  payment: 'Payment chase',
+  filing: 'Filing update',
+  custom: 'Custom',
+}
+
+export const REMINDER_CHANNEL_LABELS = {
+  email: 'Email',
+  sms: 'SMS',
+  whatsapp: 'WhatsApp',
+  in_app: 'In app',
+}
+
+export const REMINDER_STATUS_LABELS = {
+  scheduled: 'Scheduled',
+  sent: 'Sent',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+}
+
+/**
+ * Map a domain status onto one of the four badge tones the stylesheet knows.
+ * Keeping the mapping here means a new status shows up in a sane colour rather
+ * than an unstyled one.
+ */
+export function taskTone(status, isOverdue) {
+  if (status === 'done') return 'filed'
+  if (status === 'cancelled') return 'not_applicable'
+  if (isOverdue) return 'overdue'
+  if (status === 'blocked') return 'overdue'
+  if (status === 'in_progress' || status === 'review') return 'due_soon'
+  return 'upcoming'
+}
+
+export function invoiceTone(status) {
+  if (status === 'paid') return 'filed'
+  if (status === 'overdue') return 'overdue'
+  if (status === 'cancelled') return 'not_applicable'
+  if (status === 'partially_paid') return 'due_soon'
+  if (status === 'sent') return 'upcoming'
+  return 'not_applicable'
+}
+
+export function reminderTone(status) {
+  if (status === 'sent') return 'filed'
+  if (status === 'failed') return 'overdue'
+  if (status === 'cancelled') return 'not_applicable'
+  return 'due_soon'
+}
+
+/** A badge whose label and colour come from a caller-supplied map. */
+export function Pill({ tone, children }) {
+  return <span className={`badge ${tone ?? ''}`}>{children}</span>
+}
+
+/** ISO timestamp -> "02 Aug 2026, 14:30". Reminders are scheduled to the minute. */
+export function formatDateTime(value) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+/** Estimated effort is stored in minutes; a CA thinks in hours. */
+export function formatMinutes(minutes) {
+  if (minutes === null || minutes === undefined) return '—'
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`
+}
+
 export const ENTITY_TYPE_LABELS = {
   individual: 'Individual',
   proprietorship: 'Proprietorship',

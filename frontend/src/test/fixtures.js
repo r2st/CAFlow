@@ -225,6 +225,219 @@ export function portalOverview(overrides = {}) {
   }
 }
 
+export function task(overrides = {}) {
+  return {
+    id: 't-1',
+    firm_id: 'f-1',
+    client_id: 'c-1',
+    compliance_item_id: 'ci-1',
+    assignee_id: 'p-1',
+    created_by_id: 'p-1',
+    title: 'Reconcile GSTR-2B for July',
+    description: null,
+    status: 'todo',
+    priority: 'high',
+    due_date: '2026-08-18',
+    estimated_minutes: 90,
+    completed_at: null,
+    created_at: '2026-08-01T00:00:00Z',
+    client_name: 'Nimbus Textiles Pvt Ltd',
+    assignee_name: 'Anita Sharma',
+    compliance_type_name: 'GSTR-3B (Monthly) — Summary return & tax payment',
+    period_label: '2026-07',
+    days_remaining: 3,
+    is_overdue: false,
+    ...overrides,
+  }
+}
+
+export const WORKLOAD = {
+  as_of: '2026-08-01',
+  rows: [
+    {
+      practitioner_id: 'p-1',
+      practitioner_name: 'Anita Sharma',
+      role: 'owner',
+      open_tasks: 4,
+      overdue: 1,
+      due_this_week: 2,
+      in_progress: 1,
+      blocked: 0,
+      completed_this_month: 6,
+      estimated_minutes: 300,
+      by_status: { todo: 3, in_progress: 1 },
+    },
+    {
+      practitioner_id: null,
+      practitioner_name: 'Unassigned',
+      role: null,
+      open_tasks: 2,
+      overdue: 0,
+      due_this_week: 1,
+      in_progress: 0,
+      blocked: 0,
+      completed_this_month: 0,
+      estimated_minutes: 60,
+      by_status: { todo: 2 },
+    },
+  ],
+  unassigned_open: 2,
+  total_open: 6,
+}
+
+export function invoice(overrides = {}) {
+  return {
+    id: 'inv-1',
+    firm_id: 'f-1',
+    client_id: 'c-1',
+    invoice_number: 'INV-2026-0001',
+    issue_date: '2026-07-05',
+    due_date: '2026-07-20',
+    subtotal_paise: 500000,
+    tax_paise: 90000,
+    total_paise: 590000,
+    amount_paid_paise: 0,
+    balance_paise: 590000,
+    gst_rate_bps: 1800,
+    status: 'sent',
+    payment_date: null,
+    payment_reference: null,
+    notes: null,
+    created_at: '2026-07-05T00:00:00Z',
+    client_name: 'Nimbus Textiles Pvt Ltd',
+    days_overdue: null,
+    ...overrides,
+  }
+}
+
+export const REVENUE = {
+  from_date: '2026-04-01',
+  to_date: '2027-03-31',
+  invoiced_paise: 2500000,
+  collected_paise: 1500000,
+  outstanding_paise: 1000000,
+  overdue_paise: 400000,
+  draft_paise: 200000,
+  invoice_count: 8,
+  unbilled_paise: 750000,
+  by_client: { 'Nimbus Textiles Pvt Ltd': 1200000 },
+  by_category: { gst: 900000, tds: 400000 },
+}
+
+export const BILLABLE_WORK = {
+  clients: [
+    {
+      client_id: 'c-1',
+      client_name: 'Nimbus Textiles Pvt Ltd',
+      item_count: 2,
+      total_paise: 400000,
+      items: [
+        {
+          compliance_item_id: 'ci-1',
+          description: 'GSTR-3B (Monthly)',
+          period_label: '2026-06',
+          filed_on: '2026-07-18',
+          fee_paise: 200000,
+        },
+        {
+          compliance_item_id: 'ci-2',
+          description: 'TDS Return (Q1)',
+          period_label: '2026-Q1',
+          filed_on: '2026-07-28',
+          fee_paise: 200000,
+        },
+      ],
+    },
+  ],
+  total_paise: 400000,
+  total_items: 2,
+}
+
+export function document(overrides = {}) {
+  return {
+    id: 'd-1',
+    firm_id: 'f-1',
+    client_id: 'c-1',
+    compliance_item_id: 'ci-1',
+    original_filename: 'bank-statement-july.pdf',
+    content_type: 'application/pdf',
+    size_bytes: 184320,
+    checksum_sha256: null,
+    category: 'bank_statement',
+    category_confidence: 0.92,
+    is_category_confirmed: false,
+    status: 'processed',
+    extracted_data: {},
+    satisfies_requirements: ['bank_statement'],
+    uploaded_via_portal: true,
+    is_shared_with_client: false,
+    processing_error: null,
+    processed_at: '2026-08-01T09:05:00Z',
+    created_at: '2026-08-01T09:00:00Z',
+    client_name: 'Nimbus Textiles Pvt Ltd',
+    compliance_label: 'GSTR-3B · 2026-07',
+    ...overrides,
+  }
+}
+
+export const OUTSTANDING = {
+  from_date: '2026-08-01',
+  to_date: '2026-08-31',
+  total_items: 1,
+  total_missing: 2,
+  checklists: [
+    {
+      compliance_item_id: 'ci-1',
+      compliance_type_name: 'GSTR-3B (Monthly)',
+      period_label: '2026-07',
+      due_date: '2026-08-20',
+      client_id: 'c-1',
+      client_name: 'Nimbus Textiles Pvt Ltd',
+      requirements: [
+        { requirement: 'sales_register', label: 'Sales register', satisfied: false, document_ids: [] },
+        {
+          requirement: 'purchase_register',
+          label: 'Purchase register',
+          satisfied: false,
+          document_ids: [],
+        },
+        { requirement: 'bank_statement', label: 'Bank statement', satisfied: true, document_ids: ['d-1'] },
+      ],
+      missing: ['sales_register', 'purchase_register'],
+      is_complete: false,
+    },
+  ],
+}
+
+export function reminder(overrides = {}) {
+  return {
+    id: 'r-1',
+    firm_id: 'f-1',
+    client_id: 'c-1',
+    compliance_item_id: 'ci-1',
+    invoice_id: null,
+    reminder_type: 'document',
+    channel: 'email',
+    status: 'scheduled',
+    subject: 'GSTR-3B (Monthly) — 2026-07',
+    body: 'Dear Nimbus Textiles Pvt Ltd,\n\nWe need a few documents…',
+    recipient: 'accounts@nimbustextiles.in',
+    scheduled_for: '2026-08-05T09:00:00Z',
+    sent_at: null,
+    attempt_count: 0,
+    error_message: null,
+    extra: {},
+    created_at: '2026-08-01T00:00:00Z',
+    client_name: 'Nimbus Textiles Pvt Ltd',
+    ...overrides,
+  }
+}
+
+/** A `Page[...]` envelope around whatever items a test cares about. */
+export function pageOf(items, overrides = {}) {
+  return { items, total: items.length, limit: 50, offset: 0, ...overrides }
+}
+
 export const DASHBOARD_STATS = {
   total_clients: 3,
   active_clients: 3,

@@ -3,14 +3,18 @@ import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout'
 import { Loading } from './components/ui'
 import { useAuth } from './context/AuthContext'
+import Billing from './pages/Billing'
 import Calendar from './pages/Calendar'
 import ClientDetail from './pages/ClientDetail'
 import ClientNew from './pages/ClientNew'
 import Clients from './pages/Clients'
 import Dashboard from './pages/Dashboard'
+import Documents from './pages/Documents'
 import Login from './pages/Login'
 import Portal from './pages/Portal'
 import Register from './pages/Register'
+import Reminders from './pages/Reminders'
+import Tasks from './pages/Tasks'
 
 function RequireAuth({ children }) {
   const { isAuthenticated, loading } = useAuth()
@@ -49,6 +53,10 @@ export default function App() {
           <Route path="/clients" element={<Clients />} />
           <Route path="/clients/new" element={<ClientNew />} />
           <Route path="/clients/:clientId" element={<ClientDetail />} />
+          <Route path="/documents" element={<Documents />} />
+          <Route path="/tasks" element={<Tasks />} />
+          <Route path="/reminders" element={<Reminders />} />
+          <Route path="/billing" element={<Billing />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

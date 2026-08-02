@@ -761,6 +761,127 @@ button.link:hover:not(:disabled) { background: none; text-decoration: underline;
 
 /* -------------------------------------------------------------- mobile -- */
 
+/* ------------------------------------------------- work surfaces (shared) -- */
+
+/* Checkbox filters sit on the same line as the select filters above them. */
+.checkbox-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 12px;
+}
+.checkbox-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+}
+.checkbox-row input { width: auto; margin: 0; }
+
+/* A row of controls that reads as one action — upload, record a payment. */
+.inline-form {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.inline-form .field { margin-bottom: 0; min-width: 140px; }
+
+.pager {
+  border-top: 1px solid var(--border);
+  border-bottom: none;
+}
+
+th.numeric, td.numeric { text-align: right; white-space: nowrap; }
+th.tick, td.tick { width: 34px; padding-right: 0; }
+th.tick input, td.tick input { width: auto; margin: 0; }
+
+/* A late row is the one thing on the page that must not be missed. */
+.row-overdue { background: var(--overdue-bg); }
+.tone-overdue { color: var(--overdue); font-weight: 500; }
+
+.task-title { font-weight: 500; }
+
+.tag.priority-urgent { background: var(--overdue-bg);  color: var(--overdue); }
+.tag.priority-high   { background: var(--due-soon-bg); color: var(--due-soon); }
+.tag.priority-low    { background: var(--neutral-bg);  color: var(--neutral); }
+
+/* The card carrying money the firm has earned but not asked for. */
+.card.highlight { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-tint); }
+
+/* ------------------------------------------------------------ bulk actions -- */
+
+/* Sticks to the top of the scroll area: the selection stays actionable while
+   the user scrolls the list deciding what else to include. */
+.bulk-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  background: var(--brand-tint);
+  border: 1px solid var(--brand);
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+.bulk-bar .link { margin-left: 10px; }
+.bulk-bar select { width: auto; min-width: 150px; }
+
+/* --------------------------------------------------------------- workload -- */
+
+.workload-list { display: flex; flex-direction: column; gap: 14px; }
+
+.workload-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(120px, 2fr) auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.workload-who { min-width: 0; }
+
+.workload-bar {
+  height: 8px;
+  border-radius: 99px;
+  background: var(--neutral-bg);
+  overflow: hidden;
+}
+.workload-fill {
+  display: block;
+  height: 100%;
+  background: var(--brand);
+  border-radius: 99px;
+}
+
+.workload-counts {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------- reminder draft -- */
+
+/* An AI draft is editable copy, not a preview — it gets the writing surface. */
+.draft {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.draft textarea { font-family: var(--font); line-height: 1.55; resize: vertical; }
+.draft .button-row { align-items: center; flex-wrap: wrap; }
+
 .nav-toggle { display: none; }
 
 @media (max-width: 860px) {
@@ -831,6 +952,19 @@ button.link:hover:not(:disabled) { background: none; text-decoration: underline;
 
   .requirement-list li .upload-control { width: 100%; }
   .requirement-list li .upload-button { width: 100%; text-align: center; }
+
+  /* The bar stacks so the count and the actions each get a full line. */
+  .bulk-bar { flex-direction: column; align-items: stretch; }
+  .bulk-bar select { width: 100%; min-width: 0; }
+
+  /* Name over bar over counts — three columns is unreadable on a phone. */
+  .workload-row { grid-template-columns: 1fr; gap: 6px; }
+  .workload-counts { justify-content: flex-start; }
+
+  .inline-form { flex-direction: column; align-items: stretch; }
+  .inline-form .field { min-width: 0; }
+
+  .pager { flex-direction: column; align-items: flex-start; gap: 10px; }
 }
 
 @media (max-width: 520px) {

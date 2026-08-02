@@ -157,6 +157,21 @@ function portalUploadForm(file, { complianceItemId, requirement } = {}) {
   return form
 }
 
+/**
+ * Practitioner-side upload. Unlike the portal form this one names the client,
+ * because a CA uploads on behalf of whichever client they are looking at.
+ */
+function documentUploadForm(file, { clientId, complianceItemId, requirement, category, shareWithClient } = {}) {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('client_id', clientId)
+  if (complianceItemId) form.append('compliance_item_id', complianceItemId)
+  if (requirement) form.append('requirement', requirement)
+  if (category) form.append('category', category)
+  if (shareWithClient) form.append('share_with_client', 'true')
+  return form
+}
+
 export const api = {
   // --- Auth ---
   register: (payload) => request('/auth/register', { method: 'POST', body: payload, auth: false }),
@@ -184,6 +199,48 @@ export const api = {
   bulkUpdateStatus: (payload) =>
     request('/compliance/items/bulk-status', { method: 'POST', body: payload }),
   dashboard: () => request('/compliance/dashboard'),
+
+  // --- Tasks ---
+  listTasks: (params) => request('/tasks', { params }),
+  getTask: (id) => request(`/tasks/${id}`),
+  createTask: (payload) => request('/tasks', { method: 'POST', body: payload }),
+  updateTask: (id, payload) => request(`/tasks/${id}`, { method: 'PATCH', body: payload }),
+  deleteTask: (id) => request(`/tasks/${id}`, { method: 'DELETE' }),
+  bulkUpdateTasks: (payload) => request('/tasks/bulk', { method: 'POST', body: payload }),
+  generateTasks: (payload = {}) => request('/tasks/generate', { method: 'POST', body: payload }),
+  workload: () => request('/tasks/workload'),
+
+  // --- Documents ---
+  listDocuments: (params) => request('/documents', { params }),
+  outstandingDocuments: (params) => request('/documents/outstanding', { params }),
+  itemChecklist: (itemId) => request(`/documents/checklist/${itemId}`),
+  uploadDocument: (file, options) => upload('/documents/upload', documentUploadForm(file, options)),
+  updateDocument: (id, payload) => request(`/documents/${id}`, { method: 'PATCH', body: payload }),
+  deleteDocument: (id) => request(`/documents/${id}`, { method: 'DELETE' }),
+  downloadDocument: (id) => download(`/documents/${id}/download`),
+
+  // --- Billing ---
+  listInvoices: (params) => request('/invoices', { params }),
+  getInvoice: (id) => request(`/invoices/${id}`),
+  createInvoice: (payload) => request('/invoices', { method: 'POST', body: payload }),
+  updateInvoice: (id, payload) => request(`/invoices/${id}`, { method: 'PATCH', body: payload }),
+  sendInvoice: (id) => request(`/invoices/${id}/send`, { method: 'POST' }),
+  cancelInvoice: (id) => request(`/invoices/${id}/cancel`, { method: 'POST' }),
+  recordPayment: (id, payload) =>
+    request(`/invoices/${id}/payments`, { method: 'POST', body: payload }),
+  billableWork: (params) => request('/invoices/billable', { params }),
+  revenue: (params) => request('/invoices/revenue', { params }),
+  generateInvoices: (payload = {}) => request('/invoices/generate', { method: 'POST', body: payload }),
+
+  // --- Reminders ---
+  listReminders: (params) => request('/reminders', { params }),
+  createReminder: (payload) => request('/reminders', { method: 'POST', body: payload }),
+  draftReminder: (payload) => request('/reminders/draft', { method: 'POST', body: payload }),
+  queueReminders: (payload) => request('/reminders/queue', { method: 'POST', body: payload }),
+  cancelReminder: (id) => request(`/reminders/${id}/cancel`, { method: 'POST' }),
+  cancelScheduledForClient: (clientId) =>
+    request('/reminders/cancel-scheduled', { method: 'POST', params: { client_id: clientId } }),
+  pendingReminderCount: () => request('/reminders/pending-count'),
 
   // --- Portal access (practitioner side) ---
   portalAccess: (clientId) => request(`/clients/${clientId}/portal-access`),

@@ -40,6 +40,10 @@ export default function Layout() {
           </NavLink>
           <NavLink to="/calendar">Compliance calendar</NavLink>
           <NavLink to="/clients">Clients</NavLink>
+          <NavLink to="/documents">Documents</NavLink>
+          <NavLink to="/tasks">Tasks</NavLink>
+          <NavLink to="/reminders">Reminders</NavLink>
+          <NavLink to="/billing">Billing</NavLink>
         </nav>
 
         <div className="sidebar-footer">
