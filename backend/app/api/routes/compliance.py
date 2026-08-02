@@ -14,7 +14,6 @@ from app.core.periods import add_months
 from app.models.base import ComplianceCategory, ComplianceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem, ComplianceType
-from app.models.firm import Practitioner
 from app.schemas.compliance import (
     BulkStatusUpdate,
     BulkStatusUpdateResult,
@@ -25,7 +24,7 @@ from app.schemas.compliance import (
     ComplianceTypeOut,
     DashboardStats,
 )
-from app.services import audit
+from app.services import audit, firms
 
 router = APIRouter(prefix="/compliance", tags=["compliance"])
 
@@ -192,12 +191,14 @@ def update_compliance_item(
     updates = payload.model_dump(exclude_unset=True)
 
     if updates.get("assigned_practitioner_id"):
-        assignee = db.get(Practitioner, updates["assigned_practitioner_id"])
-        if assignee is None or assignee.firm_id != practitioner.firm_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Assigned practitioner does not belong to this firm",
+        try:
+            firms.assert_assignable(
+                db, practitioner.firm_id, updates["assigned_practitioner_id"]
             )
+        except firms.NotAssignable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
 
     before = {key: getattr(item, key) for key in updates}
     for key, value in updates.items():

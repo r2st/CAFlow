@@ -205,6 +205,45 @@ describe('Client edit', () => {
 
     expect(await screen.findByText('Client not found')).toBeInTheDocument()
   })
+
+  describe('the "Assigned to" picker and members who have been switched off', () => {
+    const GONE = practitionerFixture({ id: 'p-9', full_name: 'Gone Away', is_active: false })
+
+    function options() {
+      return Array.from(screen.getByLabelText('Assigned to').querySelectorAll('option')).map(
+        (option) => option.textContent,
+      )
+    }
+
+    it('does not offer one the client is not already assigned to', async () => {
+      /** The API refuses work aimed at them, so offering the name only errors. */
+      vi.spyOn(api, 'listPractitioners').mockResolvedValue([PRACTITIONER, GONE])
+      vi.spyOn(api, 'getClient').mockResolvedValue(clientDetail())
+
+      renderEdit()
+
+      await screen.findByLabelText('Client name')
+      expect(options()).toEqual(['Unassigned', 'Anita Sharma'])
+    })
+
+    it('keeps the one the client is already assigned to, and says so', async () => {
+      /**
+       * Dropping the name would leave the select showing the entry above it, so
+       * a save the user thought was about the PAN would quietly reassign the
+       * client. Show it, marked, and let them decide.
+       */
+      vi.spyOn(api, 'listPractitioners').mockResolvedValue([PRACTITIONER, GONE])
+      vi.spyOn(api, 'getClient').mockResolvedValue(
+        clientDetail({ assigned_practitioner_id: 'p-9', assigned_practitioner_name: 'Gone Away' }),
+      )
+
+      renderEdit()
+
+      await screen.findByLabelText('Client name')
+      expect(options()).toEqual(['Unassigned', 'Anita Sharma', 'Gone Away (deactivated)'])
+      expect(screen.getByLabelText('Assigned to')).toHaveValue('p-9')
+    })
+  })
 })
 
 describe('client permissions', () => {

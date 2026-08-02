@@ -13,7 +13,6 @@ from app.api.deps import CurrentPractitioner, DbSession, Manager
 from app.models.base import TaskPriority, TaskStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
-from app.models.firm import Practitioner
 from app.models.task import Task
 from app.schemas.common import Page
 from app.schemas.task import (
@@ -27,7 +26,7 @@ from app.schemas.task import (
     WorkloadResponse,
     WorkloadRowOut,
 )
-from app.services import audit
+from app.services import audit, firms
 from app.services import tasks as task_service
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -54,14 +53,12 @@ def _get_task_or_404(db: Session, firm_id: uuid.UUID, task_id: uuid.UUID) -> Tas
 
 
 def _validate_assignee(db: Session, firm_id: uuid.UUID, assignee_id: uuid.UUID | None) -> None:
-    if assignee_id is None:
-        return
-    assignee = db.get(Practitioner, assignee_id)
-    if assignee is None or assignee.firm_id != firm_id:
+    try:
+        firms.assert_assignable(db, firm_id, assignee_id)
+    except firms.NotAssignable as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Assignee does not belong to this firm",
-        )
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
 
 
 def serialise(task: Task, client_names: dict[uuid.UUID, str], today: date) -> TaskOut:

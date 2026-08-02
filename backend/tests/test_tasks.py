@@ -9,7 +9,7 @@ import pytest
 
 from app.models.base import TaskPriority, TaskStatus
 from app.services import tasks as task_service
-from tests.conftest import first_item_of_type
+from tests.conftest import first_item_of_type, make_client_payload
 
 
 @pytest.fixture
@@ -415,3 +415,256 @@ class TestWorkload:
             for row in client.get("/api/v1/tasks/workload", headers=auth_headers).json()["rows"]
         }
         assert rows["Anita Sharma"]["estimated_minutes"] == 75
+
+
+class TestWorkAimedAtAnAccountThatIsSwitchedOff:
+    """A deactivated member is still in the firm, and still refused at sign-in.
+
+    Their row stays for the history hanging off it, so every check that asked
+    only "are they in this firm?" went on accepting them. Work put on their
+    name is work nobody can open — it appears under no active member's queue
+    and it is not unassigned either, so a statutory deadline ends up on a name
+    nobody is watching. Neither half of that may stand: no new work may be
+    aimed at them, and what they were already holding has to come back.
+    """
+
+    @staticmethod
+    def _deactivate(client, auth_headers, practitioner_id) -> None:
+        response = client.patch(
+            f"/api/v1/auth/practitioners/{practitioner_id}",
+            json={"is_active": False},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+    @staticmethod
+    def _workload(client, auth_headers) -> dict:
+        return client.get("/api/v1/tasks/workload", headers=auth_headers).json()
+
+    def test_a_task_cannot_be_assigned_to_a_deactivated_member(
+        self, client, auth_headers, junior
+    ):
+        self._deactivate(client, auth_headers, junior["id"])
+
+        response = create_task(client, auth_headers, assignee_id=junior["id"])
+
+        assert response.status_code == 400
+        assert "deactivated" in response.json()["detail"]
+
+    def test_the_refusal_names_them(self, client, auth_headers, junior):
+        """A manager reassigning a queue needs to know which name was refused."""
+        self._deactivate(client, auth_headers, junior["id"])
+
+        response = create_task(client, auth_headers, assignee_id=junior["id"])
+
+        assert "Junior Jain" in response.json()["detail"]
+
+    def test_a_bulk_reassignment_cannot_aim_at_one_either(
+        self, client, auth_headers, junior
+    ):
+        """The bulk path moves whole queues at once, so it is the likelier way in."""
+        task = create_task(client, auth_headers).json()
+        self._deactivate(client, auth_headers, junior["id"])
+
+        response = client.post(
+            "/api/v1/tasks/bulk",
+            json={"task_ids": [task["id"]], "assignee_id": junior["id"]},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 400
+        assert client.get(f"/api/v1/tasks/{task['id']}", headers=auth_headers).json()[
+            "assignee_id"
+        ] is None
+
+    def test_an_existing_task_cannot_be_handed_to_one(self, client, auth_headers, junior):
+        """Reassigning one task at a time is the everyday path, not just bulk."""
+        task = create_task(client, auth_headers).json()
+        self._deactivate(client, auth_headers, junior["id"])
+
+        response = client.patch(
+            f"/api/v1/tasks/{task['id']}",
+            json={"assignee_id": junior["id"]},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 400
+        assert "deactivated" in response.json()["detail"]
+
+    def test_an_existing_client_cannot_be_moved_into_their_care(
+        self, client, auth_headers, client_id, junior
+    ):
+        self._deactivate(client, auth_headers, junior["id"])
+
+        response = client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"assigned_practitioner_id": junior["id"]},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 400
+        assert "deactivated" in response.json()["detail"]
+
+    def test_a_client_cannot_be_put_in_their_care(self, client, auth_headers, junior):
+        """Every filing generated for that client would inherit the name."""
+        self._deactivate(client, auth_headers, junior["id"])
+
+        response = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(
+                pan="AAECS9876P", gstin="27AAECS9876P1Z8",
+                assigned_practitioner_id=junior["id"],
+            ),
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 400
+        assert "deactivated" in response.json()["detail"]
+
+    def test_a_filing_cannot_be_put_in_their_care(
+        self, client, auth_headers, client_id, junior
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        self._deactivate(client, auth_headers, junior["id"])
+
+        response = client.patch(
+            f"/api/v1/compliance/items/{item['id']}",
+            json={"assigned_practitioner_id": junior["id"]},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 400
+        assert "deactivated" in response.json()["detail"]
+
+    def test_switching_someone_off_hands_their_open_work_back(
+        self, client, auth_headers, junior
+    ):
+        task = create_task(
+            client, auth_headers, assignee_id=junior["id"], title="File GSTR-3B"
+        ).json()
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        after = client.get(f"/api/v1/tasks/{task['id']}", headers=auth_headers).json()
+        assert after["assignee_id"] is None
+        assert after["assignee_name"] is None
+
+    def test_the_work_is_then_findable_where_a_manager_looks_for_it(
+        self, client, auth_headers, junior
+    ):
+        """Unassigned is the queue a manager works through, not a black hole."""
+        create_task(client, auth_headers, assignee_id=junior["id"])
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        assert self._workload(client, auth_headers)["unassigned_open"] == 1
+
+    def test_finished_work_keeps_the_name_of_whoever_did_it(
+        self, client, auth_headers, junior
+    ):
+        """Those rows are the record of who did what — rewriting them loses it."""
+        task = create_task(client, auth_headers, assignee_id=junior["id"]).json()
+        client.patch(
+            f"/api/v1/tasks/{task['id']}",
+            json={"status": TaskStatus.DONE.value},
+            headers=auth_headers,
+        )
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        after = client.get(f"/api/v1/tasks/{task['id']}", headers=auth_headers).json()
+        assert after["assignee_id"] == junior["id"]
+        assert after["assignee_name"] == "Junior Jain"
+
+    def test_nobody_elses_queue_is_touched(self, client, auth_headers, junior, registered_firm):
+        """Only the departing member's work moves."""
+        owner_id = registered_firm["practitioner"]["id"]
+        theirs = create_task(client, auth_headers, assignee_id=owner_id).json()
+        create_task(client, auth_headers, assignee_id=junior["id"])
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        assert client.get(f"/api/v1/tasks/{theirs['id']}", headers=auth_headers).json()[
+            "assignee_id"
+        ] == owner_id
+
+    def test_the_audit_trail_says_what_moved(self, client, auth_headers, junior):
+        """A queue emptying overnight needs a recorded reason."""
+        create_task(client, auth_headers, assignee_id=junior["id"])
+        create_task(client, auth_headers, assignee_id=junior["id"])
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        entries = client.get(
+            "/api/v1/audit",
+            params={"action": "practitioner.update"},
+            headers=auth_headers,
+        ).json()["items"]
+        assert "2 open task(s) returned to unassigned" in entries[0]["summary"]
+
+    def test_an_ordinary_edit_moves_no_work(self, client, auth_headers, junior):
+        """Only the switch-off transition releases; a name change must not."""
+        task = create_task(client, auth_headers, assignee_id=junior["id"]).json()
+
+        client.patch(
+            f"/api/v1/auth/practitioners/{junior['id']}",
+            json={"full_name": "Junior Jain-Mehta"},
+            headers=auth_headers,
+        )
+
+        assert client.get(f"/api/v1/tasks/{task['id']}", headers=auth_headers).json()[
+            "assignee_id"
+        ] == junior["id"]
+
+    def test_generated_tasks_do_not_inherit_a_switched_off_owner(
+        self, client, auth_headers, client_id, junior
+    ):
+        """The filing keeps the old name; the task it produces must not.
+
+        The nightly sweep is unattended, so this is the path that would quietly
+        build a queue for someone who cannot sign in.
+        """
+        client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"assigned_practitioner_id": junior["id"]},
+            headers=auth_headers,
+        )
+        self._deactivate(client, auth_headers, junior["id"])
+
+        created = client.post(
+            "/api/v1/tasks/generate", json={"horizon_days": 60}, headers=auth_headers
+        ).json()
+
+        assert created["created"] > 0
+        assert all(task["assignee_id"] is None for task in created["tasks"])
+
+    def test_generation_falls_through_to_the_client_owner_instead(
+        self, client, auth_headers, client_id, junior, registered_firm
+    ):
+        """A departure costs the filing its owner, not the fallback behind it.
+
+        The filing names the leaver and the client names someone active. Going
+        straight to unassigned would throw away an owner the firm had already
+        chosen, and hand a manager sorting work they did not need to do.
+        """
+        owner_id = registered_firm["practitioner"]["id"]
+        client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"assigned_practitioner_id": owner_id},
+            headers=auth_headers,
+        )
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        client.patch(
+            f"/api/v1/compliance/items/{item['id']}",
+            json={"assigned_practitioner_id": junior["id"]},
+            headers=auth_headers,
+        )
+        self._deactivate(client, auth_headers, junior["id"])
+
+        created = client.post(
+            "/api/v1/tasks/generate", json={"horizon_days": 60}, headers=auth_headers
+        ).json()
+
+        for_item = [t for t in created["tasks"] if t["compliance_item_id"] == item["id"]]
+        assert for_item, "the filing under test produced no task"
+        assert for_item[0]["assignee_id"] == owner_id

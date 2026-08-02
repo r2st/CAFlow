@@ -25,6 +25,7 @@ from app.schemas.auth import (
     TokenResponse,
 )
 from app.services import audit, firms
+from app.services import tasks as task_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -281,6 +282,16 @@ def update_practitioner(
     if updates.get("is_active") is True and not target.is_active:
         _claim_user_slot(db, firm)
 
+    # Only on the transition, and before the flag lands so the tasks are still
+    # findable under their name. Switching an account off leaves whatever it
+    # was holding: they can no longer sign in to do it, and no active member's
+    # queue shows it, so a statutory deadline sits on a name nobody is
+    # watching. The open work goes back to unassigned; the finished work keeps
+    # its assignee, being the record of who did it.
+    released = 0
+    if updates.get("is_active") is False and target.is_active:
+        released = task_service.release_open_tasks(db, target)
+
     before = {key: getattr(target, key) for key in updates}
     for key, value in updates.items():
         setattr(target, key, value)
@@ -291,7 +302,8 @@ def update_practitioner(
         entity_type="practitioner",
         entity_id=target.id,
         actor=admin,
-        summary=f"Updated {target.email}",
+        summary=f"Updated {target.email}"
+        + (f"; {released} open task(s) returned to unassigned" if released else ""),
         changes=audit.diff(before, updates),
     )
     db.commit()

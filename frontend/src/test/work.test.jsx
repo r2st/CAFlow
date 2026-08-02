@@ -18,6 +18,7 @@ import {
   document as documentFixture,
   invoice,
   pageOf,
+  practitioner,
   reminder,
   task,
 } from './fixtures'
@@ -163,6 +164,53 @@ describe('Tasks', () => {
         expect.objectContaining({ title: 'File TDS return', client_id: 'c-1' }),
       ),
     )
+  })
+
+  describe('assigning to someone who has been switched off', () => {
+    /**
+     * The team list keeps returning deactivated members — their row stays for
+     * the history hanging off it — but the API refuses work aimed at them. A
+     * picker that still offers the name turns that into an error the user only
+     * meets after choosing it.
+     */
+    beforeEach(() => {
+      vi.spyOn(api, 'listPractitioners').mockResolvedValue([
+        PRACTITIONER,
+        practitioner({ id: 'p-9', full_name: 'Gone Away', is_active: false }),
+      ])
+    })
+
+    it('leaves them out of the new-task picker', async () => {
+      const user = userEvent.setup()
+      renderPage(<Tasks />)
+
+      await user.click(await screen.findByRole('button', { name: 'New task' }))
+      const options = within(screen.getByLabelText('Assign to')).getAllByRole('option')
+
+      expect(options.map((o) => o.textContent)).toEqual([
+        'Unassigned',
+        'Anita Sharma',
+      ])
+    })
+
+    it('leaves them out of the bulk reassign picker', async () => {
+      /** Moving a whole queue at once is the likelier way to reach for them. */
+      const user = userEvent.setup()
+      renderPage(<Tasks />)
+
+      await user.click(await screen.findByLabelText('Select all tasks'))
+      const options = within(screen.getByLabelText('Reassign')).getAllByRole('option')
+
+      expect(options.map((o) => o.textContent)).toEqual(['Reassign to…', 'Anita Sharma'])
+    })
+
+    it('still lists them as something to filter by', async () => {
+      /** Their completed work is still theirs, and still worth looking up. */
+      renderPage(<Tasks />)
+
+      const filter = await screen.findByLabelText('Assignee')
+      expect(within(filter).getByRole('option', { name: 'Gone Away' })).toBeInTheDocument()
+    })
   })
 })
 

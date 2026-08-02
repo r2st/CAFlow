@@ -93,6 +93,18 @@ def create_tasks_for_due_items(
         ).all()
     )
 
+    # A filing or a client can still name someone who has since been switched
+    # off; a task inheriting that name is one no one can sign in to do. It is
+    # not on any active member's queue and it is not in the unassigned pile
+    # either, so the deadline sits on a name nobody is watching.
+    assignable = set(
+        db.scalars(
+            select(Practitioner.id).where(
+                Practitioner.firm_id == firm_id, Practitioner.is_active.is_(True)
+            )
+        ).all()
+    )
+
     created: list[Task] = []
     for item in items:
         if item.id in already_tracked:
@@ -100,7 +112,21 @@ def create_tasks_for_due_items(
         if item.client is None or not item.client.is_active:
             continue
 
-        assignee_id = item.assigned_practitioner_id or item.client.assigned_practitioner_id
+        # Filing owner first, then client owner — skipping anyone switched off
+        # rather than stopping at them. A member leaving should cost their
+        # filings the fallback the firm already set, not send the work to
+        # unassigned while an active client owner is sitting right behind it.
+        assignee_id = next(
+            (
+                candidate
+                for candidate in (
+                    item.assigned_practitioner_id,
+                    item.client.assigned_practitioner_id,
+                )
+                if candidate in assignable
+            ),
+            None,
+        )
         task = Task(
             firm_id=firm_id,
             client_id=item.client_id,
@@ -125,6 +151,33 @@ def create_tasks_for_due_items(
     if created:
         db.flush()
     return created
+
+
+def release_open_tasks(db: Session, practitioner: Practitioner) -> int:
+    """Hand a departing member's unfinished work back to the firm.
+
+    Deactivating an account leaves whatever it was holding: the task still
+    names them, they can no longer sign in to do it, and no active member's
+    queue shows it. A statutory deadline does not wait for the firm to notice,
+    so the open work is unassigned — which is where a manager already looks
+    for work needing an owner, and which is where the workload view was
+    counting it anyway.
+
+    Only the open work. Done and cancelled tasks keep their assignee: those
+    are the record of who did what, and rewriting them would lose it.
+    Reactivating an account does not undo this — nothing knows what they were
+    meant to still be holding, and a manager has since redistributed it.
+    """
+    tasks = db.scalars(
+        select(Task).where(
+            Task.firm_id == practitioner.firm_id,
+            Task.assignee_id == practitioner.id,
+            Task.status.in_(OPEN_TASK_STATUSES),
+        )
+    ).all()
+    for task in tasks:
+        task.assignee_id = None
+    return len(tasks)
 
 
 # ---------------------------------------------------------------- workload --

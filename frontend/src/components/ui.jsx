@@ -370,6 +370,33 @@ export const REMINDER_STATUS_LABELS = {
 }
 
 /**
+ * The members a dropdown may offer work to.
+ *
+ * A deactivated account keeps its row, so the team list still returns it — but
+ * they are refused at sign-in, and the API now refuses work aimed at them. An
+ * unfiltered picker therefore offers a name that can only come back as an
+ * error, which is a worse way to learn it than not seeing the name at all.
+ *
+ * ``currentId`` is kept whatever its state: on an edit form the record may
+ * already name someone since switched off, and dropping them from the options
+ * would leave the select showing the entry above — so a save the user thought
+ * was unrelated would quietly reassign the record. Better to show the name,
+ * marked, and let them choose to change it.
+ *
+ * Only for pickers that *assign*. A filter picker should keep listing everyone:
+ * their completed work is still theirs, and still worth looking up by name.
+ */
+export function assignable(practitioners, currentId = null) {
+  return practitioners
+    .filter((person) => person.is_active !== false || person.id === currentId)
+    .map((person) =>
+      person.is_active === false
+        ? { ...person, full_name: `${person.full_name} (deactivated)` }
+        : person,
+    )
+}
+
+/**
  * Map a domain status onto one of the four badge tones the stylesheet knows.
  * Keeping the mapping here means a new status shows up in a sane colour rather
  * than an unstyled one.

@@ -9,6 +9,7 @@ import {
   TASK_PRIORITY_LABELS,
   TASK_STATUS_LABELS,
   TableScroll,
+  assignable,
   formatDate,
   formatDaysRemaining,
   formatMinutes,
@@ -153,7 +154,7 @@ function NewTaskForm({ clients, practitioners, onCreated, onError }) {
             <label htmlFor="task-assignee">Assign to</label>
             <select id="task-assignee" value={form.assignee_id} onChange={set('assignee_id')}>
               <option value="">Unassigned</option>
-              {practitioners.map((person) => (
+              {assignable(practitioners).map((person) => (
                 <option key={person.id} value={person.id}>
                   {person.full_name}
                 </option>
@@ -488,7 +489,7 @@ export default function Tasks() {
               }
             >
               <option value="">Reassign to…</option>
-              {practitioners.map((person) => (
+              {assignable(practitioners).map((person) => (
                 <option key={person.id} value={person.id}>
                   {person.full_name}
                 </option>

@@ -67,14 +67,12 @@ def _get_client_or_404(db: Session, firm_id: uuid.UUID, client_id: uuid.UUID) ->
 
 
 def _validate_assignee(db: Session, firm_id: uuid.UUID, practitioner_id: uuid.UUID | None):
-    if practitioner_id is None:
-        return
-    assignee = db.get(Practitioner, practitioner_id)
-    if assignee is None or assignee.firm_id != firm_id:
+    try:
+        firms.assert_assignable(db, firm_id, practitioner_id)
+    except firms.NotAssignable as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Assigned practitioner does not belong to this firm",
-        )
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
 
 
 def _compliance_summary(db: Session, client_id: uuid.UUID) -> ClientComplianceSummary:

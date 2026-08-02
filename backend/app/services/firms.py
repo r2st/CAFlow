@@ -20,6 +20,36 @@ class PlanLimitReached(Exception):
     """The firm's plan has no room left for another of something."""
 
 
+class NotAssignable(Exception):
+    """Work cannot be given to the practitioner named."""
+
+
+def assert_assignable(db: Session, firm_id: uuid.UUID, practitioner_id: uuid.UUID | None) -> None:
+    """Refuse work aimed at anyone who cannot do it.
+
+    Clients, filings and tasks all name a practitioner, and all three asked
+    only whether that practitioner was in the firm. A deactivated member is
+    still in the firm — their row stays for the history hanging off it — but
+    they are refused at sign-in, so work put on their name is work nobody can
+    open. It does not show up under anyone active either, so a deadline
+    assigned that way is a deadline nobody is watching.
+
+    ``None`` is allowed: unassigned is a state a firm may deliberately want,
+    and it is where a manager looks for work needing an owner.
+    """
+    if practitioner_id is None:
+        return
+    assignee = db.get(Practitioner, practitioner_id)
+    if assignee is None or assignee.firm_id != firm_id:
+        raise NotAssignable("Assigned practitioner does not belong to this firm")
+    if not assignee.is_active:
+        # Named, because the caller is usually a manager working down a
+        # departing member's queue and needs to know which one was refused.
+        raise NotAssignable(
+            f"{assignee.full_name} has been deactivated and cannot be assigned work"
+        )
+
+
 def lock_firm(db: Session, firm_id: uuid.UUID) -> None:
     """Serialise this firm's per-firm decisions for the rest of the transaction.
 

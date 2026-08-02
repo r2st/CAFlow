@@ -1,4 +1,4 @@
-import { ENTITY_TYPE_LABELS } from './ui'
+import { ENTITY_TYPE_LABELS, assignable } from './ui'
 
 /**
  * The client record's fields, shared by the create and edit pages.
@@ -153,7 +153,7 @@ export default function ClientForm({ value, onChange, practitioners }) {
                 onChange={update('assigned_practitioner_id')}
               >
                 <option value="">Unassigned</option>
-                {practitioners.map((person) => (
+                {assignable(practitioners, value.assigned_practitioner_id).map((person) => (
                   <option key={person.id} value={person.id}>
                     {person.full_name}
                   </option>
