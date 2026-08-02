@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="CAFlow">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3d4bd8"/>
+      <stop offset="1" stop-color="#6f7bf0"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#tile)"/>
+  <g fill="#ffffff">
+    <!-- Beam, and the knob it pivots on. -->
+    <circle cx="256" cy="122" r="26"/>
+    <rect x="80" y="162" width="352" height="28" rx="14"/>
+    <!-- Post runs under the base so the two never show a seam. -->
+    <rect x="238" y="162" width="36" height="278" rx="10"/>
+    <!-- Pans, drawn heavy enough to survive a 16px render. -->
+    <path d="M78 234h136l-49 82a23 23 0 0 1-38 0z"/>
+    <path d="M298 234h136l-49 82a23 23 0 0 1-38 0z"/>
+    <!-- Base. -->
+    <path d="M190 388h132l30 48H160z"/>
+    <rect x="142" y="436" width="228" height="30" rx="15"/>
+  </g>
+</svg>
