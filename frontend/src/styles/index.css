@@ -565,9 +565,18 @@ button.link:hover:not(:disabled) { background: none; text-decoration: underline;
   to   { background-position: -200% 0; }
 }
 
+/* Content that is being refreshed in place: still readable, visibly stale.
+   Pointer events stay off so nothing is clicked against the old rows. */
+.is-refreshing {
+  opacity: 0.55;
+  pointer-events: none;
+  transition: opacity 0.15s ease-in;
+}
+
 /* Respect the OS setting — animation here is decoration, never information. */
 @media (prefers-reduced-motion: reduce) {
   .spinner, .skeleton-row { animation: none; }
+  .is-refreshing { transition: none; }
 }
 
 /* ------------------------------------------------------- error boundary -- */

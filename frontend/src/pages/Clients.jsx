@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
-import { Alert, ENTITY_TYPE_LABELS, EmptyState, Loading } from '../components/ui'
+import { Alert, ENTITY_TYPE_LABELS, EmptyState, Skeleton } from '../components/ui'
 
 const PAGE_SIZE = 25
 
@@ -88,12 +88,15 @@ export default function Clients() {
         </div>
       </div>
 
-      <div className="card">
-        {loading ? (
-          <Loading />
+      {/* Only the first load blanks the list. Re-filtering keeps the current
+          rows on screen and dims them, so the page does not jump on every
+          keystroke once the user has something to look at. */}
+      <div className="card" aria-busy={loading}>
+        {loading && !page ? (
+          <Skeleton rows={6} />
         ) : page && page.items.length > 0 ? (
           <>
-            <div className="table-wrap">
+            <div className={`table-wrap ${loading ? 'is-refreshing' : ''}`}>
               <table>
                 <thead>
                   <tr>

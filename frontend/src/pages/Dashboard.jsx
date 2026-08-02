@@ -2,7 +2,14 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
 import ComplianceTable from '../components/ComplianceTable'
-import { Alert, EmptyState, Loading, Stat, formatRupees } from '../components/ui'
+import {
+  Alert,
+  EmptyState,
+  Skeleton,
+  SkeletonStats,
+  Stat,
+  formatRupees,
+} from '../components/ui'
 import { useAuth } from '../context/AuthContext'
 
 /** Show a rolling window: a month of history for overdue work, six months ahead. */
@@ -31,8 +38,6 @@ export default function Dashboard() {
       .finally(() => setLoading(false))
   }, [])
 
-  if (loading) return <Loading />
-
   return (
     <>
       <div className="page-header">
@@ -47,6 +52,25 @@ export default function Dashboard() {
 
       <Alert kind="error">{error}</Alert>
 
+      {/* Skeletons rather than a spinner: the header and the shape of the page
+          are already known, so nothing has to jump when the data lands. */}
+      {loading ? (
+        <>
+          <SkeletonStats count={6} />
+          <div className="card">
+            <Skeleton rows={6} />
+          </div>
+        </>
+      ) : (
+        <DashboardBody stats={stats} calendar={calendar} />
+      )}
+    </>
+  )
+}
+
+function DashboardBody({ stats, calendar }) {
+  return (
+    <>
       {stats && (
         <div className="stat-grid">
           <Stat label="Active clients" value={stats.active_clients} />

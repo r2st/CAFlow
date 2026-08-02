@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '../api/client'
 import ComplianceTable from '../components/ComplianceTable'
-import { Alert, EmptyState, Loading } from '../components/ui'
+import { Alert, EmptyState, Skeleton } from '../components/ui'
 
 const CATEGORIES = [
   ['', 'All categories'],
@@ -223,17 +223,21 @@ export default function Calendar() {
           </div>
         </div>
 
-        {loading ? (
-          <Loading />
+        {/* Re-filtering keeps the current rows on screen and dims them; only
+            the first load has nothing to show. */}
+        {loading && !data ? (
+          <Skeleton rows={8} />
         ) : data && data.items.length > 0 ? (
-          <ComplianceTable
-            items={data.items}
-            selectable
-            selectedIds={selectedIds}
-            onToggle={toggle}
-            onToggleAll={toggleAll}
-            showFee
-          />
+          <div className={loading ? 'is-refreshing' : ''}>
+            <ComplianceTable
+              items={data.items}
+              selectable
+              selectedIds={selectedIds}
+              onToggle={toggle}
+              onToggleAll={toggleAll}
+              showFee
+            />
+          </div>
         ) : (
           <EmptyState title="No filings match these filters">
             Widen the date range or clear a filter.

@@ -8,7 +8,8 @@ import {
   DetailItem,
   ENTITY_TYPE_LABELS,
   EmptyState,
-  Loading,
+  Skeleton,
+  SkeletonStats,
   Stat,
   formatDate,
 } from '../components/ui'
@@ -70,7 +71,19 @@ export default function ClientDetail() {
     }
   }
 
-  if (loading) return <Loading />
+  if (loading) {
+    return (
+      <>
+        <SkeletonStats count={4} />
+        <div className="card section">
+          <Skeleton rows={5} />
+        </div>
+        <div className="card">
+          <Skeleton rows={5} />
+        </div>
+      </>
+    )
+  }
   if (!client) {
     return (
       <>
