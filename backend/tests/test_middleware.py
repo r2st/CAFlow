@@ -4,6 +4,7 @@ shared error envelope."""
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,10 +14,31 @@ from app.core import ratelimit
 from app.core.middleware import RequestContextMiddleware, client_ip
 from app.main import app
 
+# A whole number of minutes, so the frozen instant below sits exactly on a
+# window boundary and ``Retry-After`` is a full window rather than whatever
+# fraction of one happened to be left.
+FROZEN_NOW = 1_800_000_000.0
+
 
 @pytest.fixture
-def rate_limited():
-    """Turn rate limiting on for one test and leave the counters clean."""
+def rate_limited(monkeypatch):
+    """Turn rate limiting on for one test, on a window that cannot roll under it.
+
+    The counters are fixed-window: ``window_start = now - (now % 60)``. A test
+    that spends a second or two filling a bucket is therefore a test that will
+    occasionally cross a minute boundary, have its count zeroed half way
+    through the loop, and never reach the limit it exists to assert.
+
+    That stayed hidden while signing in was fast. Hashing a password even when
+    the email matches nobody — which is what keeps the sign-in clock from
+    saying who is a customer — put roughly two seconds between the first
+    attempt and the throttled one, and with it a few-percent chance per run of
+    a failure that reproduced nowhere.
+
+    Freezing the clock the limiter reads takes the boundary out of the test
+    rather than widening a tolerance around it.
+    """
+    monkeypatch.setattr(ratelimit, "time", SimpleNamespace(time=lambda: FROZEN_NOW))
     asyncio.run(ratelimit.reset_counters())
     settings.rate_limit_enabled = True
     try:
