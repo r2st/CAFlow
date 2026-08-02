@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
+from app.core import clock
 from app.core.periods import fiscal_year_start, fy_label
 from app.models.base import ComplianceStatus, InvoiceStatus
 from app.models.client import Client
@@ -69,7 +70,7 @@ def next_invoice_number(db: Session, firm_id: uuid.UUID, issue_date: date | None
     be by the time a row is inserted. :func:`insert_numbered` is what makes
     that hold; calling this on its own is only a question, not a claim.
     """
-    prefix = number_prefix(issue_date or date.today())
+    prefix = number_prefix(issue_date or clock.today())
 
     used = set(
         db.scalars(
@@ -202,7 +203,7 @@ def refresh_status(invoice: Invoice, today: date | None = None) -> Invoice:
     Drafts and cancelled invoices are left alone — they are states a human
     chose, not states derived from money movement.
     """
-    today = today or date.today()
+    today = today or clock.today()
     if invoice.status in NOT_OWED_STATUSES:
         return invoice
 
@@ -304,7 +305,7 @@ def build_invoice(
     if not items:
         raise BillingError("An invoice needs at least one billable filing")
 
-    issue_date = issue_date or date.today()
+    issue_date = issue_date or clock.today()
 
     def build(invoice_number: str) -> Invoice:
         invoice = Invoice(
@@ -382,7 +383,7 @@ def record_payment(
         )
 
     invoice.amount_paid_paise += amount_paise
-    invoice.payment_date = payment_date or date.today()
+    invoice.payment_date = payment_date or clock.today()
     if reference:
         invoice.payment_reference = reference
     refresh_status(invoice, today)
@@ -541,7 +542,7 @@ def revenue_summary(
     today: date | None = None,
 ) -> RevenueSummary:
     """Invoiced / collected / outstanding over a window, plus unbilled work."""
-    today = today or date.today()
+    today = today or clock.today()
     summary = RevenueSummary(from_date=from_date, to_date=to_date)
 
     invoices = list(
@@ -586,7 +587,7 @@ def unpaid_invoices(
     db: Session, firm_id: uuid.UUID | None = None, *, today: date | None = None
 ) -> list[Invoice]:
     """Sent invoices with money still outstanding — the payment-chasing list."""
-    today = today or date.today()
+    today = today or clock.today()
     filters = [Invoice.status.in_(UNPAID_STATUSES)]
     if firm_id is not None:
         filters.append(Invoice.firm_id == firm_id)

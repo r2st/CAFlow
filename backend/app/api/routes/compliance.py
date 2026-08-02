@@ -10,6 +10,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession
+from app.core import clock
 from app.core.periods import add_months
 from app.models.base import ComplianceCategory, ComplianceStatus
 from app.models.client import Client
@@ -114,7 +115,7 @@ def compliance_calendar(
             detail=f"display_status must be one of: {', '.join(DISPLAY_STATES)}",
         )
 
-    today = date.today()
+    today = clock.today()
     start = from_date or date(today.year, today.month, 1)
     end = to_date or add_months(start, 3)
     if end < start:
@@ -177,7 +178,7 @@ def get_compliance_item(
     item_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
 ):
     item = _get_item_or_404(db, practitioner.firm_id, item_id)
-    return _serialise(item, date.today())
+    return _serialise(item, clock.today())
 
 
 @router.patch("/items/{item_id}", response_model=ComplianceItemOut, summary="Update a filing")
@@ -249,7 +250,7 @@ def update_compliance_item(
     )
     db.commit()
     db.refresh(item)
-    return _serialise(item, date.today())
+    return _serialise(item, clock.today())
 
 
 @router.post(
@@ -317,7 +318,7 @@ def bulk_update_status(
 @router.get("/dashboard", response_model=DashboardStats, summary="Firm dashboard counters")
 def dashboard(practitioner: CurrentPractitioner, db: DbSession):
     """Practice-wide compliance status at a glance."""
-    today = date.today()
+    today = clock.today()
     firm_id = practitioner.firm_id
 
     total_clients = db.scalar(select(func.count(Client.id)).where(Client.firm_id == firm_id)) or 0
@@ -394,7 +395,7 @@ def _normalise_filing(
     officer.
     """
     if item.status in FILED_STATUSES:
-        item.filed_on = filed_on or item.filed_on or date.today()
+        item.filed_on = filed_on or item.filed_on or clock.today()
         # A filing lodged after the due date is recorded as delayed.
         item.status = (
             ComplianceStatus.DELAYED_FILED

@@ -8,6 +8,7 @@ from datetime import date, timedelta
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from app.core import clock
 from app.models.base import InvoiceStatus
 from app.models.compliance import ComplianceItem
 from app.models.invoice import Invoice, InvoiceLine
@@ -29,7 +30,7 @@ def file_everything(client, auth_headers) -> list[dict]:
         json={
             "item_ids": [item["id"] for item in items],
             "status": "filed",
-            "filed_on": date.today().isoformat(),
+            "filed_on": clock.today().isoformat(),
         },
         headers=auth_headers,
     )
@@ -520,7 +521,7 @@ class TestTwoInvoicesAtOnce:
         stale = billing.next_invoice_number(db, uuid.UUID(firm_id))
         db.rollback()
         self.committed_by_another_request(
-            firm_id, client_id, stale, issue_date=date.today()
+            firm_id, client_id, stale, issue_date=clock.today()
         )
 
         offered = []
@@ -664,7 +665,7 @@ class TestInvoiceLifecycle:
         assert again.status_code == 409
 
     def test_a_past_due_date_shows_as_overdue(self, client, auth_headers, client_id):
-        past = (date.today() - timedelta(days=5)).isoformat()
+        past = (clock.today() - timedelta(days=5)).isoformat()
         invoice = make_invoice(client, auth_headers, client_id, due_date=past).json()
         sent = client.post(
             f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
@@ -763,7 +764,7 @@ class TestPayments:
     def test_paying_an_overdue_invoice_clears_the_overdue_flag(
         self, client, auth_headers, client_id
     ):
-        past = (date.today() - timedelta(days=5)).isoformat()
+        past = (clock.today() - timedelta(days=5)).isoformat()
         invoice = make_invoice(client, auth_headers, client_id, due_date=past).json()
         sent = client.post(
             f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
@@ -809,7 +810,7 @@ class TestAnInvoiceWithNothingToPay:
 
     def test_a_nil_invoice_does_not_go_overdue(self, client, auth_headers, client_id):
         """There is nothing outstanding, so a past due date changes nothing."""
-        past = (date.today() - timedelta(days=30)).isoformat()
+        past = (clock.today() - timedelta(days=30)).isoformat()
         invoice = make_invoice(
             client,
             auth_headers,
@@ -827,7 +828,7 @@ class TestAnInvoiceWithNothingToPay:
         self, client, auth_headers, client_id, db
     ):
         """The nightly sweep is the other way a status moves, and it agrees."""
-        past = (date.today() - timedelta(days=30)).isoformat()
+        past = (clock.today() - timedelta(days=30)).isoformat()
         invoice = make_invoice(
             client,
             auth_headers,
@@ -838,11 +839,11 @@ class TestAnInvoiceWithNothingToPay:
         client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
 
         row = db.get(Invoice, uuid.UUID(invoice["id"]))
-        billing.refresh_status(row, date.today())
+        billing.refresh_status(row, clock.today())
         assert row.status == InvoiceStatus.PAID
 
     def test_a_nil_invoice_is_not_chased_as_unpaid(self, client, auth_headers, client_id):
-        past = (date.today() - timedelta(days=30)).isoformat()
+        past = (clock.today() - timedelta(days=30)).isoformat()
         invoice = make_invoice(
             client,
             auth_headers,
@@ -861,7 +862,7 @@ class TestAnInvoiceWithNothingToPay:
         self, client, auth_headers, client_id
     ):
         """The guard is about a zero total, not about being lenient generally."""
-        past = (date.today() - timedelta(days=5)).isoformat()
+        past = (clock.today() - timedelta(days=5)).isoformat()
         invoice = make_invoice(client, auth_headers, client_id, due_date=past).json()
         sent = client.post(
             f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
@@ -1498,7 +1499,7 @@ class TestOnlyABillThatIsOwedCanBeLate:
     """
 
     def _overdue_draft(self, client, auth_headers, client_id: str) -> dict:
-        long_ago = (date.today() - timedelta(days=90)).isoformat()
+        long_ago = (clock.today() - timedelta(days=90)).isoformat()
         response = make_invoice(
             client,
             auth_headers,

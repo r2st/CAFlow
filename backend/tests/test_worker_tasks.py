@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects import postgresql, sqlite
 
 from app.config import settings
+from app.core import clock
 from app.models.base import (
     ComplianceStatus,
     EntityType,
@@ -332,7 +333,7 @@ class TestScheduleComplianceReminders:
         firm = make_firm(db)
         client = make_client(db, firm)
         ctype = get_type(db, "GSTR3B_MONTHLY")
-        make_item(db, firm, client, ctype, due_date=date.today() + timedelta(days=10))
+        make_item(db, firm, client, ctype, due_date=clock.today() + timedelta(days=10))
         db.commit()
 
         assert tasks.schedule_compliance_reminders_task() == {"queued": 1}
@@ -1112,8 +1113,8 @@ class TestFlagOverdueTask:
         overdue_client = make_client(db, firm, name="Late Ltd", email="late@example.in")
         on_time = make_client(db, firm, name="Prompt Ltd", email="prompt@example.in")
         ctype = get_type(db, "GSTR3B_MONTHLY")
-        make_item(db, firm, overdue_client, ctype, due_date=date.today() - timedelta(days=3))
-        make_item(db, firm, on_time, ctype, due_date=date.today() + timedelta(days=30))
+        make_item(db, firm, overdue_client, ctype, due_date=clock.today() - timedelta(days=3))
+        make_item(db, firm, on_time, ctype, due_date=clock.today() + timedelta(days=30))
         db.commit()
 
         result = tasks.flag_overdue_task()
@@ -1130,7 +1131,7 @@ class TestFlagOverdueTask:
             firm,
             client,
             ctype,
-            due_date=date.today() - timedelta(days=3),
+            due_date=clock.today() - timedelta(days=3),
             status=ComplianceStatus.FILED,
         )
         db.commit()

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core import clock
 from app.models.compliance import ComplianceItem
 from tests.conftest import make_client_payload
 
@@ -147,8 +148,8 @@ class TestCalendar:
         client_id = create_client_record(client, auth_headers)
         # Force one item overdue and one comfortably in the future.
         all_items = items_for(db, client_id)
-        all_items[0].due_date = date.today() - timedelta(days=10)
-        all_items[1].due_date = date.today() + timedelta(days=200)
+        all_items[0].due_date = clock.today() - timedelta(days=10)
+        all_items[1].due_date = clock.today() + timedelta(days=200)
         db.commit()
 
         overdue = client.get(
@@ -162,8 +163,8 @@ class TestCalendar:
     def test_due_soon_window_is_seven_days(self, client: TestClient, auth_headers: dict, db: Session):
         client_id = create_client_record(client, auth_headers)
         items = items_for(db, client_id)
-        items[0].due_date = date.today() + timedelta(days=3)
-        items[1].due_date = date.today() + timedelta(days=30)
+        items[0].due_date = clock.today() + timedelta(days=3)
+        items[1].due_date = clock.today() + timedelta(days=30)
         db.commit()
 
         body = client.get(
@@ -261,7 +262,7 @@ class TestFilingUpdates:
         body = client.patch(
             f"{API}/compliance/items/{item.id}", headers=auth_headers, json={"status": "filed"}
         ).json()
-        assert body["filed_on"] == date.today().isoformat()
+        assert body["filed_on"] == clock.today().isoformat()
 
     def test_reverting_to_pending_clears_the_filing_date(
         self, client: TestClient, auth_headers: dict, db: Session
@@ -295,7 +296,7 @@ class TestFilingUpdates:
         response = client.patch(
             f"{API}/compliance/items/{item.id}",
             headers=auth_headers,
-            json={"status": "pending", "filed_on": date.today().isoformat()},
+            json={"status": "pending", "filed_on": clock.today().isoformat()},
         )
         assert response.status_code == 422
         assert "filed_on" in response.json()["detail"]
@@ -369,7 +370,7 @@ class TestFilingUpdates:
         response = client.patch(
             f"{API}/compliance/items/{item.id}",
             headers=auth_headers,
-            json={"filed_on": date.today().isoformat()},
+            json={"filed_on": clock.today().isoformat()},
         )
         assert response.status_code == 422
 
@@ -433,7 +434,7 @@ class TestFilingUpdates:
         leftover date made every one of them ``delayed_filed``.
         """
         client_id = create_client_record(client, auth_headers)
-        item = next(i for i in items_for(db, client_id) if i.due_date > date.today())
+        item = next(i for i in items_for(db, client_id) if i.due_date > clock.today())
         ids = [str(item.id)]
         long_past = item.due_date - timedelta(days=400)
 
@@ -447,21 +448,21 @@ class TestFilingUpdates:
             )
 
         body = client.get(f"{API}/compliance/items/{item.id}", headers=auth_headers).json()
-        assert body["filed_on"] == date.today().isoformat()
+        assert body["filed_on"] == clock.today().isoformat()
         assert body["status"] == "filed"
 
     def test_a_batch_filed_with_no_date_is_dated_today(
         self, client: TestClient, auth_headers: dict, db: Session
     ):
         client_id = create_client_record(client, auth_headers)
-        item = next(i for i in items_for(db, client_id) if i.due_date > date.today())
+        item = next(i for i in items_for(db, client_id) if i.due_date > clock.today())
         client.post(
             f"{API}/compliance/items/bulk-status",
             headers=auth_headers,
             json={"item_ids": [str(item.id)], "status": "filed"},
         )
         body = client.get(f"{API}/compliance/items/{item.id}", headers=auth_headers).json()
-        assert body["filed_on"] == date.today().isoformat()
+        assert body["filed_on"] == clock.today().isoformat()
 
     def test_a_batch_filed_late_is_recorded_as_delayed(
         self, client: TestClient, auth_headers: dict, db: Session
@@ -569,8 +570,8 @@ class TestDashboard:
     ):
         client_id = create_client_record(client, auth_headers)
         items = items_for(db, client_id)
-        items[0].due_date = date.today() - timedelta(days=5)
-        items[1].due_date = date.today() + timedelta(days=2)
+        items[0].due_date = clock.today() - timedelta(days=5)
+        items[1].due_date = clock.today() + timedelta(days=2)
         db.commit()
 
         stats = client.get(f"{API}/compliance/dashboard", headers=auth_headers).json()
@@ -592,7 +593,7 @@ class TestDashboard:
         client.patch(
             f"{API}/compliance/items/{item.id}",
             headers=auth_headers,
-            json={"status": "filed", "filed_on": date.today().isoformat()},
+            json={"status": "filed", "filed_on": clock.today().isoformat()},
         )
         stats = client.get(f"{API}/compliance/dashboard", headers=auth_headers).json()
         assert stats["filed_this_month"] == 1

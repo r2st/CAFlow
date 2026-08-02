@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentFirm, CurrentPractitioner, DbSession, Manager
+from app.core import clock
 from app.models.base import ComplianceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
@@ -139,7 +139,7 @@ def _validate_assignee(db: Session, firm_id: uuid.UUID, practitioner_id: uuid.UU
 
 
 def _compliance_summary(db: Session, client_id: uuid.UUID) -> ClientComplianceSummary:
-    today = date.today()
+    today = clock.today()
     rows = db.scalars(
         select(ComplianceItem).where(ComplianceItem.client_id == client_id)
     ).all()
@@ -191,7 +191,7 @@ def create_client(
     data = payload.model_dump(exclude={"generate_compliance_items", "onboarded_on"})
     client = Client(
         firm_id=firm.id,
-        onboarded_on=payload.onboarded_on or date.today(),
+        onboarded_on=payload.onboarded_on or clock.today(),
         **data,
     )
     db.add(client)

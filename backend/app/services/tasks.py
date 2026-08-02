@@ -15,6 +15,7 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core import clock
 from app.models.base import ComplianceStatus, TaskPriority, TaskStatus
 from app.models.compliance import ComplianceItem
 from app.models.firm import Practitioner
@@ -64,7 +65,7 @@ def create_tasks_for_due_items(
     is skipped, so a task a manager deliberately cancelled does not reappear
     the next night.
     """
-    today = today or date.today()
+    today = today or clock.today()
     horizon = today + timedelta(days=horizon_days)
 
     items = list(
@@ -202,7 +203,7 @@ def workload(
     db: Session, firm_id: uuid.UUID, *, today: date | None = None
 ) -> list[WorkloadRow]:
     """Per-practitioner load, including an "Unassigned" row when work is loose."""
-    today = today or date.today()
+    today = today or clock.today()
     week_end = today + timedelta(days=7)
     month_start = date(today.year, today.month, 1)
 
@@ -230,10 +231,14 @@ def workload(
         row.by_status[task.status.value] = row.by_status.get(task.status.value, 0) + 1
 
         if task.status in CLOSED_TASK_STATUSES:
+            # ``completed_at`` is a UTC instant and ``month_start`` an Indian
+            # date, so the two only line up once the instant is read in IST.
+            # Everything finished between midnight and 05:30 IST on the 1st
+            # belonged to the month that had just ended.
             if (
                 task.status == TaskStatus.DONE
                 and task.completed_at is not None
-                and task.completed_at.date() >= month_start
+                and clock.date_of(task.completed_at) >= month_start
             ):
                 row.completed_this_month += 1
             continue

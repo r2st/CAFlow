@@ -10,6 +10,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession, Manager
+from app.core import clock
 from app.models.base import TaskPriority, TaskStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
@@ -100,7 +101,7 @@ def _apply_status(task: Task, new_status: TaskStatus) -> None:
 @router.get("/workload", response_model=WorkloadResponse, summary="Open work per team member")
 def team_workload(practitioner: CurrentPractitioner, db: DbSession):
     """Open work per team member — who is drowning and who is free."""
-    today = date.today()
+    today = clock.today()
     rows = task_service.workload(db, practitioner.firm_id, today=today)
     return WorkloadResponse(
         as_of=today,
@@ -134,7 +135,7 @@ def generate_tasks(
     payload: TaskGenerateRequest, practitioner: Manager, db: DbSession
 ):
     """Create tasks for every filing falling due inside the horizon."""
-    today = date.today()
+    today = clock.today()
     created = task_service.create_tasks_for_due_items(
         db,
         practitioner.firm_id,
@@ -248,7 +249,7 @@ def create_task(payload: TaskCreate, practitioner: CurrentPractitioner, db: DbSe
     )
     db.commit()
     db.refresh(task)
-    return serialise(task, _client_names(db, [task]), date.today())
+    return serialise(task, _client_names(db, [task]), clock.today())
 
 
 @router.get("", response_model=Page[TaskOut], summary="List tasks")
@@ -267,7 +268,7 @@ def list_tasks(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    today = date.today()
+    today = clock.today()
     filters = [Task.firm_id == practitioner.firm_id]
     if task_status is not None:
         filters.append(Task.status == task_status)
@@ -312,7 +313,7 @@ def list_tasks(
 @router.get("/{task_id}", response_model=TaskOut, summary="A single task")
 def get_task(task_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession):
     task = _get_task_or_404(db, practitioner.firm_id, task_id)
-    return serialise(task, _client_names(db, [task]), date.today())
+    return serialise(task, _client_names(db, [task]), clock.today())
 
 
 @router.patch("/{task_id}", response_model=TaskOut, summary="Update a task")
@@ -349,7 +350,7 @@ def update_task(
     )
     db.commit()
     db.refresh(task)
-    return serialise(task, _client_names(db, [task]), date.today())
+    return serialise(task, _client_names(db, [task]), clock.today())
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a task")

@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession
+from app.core import clock
 from app.models.base import DocumentCategory
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
@@ -126,7 +127,7 @@ def outstanding_documents(
     client_id: uuid.UUID | None = Query(default=None),
 ):
     """Open filings still missing documents — the chase list."""
-    start = from_date or date.today()
+    start = from_date or clock.today()
     end = to_date or start + timedelta(days=OUTSTANDING_HORIZON_DAYS)
     if end < start:
         raise HTTPException(

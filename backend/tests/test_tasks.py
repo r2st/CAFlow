@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pytest
 
+from app.core import clock
 from app.models.base import TaskPriority, TaskStatus
 from app.services import tasks as task_service
 from tests.conftest import first_item_of_type, make_client_payload
@@ -101,13 +102,13 @@ class TestTaskCrud:
         assert response.json()["completed_at"] is None
 
     def test_an_overdue_open_task_is_flagged(self, client, auth_headers):
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yesterday = (clock.today() - timedelta(days=1)).isoformat()
         task = create_task(client, auth_headers, due_date=yesterday).json()
         assert task["is_overdue"] is True
         assert task["days_remaining"] == -1
 
     def test_a_completed_task_is_not_overdue(self, client, auth_headers):
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yesterday = (clock.today() - timedelta(days=1)).isoformat()
         task = create_task(client, auth_headers, due_date=yesterday).json()
         response = client.patch(
             f"/api/v1/tasks/{task['id']}", json={"status": "done"}, headers=auth_headers
@@ -179,7 +180,7 @@ class TestTaskFilters:
         assert [t["title"] for t in mine["items"]] == ["Mine"]
 
     def test_overdue_only_excludes_closed_work(self, client, auth_headers):
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yesterday = (clock.today() - timedelta(days=1)).isoformat()
         create_task(client, auth_headers, title="Late", due_date=yesterday)
         closed = create_task(
             client, auth_headers, title="Late but done", due_date=yesterday
@@ -211,7 +212,7 @@ class TestTaskFilters:
             client,
             auth_headers,
             title="Dated",
-            due_date=(date.today() + timedelta(days=5)).isoformat(),
+            due_date=(clock.today() + timedelta(days=5)).isoformat(),
         )
         items = client.get("/api/v1/tasks", headers=auth_headers).json()["items"]
         assert [t["title"] for t in items] == ["Dated", "No date"]
@@ -352,14 +353,14 @@ class TestWorkload:
             auth_headers,
             title="Junior late",
             assignee_id=junior["id"],
-            due_date=(date.today() - timedelta(days=2)).isoformat(),
+            due_date=(clock.today() - timedelta(days=2)).isoformat(),
         )
         create_task(
             client,
             auth_headers,
             title="Junior soon",
             assignee_id=junior["id"],
-            due_date=(date.today() + timedelta(days=3)).isoformat(),
+            due_date=(clock.today() + timedelta(days=3)).isoformat(),
         )
 
         response = client.get("/api/v1/tasks/workload", headers=auth_headers)

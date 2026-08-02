@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core import clock
 from app.core.periods import add_months, compute_due_date, periods_for_frequency
 from app.models.client import Client
 from app.models.compliance import ComplianceItem, ComplianceType
@@ -39,7 +40,7 @@ class GenerationResult:
 
 def default_window(client: Client, today: date | None = None) -> tuple[date, date]:
     """The date range to generate for: from onboarding (or today) forward."""
-    today = today or date.today()
+    today = today or clock.today()
     start = max(client.onboarded_on, add_months(today, -3))
     end = add_months(today, settings.compliance_generation_months)
     return start, end
@@ -95,7 +96,7 @@ def generate_compliance_items(
     already-generated lookup cannot see — and a second run inside the same
     transaction would then create every filing a second time.
     """
-    today = today or date.today()
+    today = today or clock.today()
     default_start, default_end = default_window(client, today)
     start = window_start or default_start
     end = window_end or default_end

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession, Manager
 from app.config import settings
+from app.core import clock
 from app.core.periods import fiscal_year_start
 from app.models.base import InvoiceStatus
 from app.models.client import Client
@@ -51,7 +52,7 @@ def serialise(invoice: Invoice, today: date | None = None) -> InvoiceOut:
     *Cancelled* pill. It is the same pair ``refresh_status`` refuses to derive
     a status for, for the same reason: neither state follows from money.
     """
-    today = today or date.today()
+    today = today or clock.today()
     out = InvoiceOut.model_validate(invoice)
     out.client_name = invoice.client.name if invoice.client else None
     if (
@@ -139,7 +140,7 @@ def revenue(
     to_date: date | None = Query(default=None),
 ):
     """Invoiced / collected / outstanding, defaulting to the current FY."""
-    today = date.today()
+    today = clock.today()
     fy_start_year = fiscal_year_start(today)
     start = from_date or date(fy_start_year, 4, 1)
     end = to_date or date(fy_start_year + 1, 3, 31)
@@ -210,7 +211,7 @@ def create_invoice(payload: InvoiceCreate, practitioner: Manager, db: DbSession)
     if client is None or client.firm_id != practitioner.firm_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
 
-    issue_date = payload.issue_date or date.today()
+    issue_date = payload.issue_date or clock.today()
 
     def build(invoice_number: str) -> Invoice:
         invoice = Invoice(

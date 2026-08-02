@@ -25,6 +25,7 @@ from app.api.routes.documents import (
     serialise_checklist,
 )
 from app.config import settings
+from app.core import clock
 from app.models.base import ComplianceStatus, InvoiceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
@@ -349,7 +350,7 @@ def _shared_document(document: Document) -> SharedDocumentOut:
 )
 def portal_overview(client: PortalClient, db: DbSession):
     """Everything the client sees on landing: filings, checklists, documents."""
-    today = date.today()
+    today = clock.today()
     firm = db.get(Firm, client.firm_id)
     items = _portal_items(db, client, today)
     checklists = document_service.checklists_for_items(db, items)

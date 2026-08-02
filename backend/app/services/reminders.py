@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core import clock
 from app.models.base import ReminderChannel, ReminderStatus, ReminderType
 from app.models.client import Client
 from app.models.reminder import Reminder
@@ -31,13 +32,12 @@ from app.services.ai import DraftingBudget, draft_client_message
 
 # Reminders go out at 09:00 IST on their offset day.
 REMINDER_HOUR_IST = 9
-IST_OFFSET = timedelta(hours=5, minutes=30)
+IST_OFFSET = clock.IST_OFFSET
 
 
 def ist_morning(day: date) -> datetime:
     """09:00 IST on ``day``, as an aware UTC datetime."""
-    naive_ist = datetime.combine(day, time(hour=REMINDER_HOUR_IST))
-    return (naive_ist - IST_OFFSET).replace(tzinfo=UTC)
+    return datetime.combine(day, time(hour=REMINDER_HOUR_IST), tzinfo=clock.IST).astimezone(UTC)
 
 
 def preferred_channel(client: Client) -> ReminderChannel:
@@ -112,7 +112,7 @@ def queue_document_reminders(
     when the caller supplies none, so that reaching this directly cannot leave
     the drafting unbounded by accident.
     """
-    run_date = today or date.today()
+    run_date = today or clock.today()
     offsets = offsets if offsets is not None else settings.document_reminder_offsets
     budget = budget if budget is not None else DraftingBudget()
     if not offsets:
@@ -208,7 +208,7 @@ def queue_payment_reminders(
     ``budget`` bounds the model-drafted wording across the sweep, for the same
     reason it does above.
     """
-    run_date = today or date.today()
+    run_date = today or clock.today()
     offsets = offsets if offsets is not None else settings.payment_reminder_offsets
     budget = budget if budget is not None else DraftingBudget()
     if not offsets:

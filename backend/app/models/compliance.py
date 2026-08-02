@@ -19,6 +19,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core import clock
 from app.database import Base
 from app.models.base import (
     ComplianceCategory,
@@ -152,7 +153,7 @@ class ComplianceItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     def derive_display_status(self, today: date | None = None) -> str:
         """Colour-coded state used by the calendar UI."""
-        today = today or date.today()
+        today = today or clock.today()
         if self.status in (ComplianceStatus.FILED, ComplianceStatus.DELAYED_FILED):
             return "filed"
         if self.status == ComplianceStatus.NOT_APPLICABLE:
@@ -165,4 +166,4 @@ class ComplianceItem(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         return "upcoming"
 
     def days_until_due(self, today: date | None = None) -> int:
-        return (self.due_date - (today or date.today())).days
+        return (self.due_date - (today or clock.today())).days

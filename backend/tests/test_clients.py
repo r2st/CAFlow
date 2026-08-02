@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core import clock
 from app.core.periods import add_months
 from app.models.base import (
     ComplianceCategory,
@@ -1236,7 +1237,7 @@ class TestTakingAClientBackOn:
 
         # Drop the far end of the calendar, standing in for periods that had
         # not been generated yet when they left.
-        horizon = add_months(date.today(), settings.compliance_generation_months - 1)
+        horizon = add_months(clock.today(), settings.compliance_generation_months - 1)
         dropped = (
             db.query(ComplianceItem)
             .filter(

@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from app.core import clock
 from app.models.base import ReminderChannel, ReminderStatus, ReminderType
 from app.models.client import Client
 from app.models.reminder import Reminder
@@ -258,7 +259,7 @@ class TestPaymentReminders:
             "/api/v1/invoices",
             json={
                 "client_id": client_id,
-                "due_date": (date.today() - timedelta(days=7)).isoformat(),
+                "due_date": (clock.today() - timedelta(days=7)).isoformat(),
                 "lines": [
                     {"description": "GSTR-3B", "quantity": 1, "unit_price_paise": 200_000}
                 ],
@@ -314,7 +315,7 @@ class TestPaymentReminders:
             "/api/v1/invoices",
             json={
                 "client_id": client_id,
-                "due_date": (date.today() - timedelta(days=7)).isoformat(),
+                "due_date": (clock.today() - timedelta(days=7)).isoformat(),
                 "lines": [{"description": "x", "quantity": 1, "unit_price_paise": 1000}],
             },
             headers=auth_headers,
@@ -565,7 +566,7 @@ class TestWorkerTasks:
             "/api/v1/invoices",
             json={
                 "client_id": client_id,
-                "due_date": (date.today() + timedelta(days=1)).isoformat(),
+                "due_date": (clock.today() + timedelta(days=1)).isoformat(),
                 "lines": [{"description": "x", "quantity": 1, "unit_price_paise": 1000}],
             },
             headers=auth_headers,
@@ -573,7 +574,7 @@ class TestWorkerTasks:
         client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
 
         result = worker_tasks.refresh_invoice_statuses_task(
-            (date.today() + timedelta(days=5)).isoformat()
+            (clock.today() + timedelta(days=5)).isoformat()
         )
         assert result["updated"] == 1
 

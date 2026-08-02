@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.config import settings
+from app.core import clock
 from app.database import SessionLocal
 from app.models.base import (
     ComplianceStatus,
@@ -69,7 +70,7 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
     Each compliance type declares ``reminder_offsets_days`` (e.g. [10, 5, 2, 1]);
     an item due in exactly that many days gets one reminder queued, once.
     """
-    run_date = date.fromisoformat(today) if today else date.today()
+    run_date = date.fromisoformat(today) if today else clock.today()
     queued = 0
     # One blocking model call per reminder, and this task has ten minutes. See
     # DraftingBudget: past the allowance the wording comes from the template so
@@ -349,7 +350,7 @@ def _attempt_delivery(
 @celery_app.task(name="caflow.mark_overdue_clients")
 def flag_overdue_task() -> dict[str, int]:
     """Count clients with at least one overdue filing (used by the dashboard)."""
-    today = date.today()
+    today = clock.today()
     with SessionLocal() as db:
         overdue_client_ids = set(
             db.scalars(
@@ -370,7 +371,7 @@ def queue_document_reminders_task(today: str | None = None) -> dict[str, int]:
     Only fires while something is genuinely outstanding, so a client who has
     already uploaded everything hears nothing.
     """
-    run_date = date.fromisoformat(today) if today else date.today()
+    run_date = date.fromisoformat(today) if today else clock.today()
     budget = DraftingBudget()
     with SessionLocal() as db:
         queued = reminder_service.queue_document_reminders(db, today=run_date, budget=budget)
@@ -388,7 +389,7 @@ def queue_document_reminders_task(today: str | None = None) -> dict[str, int]:
 @celery_app.task(name="caflow.queue_payment_reminders")
 def queue_payment_reminders_task(today: str | None = None) -> dict[str, int]:
     """Chase unpaid invoices at each configured day past the due date."""
-    run_date = date.fromisoformat(today) if today else date.today()
+    run_date = date.fromisoformat(today) if today else clock.today()
     budget = DraftingBudget()
     with SessionLocal() as db:
         queued = reminder_service.queue_payment_reminders(db, today=run_date, budget=budget)
@@ -403,7 +404,7 @@ def queue_payment_reminders_task(today: str | None = None) -> dict[str, int]:
 @celery_app.task(name="caflow.generate_tasks")
 def generate_tasks_task(today: str | None = None, horizon_days: int = 21) -> dict[str, int]:
     """Materialise tasks for filings coming due inside the planning horizon."""
-    run_date = date.fromisoformat(today) if today else date.today()
+    run_date = date.fromisoformat(today) if today else clock.today()
     with SessionLocal() as db:
         firms = db.scalars(select(Firm).where(Firm.is_active.is_(True))).all()
         total = 0
@@ -421,7 +422,7 @@ def generate_tasks_task(today: str | None = None, horizon_days: int = 21) -> dic
 @celery_app.task(name="caflow.refresh_invoice_statuses")
 def refresh_invoice_statuses_task(today: str | None = None) -> dict[str, int]:
     """Flip sent invoices to overdue once their due date passes."""
-    run_date = date.fromisoformat(today) if today else date.today()
+    run_date = date.fromisoformat(today) if today else clock.today()
     with SessionLocal() as db:
         invoices = billing.unpaid_invoices(db, today=run_date)
         changed = 0
