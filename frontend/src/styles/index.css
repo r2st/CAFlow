@@ -286,11 +286,11 @@ label {
   color: var(--text-muted);
 }
 
-input[type='text'],
-input[type='email'],
-input[type='password'],
-input[type='date'],
-input[type='number'],
+/* Matched by exclusion, not by listing the types we style. `<input>` with no
+   type attribute is a text field, but `input[type='text']` does not match it —
+   so an enumerated list silently leaves those unstyled, which is what happened
+   to most of the text fields in the app. */
+input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='submit']):not([type='button']),
 select,
 textarea {
   width: 100%;
@@ -993,8 +993,17 @@ th.tick input, td.tick input { width: auto; margin: 0; }
   padding: 6px 9px;
   font-size: 0.88rem;
 }
-.line-table.editable td { padding: 5px 8px 5px 0; }
+.line-table.editable td { padding: 5px 8px 5px 0; vertical-align: top; }
 .line-table.editable input[type='number'] { min-width: 74px; }
+/* The description is the field people actually read, so it takes the slack;
+   the numeric columns only ever hold a few characters. */
+.line-table.editable th:first-child, .line-table.editable td:first-child { width: 45%; }
+.line-table.editable th:last-child, .line-table.editable td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+/* Below the input, not beside it — inline, this halves the description. */
+.line-flag { display: block; margin-top: 3px; }
 .line-amount { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .line-actions { align-items: center; margin-top: 12px; }

@@ -184,7 +184,7 @@ function LineRow({ line, index, onChange, onRemove, removable }) {
           placeholder="Advisory on the new TDS rates"
           maxLength={512}
         />
-        {linked && <span className="small muted">Bills a filing</span>}
+        {linked && <span className="small muted line-flag">Bills a filing</span>}
       </td>
       <td>
         <label className="visually-hidden" htmlFor={`line-sac-${index}`}>
