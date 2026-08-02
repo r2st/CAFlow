@@ -759,6 +759,56 @@ button.link:hover:not(:disabled) { background: none; text-decoration: underline;
 .doc-meta { min-width: 0; display: flex; flex-direction: column; }
 .doc-name { font-weight: 500; word-break: break-word; }
 
+/* Bills — the client's own issued invoices. Same list-not-table reasoning as
+   the filings above: it has to read on a phone. */
+
+.invoice-list { list-style: none; margin: 0; padding: 0; }
+
+.invoice-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.invoice-row:last-child { border-bottom: none; }
+
+.invoice-main { min-width: 0; }
+.invoice-name {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.invoice-amounts { text-align: right; flex-shrink: 0; }
+.invoice-total { font-weight: 600; font-size: 1.05rem; }
+
+/* Native disclosure: the breakdown is one tap away, with no JavaScript and no
+   open/closed state of our own to get wrong. */
+.invoice-lines { margin-top: 6px; }
+.invoice-lines > summary {
+  cursor: pointer;
+  width: fit-content;
+  color: var(--text-muted);
+}
+.invoice-lines > summary:hover { color: var(--text); }
+.invoice-lines ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.invoice-lines li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+}
+
+.card-footer {
+  padding: 11px 18px;
+  border-top: 1px solid var(--border);
+}
+
 /* -------------------------------------------------------------- mobile -- */
 
 /* --------------------------------------------------------- audit changes -- */
@@ -1078,6 +1128,10 @@ th.tick input, td.tick input { width: auto; margin: 0; }
   .filing-status { text-align: left; }
 
   .doc-row { flex-wrap: wrap; }
+
+  /* The amount belongs under the invoice it is for, not off to the side. */
+  .invoice-row { flex-direction: column; gap: 6px; }
+  .invoice-amounts { text-align: left; }
 
   .requirement-list li .upload-control { width: 100%; }
   .requirement-list li .upload-button { width: 100%; text-align: center; }

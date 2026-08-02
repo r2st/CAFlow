@@ -5,11 +5,15 @@ import PortalUpload from '../components/PortalUpload'
 import {
   Alert,
   EmptyState,
+  INVOICE_STATUS_LABELS,
   Loading,
+  Pill,
   StatusBadge,
   formatBytes,
   formatDate,
   formatDaysRemaining,
+  formatRupees,
+  invoiceTone,
   saveBlob,
 } from '../components/ui'
 
@@ -90,6 +94,62 @@ function DocumentRow({ doc, onDownload, downloading }) {
       >
         {downloading ? 'Preparing…' : 'Download'}
       </button>
+    </li>
+  )
+}
+
+/**
+ * One issued invoice.
+ *
+ * The lines sit in a `<details>` rather than always on screen: a client
+ * checking what they owe wants the number, and a client questioning it wants
+ * the breakdown. Native disclosure keeps both a tap away with no JavaScript
+ * and no state to get wrong.
+ */
+function InvoiceRow({ invoice }) {
+  // The server derives lateness from the due date; the stored status may be
+  // waiting on a sweep. Trust the derived flag.
+  const status =
+    invoice.is_overdue && invoice.status !== 'paid' ? 'overdue' : invoice.status
+
+  return (
+    <li className="invoice-row">
+      <div className="invoice-main">
+        <div className="invoice-name">
+          <span className="mono">{invoice.invoice_number}</span>
+          <Pill tone={invoiceTone(status)}>
+            {INVOICE_STATUS_LABELS[status] ?? status}
+          </Pill>
+        </div>
+        <div className="small muted">
+          Issued {formatDate(invoice.issue_date)}
+          {invoice.due_date ? ` · due ${formatDate(invoice.due_date)}` : ''}
+        </div>
+        {invoice.lines.length > 0 && (
+          <details className="invoice-lines">
+            <summary className="small">What this covers</summary>
+            <ul>
+              {invoice.lines.map((line, index) => (
+                <li key={`${line.description}-${index}`}>
+                  <span>
+                    {line.description}
+                    {line.quantity > 1 ? ` × ${line.quantity}` : ''}
+                  </span>
+                  <span className="mono">{formatRupees(line.amount_paise)}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+      <div className="invoice-amounts">
+        <div className="invoice-total mono">{formatRupees(invoice.total_paise)}</div>
+        <div className="small muted">
+          {invoice.balance_paise > 0
+            ? `${formatRupees(invoice.balance_paise)} outstanding`
+            : 'Paid in full'}
+        </div>
+      </div>
     </li>
   )
 }
@@ -194,6 +254,10 @@ export default function Portal() {
   const { summary } = overview
   const filings = sortFilings(overview.filings)
   const needsAttention = summary.documents_outstanding > 0
+  // A firm that does not bill through CAFlow sends no invoices, and a client
+  // of theirs should not be shown an empty bills section or a "₹0 due" tile.
+  const invoices = overview.invoices ?? []
+  const amountDue = summary.amount_due_paise ?? 0
 
   return (
     <PortalShell>
@@ -228,6 +292,13 @@ export default function Portal() {
           value={summary.documents_outstanding}
           tone={needsAttention ? 'overdue' : ''}
         />
+        {invoices.length > 0 && (
+          <PortalStat
+            label="Amount due"
+            value={formatRupees(amountDue)}
+            tone={amountDue > 0 ? 'overdue' : 'filed'}
+          />
+        )}
       </div>
 
       <section className="portal-card section">
@@ -329,6 +400,26 @@ export default function Portal() {
           </ul>
         )}
       </section>
+
+      {invoices.length > 0 && (
+        <section className="portal-card section">
+          <div className="card-header">
+            <h2>Your bills</h2>
+            {amountDue > 0 && (
+              <span className="badge overdue">{formatRupees(amountDue)} due</span>
+            )}
+          </div>
+          <ul className="invoice-list">
+            {invoices.map((invoice) => (
+              <InvoiceRow key={invoice.id} invoice={invoice} />
+            ))}
+          </ul>
+          <div className="card-footer small muted">
+            Paying or querying a bill goes through {overview.firm_name} directly — this
+            page is a record, not a payment page.
+          </div>
+        </section>
+      )}
 
       <section className="portal-card section">
         <div className="card-header">

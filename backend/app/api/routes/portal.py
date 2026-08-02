@@ -20,17 +20,20 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession, Manager, PortalClient
 from app.api.routes.documents import compliance_label, serialise_checklist
-from app.models.base import ComplianceStatus
+from app.models.base import ComplianceStatus, InvoiceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
 from app.models.document import Document
 from app.models.firm import Firm
+from app.models.invoice import Invoice
 from app.schemas.document import SharedDocumentOut
 from app.schemas.portal import (
     MagicLinkOut,
     MagicLinkRequest,
     PortalAccessOut,
     PortalFilingOut,
+    PortalInvoiceLineOut,
+    PortalInvoiceOut,
     PortalOverview,
     PortalSummary,
 )
@@ -43,6 +46,20 @@ router = APIRouter(tags=["portal"])
 # The client portal shows a year of history and everything still ahead.
 PORTAL_HISTORY_DAYS = 365
 PORTAL_HORIZON_DAYS = 365
+
+# Which invoices a client may see of their own billing.
+#
+# Deliberately a whitelist, not "everything except draft": a status added later
+# stays hidden until someone decides it should be visible, which is the safe
+# direction to be wrong in. A draft is the firm still deciding what to charge,
+# and a cancelled invoice is one the client was never meant to pay — showing
+# either would be telling them they owe money they do not.
+PORTAL_VISIBLE_INVOICE_STATUSES = (
+    InvoiceStatus.SENT,
+    InvoiceStatus.PARTIALLY_PAID,
+    InvoiceStatus.OVERDUE,
+    InvoiceStatus.PAID,
+)
 
 
 def _get_client_or_404(db: Session, firm_id: uuid.UUID, client_id: uuid.UUID) -> Client:
@@ -226,6 +243,59 @@ def _portal_items(db: Session, client: Client, today: date) -> list[ComplianceIt
     )
 
 
+def _portal_invoices(db: Session, client: Client) -> list[Invoice]:
+    """The client's issued invoices, newest first.
+
+    Scoped by ``client_id`` as well as status, so a magic link cannot reach
+    another client's billing even within the same firm.
+    """
+    return list(
+        db.scalars(
+            select(Invoice)
+            .options(selectinload(Invoice.lines))
+            .where(
+                Invoice.client_id == client.id,
+                Invoice.firm_id == client.firm_id,
+                Invoice.status.in_(PORTAL_VISIBLE_INVOICE_STATUSES),
+            )
+            .order_by(Invoice.issue_date.desc(), Invoice.invoice_number.desc())
+        ).all()
+    )
+
+
+def _portal_invoice(invoice: Invoice, today: date) -> PortalInvoiceOut:
+    """Serialise one invoice for the client.
+
+    ``is_overdue`` is derived from the due date and the balance rather than
+    read off the status. The status is only as fresh as the last sweep that
+    touched it, and a client being told a late bill is on time is the kind of
+    wrong that costs the firm money.
+    """
+    return PortalInvoiceOut(
+        id=invoice.id,
+        invoice_number=invoice.invoice_number,
+        issue_date=invoice.issue_date,
+        due_date=invoice.due_date,
+        total_paise=invoice.total_paise,
+        amount_paid_paise=invoice.amount_paid_paise,
+        balance_paise=invoice.balance_paise,
+        status=invoice.status.value,
+        is_overdue=(
+            invoice.due_date is not None
+            and invoice.due_date < today
+            and invoice.balance_paise > 0
+        ),
+        lines=[
+            PortalInvoiceLineOut(
+                description=line.description,
+                quantity=line.quantity,
+                amount_paise=line.amount_paise,
+            )
+            for line in invoice.lines
+        ],
+    )
+
+
 def _shared_document(document: Document) -> SharedDocumentOut:
     return SharedDocumentOut(
         id=document.id,
@@ -253,6 +323,10 @@ def portal_overview(client: PortalClient, db: DbSession):
     summary = PortalSummary(
         total=len(items), overdue=0, due_soon=0, upcoming=0, filed=0, documents_outstanding=0
     )
+
+    invoices = [_portal_invoice(invoice, today) for invoice in _portal_invoices(db, client)]
+    summary.amount_due_paise = sum(max(0, inv.balance_paise) for inv in invoices)
+    summary.invoices_unpaid = sum(1 for inv in invoices if inv.balance_paise > 0)
     filings: list[PortalFilingOut] = []
     outstanding_checklists = []
 
@@ -315,6 +389,7 @@ def portal_overview(client: PortalClient, db: DbSession):
             _shared_document(doc) for doc in uploads if doc.is_shared_with_client
         ],
         my_uploads=[_shared_document(doc) for doc in uploads if doc.uploaded_via_portal],
+        invoices=invoices,
     )
 
 

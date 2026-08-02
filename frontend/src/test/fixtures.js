@@ -150,6 +150,8 @@ export function portalOverview(overrides = {}) {
       upcoming: 0,
       filed: 0,
       documents_outstanding: 2,
+      amount_due_paise: 236000,
+      invoices_unpaid: 1,
     },
     filings: [
       {
@@ -220,6 +222,26 @@ export function portalOverview(overrides = {}) {
         uploaded_via_portal: true,
         compliance_label: null,
       }),
+    ],
+    invoices: [portalInvoice()],
+    ...overrides,
+  }
+}
+
+/** One issued invoice, as the client sees it on the portal. */
+export function portalInvoice(overrides = {}) {
+  return {
+    id: 'inv-1',
+    invoice_number: 'INV/FY2026-27/0007',
+    issue_date: '2026-07-15',
+    due_date: '2026-08-14',
+    total_paise: 236000,
+    amount_paid_paise: 0,
+    balance_paise: 236000,
+    status: 'sent',
+    is_overdue: false,
+    lines: [
+      { description: 'GSTR-3B filing — 2026-07', quantity: 1, amount_paise: 200000 },
     ],
     ...overrides,
   }

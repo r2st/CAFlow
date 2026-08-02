@@ -421,3 +421,178 @@ class TestPortalDownloads:
             f"/api/v1/portal/documents/{document['id']}/download", headers=portal_headers
         )
         assert response.status_code == 404
+
+
+def make_invoice(client, auth_headers, client_id, **overrides):
+    payload = {
+        "client_id": client_id,
+        "lines": [
+            {"description": "GSTR-3B filing", "quantity": 1, "unit_price_paise": 200_000}
+        ],
+    }
+    payload.update(overrides)
+    return client.post("/api/v1/invoices", json=payload, headers=auth_headers)
+
+
+def send_invoice(client, auth_headers, invoice_id):
+    return client.post(f"/api/v1/invoices/{invoice_id}/send", headers=auth_headers)
+
+
+class TestPortalBilling:
+    """What the client may see of their own billing.
+
+    A filing's fee stays hidden — it is the firm's working number. An invoice
+    the firm has *issued* is the opposite: sending it is the act of telling the
+    client what they owe, so it belongs on the portal. A draft or a cancelled
+    one does not.
+    """
+
+    def test_a_sent_invoice_reaches_the_client(
+        self, client, auth_headers, portal_headers, client_id
+    ):
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        send_invoice(client, auth_headers, invoice["id"])
+
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        assert len(body["invoices"]) == 1
+        shown = body["invoices"][0]
+        assert shown["invoice_number"] == invoice["invoice_number"]
+        # 200,000 paise plus 18% GST.
+        assert shown["total_paise"] == 236_000
+        assert shown["balance_paise"] == 236_000
+        assert body["summary"]["amount_due_paise"] == 236_000
+        assert body["summary"]["invoices_unpaid"] == 1
+
+    def test_the_client_sees_what_they_are_being_billed_for(
+        self, client, auth_headers, portal_headers, client_id
+    ):
+        """A number with no explanation is a support call, not an invoice."""
+        invoice = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[
+                {"description": "GSTR-3B filing", "quantity": 3, "unit_price_paise": 100_000},
+                {"description": "Annual return", "quantity": 1, "unit_price_paise": 500_000},
+            ],
+        ).json()
+        send_invoice(client, auth_headers, invoice["id"])
+
+        shown = client.get("/api/v1/portal/me", headers=portal_headers).json()["invoices"][0]
+
+        assert [(line["description"], line["quantity"], line["amount_paise"]) for line in shown["lines"]] == [
+            ("GSTR-3B filing", 3, 300_000),
+            ("Annual return", 1, 500_000),
+        ]
+
+    def test_a_draft_invoice_stays_with_the_firm(
+        self, client, auth_headers, portal_headers, client_id
+    ):
+        """A draft is the firm still deciding what to charge."""
+        make_invoice(client, auth_headers, client_id)
+
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        assert body["invoices"] == []
+        assert body["summary"]["amount_due_paise"] == 0
+        assert body["summary"]["invoices_unpaid"] == 0
+
+    def test_a_cancelled_invoice_disappears_from_the_portal(
+        self, client, auth_headers, portal_headers, client_id
+    ):
+        """Cancelling is how a firm tells a client to ignore a bill."""
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        send_invoice(client, auth_headers, invoice["id"])
+        assert len(client.get("/api/v1/portal/me", headers=portal_headers).json()["invoices"]) == 1
+
+        client.post(f"/api/v1/invoices/{invoice['id']}/cancel", headers=auth_headers)
+
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+        assert body["invoices"] == []
+        assert body["summary"]["amount_due_paise"] == 0
+
+    def test_a_payment_reduces_what_the_client_is_shown(
+        self, client, auth_headers, portal_headers, client_id
+    ):
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        send_invoice(client, auth_headers, invoice["id"])
+        client.post(
+            f"/api/v1/invoices/{invoice['id']}/payments",
+            json={"amount_paise": 36_000},
+            headers=auth_headers,
+        )
+
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        shown = body["invoices"][0]
+        assert shown["amount_paid_paise"] == 36_000
+        assert shown["balance_paise"] == 200_000
+        assert body["summary"]["amount_due_paise"] == 200_000
+
+    def test_a_settled_invoice_is_still_shown_but_owes_nothing(
+        self, client, auth_headers, portal_headers, client_id
+    ):
+        """A paid invoice is the client's receipt, so it stays visible."""
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        send_invoice(client, auth_headers, invoice["id"])
+        client.post(
+            f"/api/v1/invoices/{invoice['id']}/payments",
+            json={"amount_paise": 236_000},
+            headers=auth_headers,
+        )
+
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        assert body["invoices"][0]["status"] == "paid"
+        assert body["invoices"][0]["balance_paise"] == 0
+        assert body["summary"]["amount_due_paise"] == 0
+        assert body["summary"]["invoices_unpaid"] == 0
+
+    def test_a_late_invoice_reads_as_overdue_without_waiting_for_a_sweep(
+        self, client, auth_headers, portal_headers, client_id, db
+    ):
+        """The status is only as fresh as the last sweep; the due date is not."""
+        from app.models.invoice import Invoice
+
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        send_invoice(client, auth_headers, invoice["id"])
+
+        row = db.get(Invoice, uuid.UUID(invoice["id"]))
+        row.due_date = datetime.now(UTC).date() - timedelta(days=3)
+        db.commit()
+
+        shown = client.get("/api/v1/portal/me", headers=portal_headers).json()["invoices"][0]
+
+        assert shown["is_overdue"] is True
+
+    def test_another_clients_invoice_is_never_visible(
+        self, client, auth_headers, portal_headers
+    ):
+        """The magic link is scoped to one client, billing included."""
+        other = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(
+                name="Other Ltd", pan="AAACO1234K", gstin=None, gst_registered=False
+            ),
+            headers=auth_headers,
+        ).json()["client"]
+        theirs = make_invoice(client, auth_headers, other["id"]).json()
+        send_invoice(client, auth_headers, theirs["id"])
+
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        assert body["invoices"] == []
+        assert body["summary"]["amount_due_paise"] == 0
+
+    def test_no_internal_fee_leaks_alongside_the_invoice(
+        self, client, auth_headers, portal_headers, client_id
+    ):
+        """The portal gained billing; it must not have gained the fee field."""
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        send_invoice(client, auth_headers, invoice["id"])
+
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        assert all("fee_paise" not in filing for filing in body["filings"])
+        assert all("notes" not in shown for shown in body["invoices"])

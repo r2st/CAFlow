@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import api, { ApiError, getPortalToken, setPortalToken } from '../api/client'
 import PortalAccessCard from '../components/PortalAccessCard'
 import Portal from '../pages/Portal'
-import { portalOverview, sharedDocument } from './fixtures'
+import { portalInvoice, portalOverview, sharedDocument } from './fixtures'
 
 function renderPortal(route = '/portal') {
   return render(
@@ -163,6 +163,91 @@ describe('Portal landing', () => {
     renderPortal('/portal')
 
     expect(await screen.findByText('Something went wrong on our end')).toBeInTheDocument()
+  })
+})
+
+describe('Portal billing', () => {
+  it('shows what the client owes, and what the bill covers', async () => {
+    vi.spyOn(api, 'portalOverview').mockResolvedValue(portalOverview())
+
+    renderPortal('/portal?token=magic-token-123')
+
+    await screen.findByText('Nimbus Textiles Pvt Ltd')
+    const bills = screen.getByRole('heading', { name: 'Your bills' }).closest('section')
+
+    expect(within(bills).getByText('INV/FY2026-27/0007')).toBeInTheDocument()
+    expect(within(bills).getByText('Sent')).toBeInTheDocument()
+    expect(within(bills).getByText('₹2,360')).toBeInTheDocument()
+    // The card header carries the total across bills; the row carries this one.
+    expect(within(bills).getByText('₹2,360 due')).toBeInTheDocument()
+    expect(within(bills).getByText('₹2,360 outstanding')).toBeInTheDocument()
+
+    // The breakdown is behind a disclosure, but it is in the document.
+    expect(within(bills).getByText('GSTR-3B filing — 2026-07')).toBeInTheDocument()
+  })
+
+  it('puts the amount due in the summary tiles', async () => {
+    vi.spyOn(api, 'portalOverview').mockResolvedValue(portalOverview())
+
+    renderPortal('/portal?token=magic-token-123')
+
+    await screen.findByText('Nimbus Textiles Pvt Ltd')
+    expect(screen.getByText('Amount due')).toBeInTheDocument()
+  })
+
+  it('reads a late bill as overdue even when the stored status has not caught up', async () => {
+    vi.spyOn(api, 'portalOverview').mockResolvedValue(
+      portalOverview({
+        invoices: [portalInvoice({ status: 'sent', is_overdue: true })],
+      }),
+    )
+
+    renderPortal('/portal?token=magic-token-123')
+
+    await screen.findByText('Nimbus Textiles Pvt Ltd')
+    const bills = screen.getByRole('heading', { name: 'Your bills' }).closest('section')
+    expect(within(bills).getByText('Overdue')).toBeInTheDocument()
+    expect(within(bills).queryByText('Sent')).not.toBeInTheDocument()
+  })
+
+  it('says a settled bill is paid rather than showing a zero balance', async () => {
+    vi.spyOn(api, 'portalOverview').mockResolvedValue(
+      portalOverview({
+        summary: { ...portalOverview().summary, amount_due_paise: 0, invoices_unpaid: 0 },
+        invoices: [
+          portalInvoice({ status: 'paid', amount_paid_paise: 236000, balance_paise: 0 }),
+        ],
+      }),
+    )
+
+    renderPortal('/portal?token=magic-token-123')
+
+    await screen.findByText('Nimbus Textiles Pvt Ltd')
+    const bills = screen.getByRole('heading', { name: 'Your bills' }).closest('section')
+    expect(within(bills).getByText('Paid in full')).toBeInTheDocument()
+    expect(within(bills).queryByText(/outstanding/)).not.toBeInTheDocument()
+  })
+
+  it('hides the bills section for a firm that does not invoice through CAFlow', async () => {
+    vi.spyOn(api, 'portalOverview').mockResolvedValue(portalOverview({ invoices: [] }))
+
+    renderPortal('/portal?token=magic-token-123')
+
+    await screen.findByText('Nimbus Textiles Pvt Ltd')
+    // An empty "Your bills" card would read as a system the firm forgot to use.
+    expect(screen.queryByRole('heading', { name: 'Your bills' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Amount due')).not.toBeInTheDocument()
+  })
+
+  it('survives a payload from an API that predates portal billing', async () => {
+    const { invoices, ...withoutInvoices } = portalOverview()
+    void invoices
+    vi.spyOn(api, 'portalOverview').mockResolvedValue(withoutInvoices)
+
+    renderPortal('/portal?token=magic-token-123')
+
+    await screen.findByText('Nimbus Textiles Pvt Ltd')
+    expect(screen.queryByRole('heading', { name: 'Your bills' })).not.toBeInTheDocument()
   })
 })
 
