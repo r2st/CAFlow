@@ -6,6 +6,7 @@ import uuid
 from datetime import date, timedelta
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core import clock
@@ -621,6 +622,91 @@ class TestGeneration:
             headers=auth_headers,
         )
         assert response.status_code == 404
+
+
+class TestTwoGenerateRunsAtOnce:
+    """Generation is a read, a decision and a write, and something fits between.
+
+    Two practitioners pressing *Generate invoices* at the end of a month both
+    read the same filed-but-unbilled filings. Numbering held the firm's row,
+    but only from inside the insert — by then the decision had already been
+    taken from a plain SELECT that nothing ordered. Marking a filing billed is
+    not a claim the loser has to win: ``is_billed`` is already true and setting
+    it again succeeds silently, so both runs completed and the client received
+    two invoices for one piece of work.
+    """
+
+    def test_the_firm_is_held_before_the_billable_work_is_read(
+        self, db, firm_id, monkeypatch
+    ):
+        """Ordering is the whole fix, so ordering is what is asserted.
+
+        A lock taken after the read orders the writes and nothing else, which
+        is exactly the state this replaced.
+        """
+        order = []
+        monkeypatch.setattr(firms, "lock_firm", lambda session, fid: order.append("lock"))
+        real_unbilled = billing.unbilled_items
+        monkeypatch.setattr(
+            billing,
+            "unbilled_items",
+            lambda *a, **kw: (order.append("read"), real_unbilled(*a, **kw))[1],
+        )
+
+        billing.generate_invoices_for_firm(db, uuid.UUID(firm_id))
+        assert order[:2] == ["lock", "read"]
+
+    def test_work_billed_while_we_waited_is_not_billed_again(
+        self, client, auth_headers, db, firm_id, client_id
+    ):
+        """The interleaving itself, in the order it happens.
+
+        The competing run is staged on the lock: it commits from a second
+        connection at the moment this one takes the firm's row, which is the
+        instant a real loser resumes at. Everything after that is the ordinary
+        code path deciding what is left to bill.
+        """
+        file_everything(client, auth_headers)
+        db.rollback()  # SQLite will not let another connection write past a held read
+
+        from app.database import SessionLocal
+
+        fired = []
+
+        def winner_commits_first(session, fid):
+            if fired:
+                return
+            fired.append(fid)
+            other = SessionLocal()
+            try:
+                billing.generate_invoices_for_firm(other, uuid.UUID(firm_id))
+                other.commit()
+            finally:
+                other.close()
+
+        import unittest.mock as _mock
+
+        with _mock.patch.object(firms, "lock_firm", winner_commits_first):
+            billing.generate_invoices_for_firm(db, uuid.UUID(firm_id))
+            db.commit()
+
+        assert fired, "the competing run never happened"
+
+        # Every filing is cited by exactly one live invoice, whichever run
+        # raised it. Two lines against one filing is the client paying twice.
+        rows = db.execute(
+            select(InvoiceLine.compliance_item_id, func.count(InvoiceLine.id))
+            .join(Invoice, Invoice.id == InvoiceLine.invoice_id)
+            .where(
+                Invoice.firm_id == uuid.UUID(firm_id),
+                Invoice.status != InvoiceStatus.CANCELLED,
+                InvoiceLine.compliance_item_id.is_not(None),
+            )
+            .group_by(InvoiceLine.compliance_item_id)
+        ).all()
+        assert rows, "nothing was billed at all"
+        duplicated = [str(item_id) for item_id, count in rows if count > 1]
+        assert not duplicated, f"filings billed twice: {duplicated}"
 
 
 class TestInvoiceLifecycle:

@@ -345,7 +345,26 @@ def generate_invoices_for_firm(
     client_id: uuid.UUID | None = None,
     issue_date: date | None = None,
 ) -> list[Invoice]:
-    """One draft invoice per client with outstanding billable work."""
+    """One draft invoice per client with outstanding billable work.
+
+    The firm's row is held before the work is read, not merely before each
+    invoice is inserted. ``insert_numbered`` takes the same lock, but by the
+    time it runs the decision has already been made — from a plain ``SELECT``
+    that nothing ordered.
+
+    Two practitioners both pressing *Generate invoices* at the end of a month
+    is not a contrived race; it is Tuesday. Both read the same filed-but-
+    unbilled filings, then queue up on the lock one after the other, and each
+    raises a full set of invoices for them. Marking a filing billed is not a
+    claim the second one has to win — ``is_billed`` is already true and setting
+    it again succeeds — so the client receives two invoices for the same work,
+    which is the revenue-leakage problem this module exists to solve, inverted
+    into the more expensive direction.
+
+    Held for the rest of the transaction, so the read, the decision and the
+    ``is_billed`` writes are one step as far as any other request is concerned.
+    """
+    firms.lock_firm(db, firm_id)
     work = group_billable(unbilled_items(db, firm_id, client_id=client_id))
     return [
         build_invoice(
