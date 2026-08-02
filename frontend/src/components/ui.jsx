@@ -90,16 +90,20 @@ export function statusLabel(status) {
  *   client was chased for disagreed with the screen the practitioner read it
  *   from.
  *
- * Whole amounts keep their clean form: `minimumFractionDigits: 0` leaves
- * ₹25,000 as ₹25,000 rather than padding every dashboard tile with ".00".
+ * Whole amounts keep their clean form — ₹25,000, not ₹25,000.00, so a
+ * dashboard of round figures is not padded with zeroes that say nothing. An
+ * amount carrying paise shows both digits, because half a rupee is written
+ * ₹555.50 and not ₹555.5. Hence the digit count per amount rather than a
+ * 0-to-2 range, which would render the second form.
  */
 export function formatRupees(paise) {
   if (paise === null || paise === undefined) return '—'
+  const digits = paise % 100 === 0 ? 0 : 2
   return new Intl.NumberFormat('en-IN', {
     style: 'currency',
     currency: 'INR',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
   }).format(paise / 100)
 }
 

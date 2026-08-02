@@ -34,8 +34,13 @@ describe('formatters', () => {
   it('does not round a balance under a rupee up to one', () => {
     // 98 paise left on an invoice is not "₹1 outstanding".
     expect(formatRupees(98)).toBe('₹0.98')
-    expect(formatRupees(50)).toBe('₹0.5')
     expect(formatRupees(1)).toBe('₹0.01')
+  })
+
+  it('writes half a rupee with both digits', () => {
+    // ₹555.50, the way money is written — not ₹555.5.
+    expect(formatRupees(55_550)).toBe('₹555.50')
+    expect(formatRupees(50)).toBe('₹0.50')
   })
 
   it('keeps an invoice footing when its lines are not whole rupees', () => {
@@ -43,7 +48,7 @@ describe('formatters', () => {
     // ₹556 and ₹556 against a ₹1,111 subtotal — visibly wrong arithmetic on a
     // bill the client is being asked to pay.
     const line = 55_550
-    expect(formatRupees(line)).toBe('₹555.5')
+    expect(formatRupees(line)).toBe('₹555.50')
     expect(formatRupees(line * 2)).toBe('₹1,111')
   })
 
