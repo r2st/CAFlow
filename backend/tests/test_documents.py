@@ -226,6 +226,54 @@ class TestChecklist:
         )
         assert "bank_statement" not in response.json()["checklist"]["missing"]
 
+    def test_a_corrected_category_does_not_lose_the_row_that_was_answered(
+        self, client, auth_headers, client_id
+    ):
+        """Answering a row and fixing the category are two separate statements.
+
+        The requirement used to be recorded from the requirement key alone,
+        before the category was settled: any key that happened to name a
+        category was left to the category to cover. So an uploader who did both
+        — attached a file against the "sales invoices" row and corrected its
+        category to bank statement — answered neither row that the file was
+        filed against, the filing stayed on the chase list, and the client went
+        on being emailed for paperwork the firm was already holding.
+        """
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        response = upload(
+            client,
+            auth_headers,
+            client_id=client_id,
+            filename="ledger.pdf",
+            compliance_item_id=item["id"],
+            requirement="sales_invoice",
+            category="bank_statement",
+        )
+        document = response.json()["document"]
+        assert document["category"] == "bank_statement"
+        assert document["satisfies_requirements"] == ["sales_invoice"]
+
+        missing = response.json()["checklist"]["missing"]
+        assert "sales_invoice" not in missing
+        assert "bank_statement" not in missing
+
+    def test_a_category_that_already_answers_the_row_is_not_recorded_twice(
+        self, client, auth_headers, client_id
+    ):
+        """The marker exists for rows a category cannot cover, and only those."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        response = upload(
+            client,
+            auth_headers,
+            client_id=client_id,
+            compliance_item_id=item["id"],
+            requirement="bank_statement",
+            category="bank_statement",
+        )
+        document = response.json()["document"]
+        assert document["satisfies_requirements"] == []
+        assert "bank_statement" not in response.json()["checklist"]["missing"]
+
     def test_completing_every_requirement_marks_the_checklist_complete(
         self, client, auth_headers, client_id
     ):

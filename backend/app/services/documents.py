@@ -219,9 +219,7 @@ def ingest_upload(
         checksum_sha256=stored.checksum_sha256,
         uploaded_via_portal=via_portal,
         is_shared_with_client=share_with_client,
-        satisfies_requirements=(
-            [requirement] if requirement and not is_category_requirement(requirement) else []
-        ),
+        satisfies_requirements=[],
     )
 
     if category is not None:
@@ -240,6 +238,21 @@ def ingest_upload(
         document.category = result.category
         document.category_confidence = result.confidence
         document.extracted_data = result.extracted
+
+    # Recorded once the category is settled, and only when the category does
+    # not already answer the row. A checklist requirement is satisfied either
+    # by a matching category or by an explicit mention here, so writing the key
+    # a category already covers would be a second copy of the same fact.
+    #
+    # Settled, not assumed: this used to be decided before the category was,
+    # from the requirement alone, so any requirement that happened to name a
+    # category was left to the category to cover — and an uploader who both
+    # answered a row and corrected the category answered nothing. Attaching a
+    # bank statement against the "sales invoices" row of a GSTR-3B left that
+    # row outstanding, so the filing stayed on the chase list and the client
+    # went on being emailed for paperwork the firm was already holding.
+    if requirement and (document.category is None or document.category.value != requirement):
+        document.satisfies_requirements = [requirement]
 
     if not document.extracted_data:
         # PAN/GSTIN/TAN are worth pulling out even when the category was given.
