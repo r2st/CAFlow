@@ -19,6 +19,8 @@
 #   UNITS                  systemd units that must be active
 #   BACKUP_DIR             where caflow-backup writes
 #   MAX_BACKUP_AGE_HOURS   older than this and the nightly backup has stopped
+#   RESTORE_STATE_FILE     where caflow-restore-check records a passing drill
+#   MAX_RESTORE_AGE_DAYS   older than this and the weekly restore drill has stopped (0 disables)
 #   MIN_FREE_MB            free space below which everything starts failing at once
 #   FAILURES_BEFORE_ALERT  consecutive failing runs before anyone is told
 #   ALERT_REPEAT_HOURS     re-say it this often while it is still broken
@@ -34,6 +36,11 @@ PUBLIC_URL="${PUBLIC_URL:-https://caflow.aiknol.com/health}"
 UNITS="${UNITS:-caflow-api caflow-web caflow-worker caflow-beat}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/caflow}"
 MAX_BACKUP_AGE_HOURS="${MAX_BACKUP_AGE_HOURS:-36}"
+RESTORE_STATE_FILE="${RESTORE_STATE_FILE:-/var/lib/caflow/restore-check.state}"
+# Ten days: the drill is weekly, so this tolerates one missed run and a
+# generous randomised delay, and complains on the second. 0 turns the check off
+# for a box that has deliberately not installed the drill.
+MAX_RESTORE_AGE_DAYS="${MAX_RESTORE_AGE_DAYS:-10}"
 MIN_FREE_MB="${MIN_FREE_MB:-2048}"
 FAILURES_BEFORE_ALERT="${FAILURES_BEFORE_ALERT:-2}"
 ALERT_REPEAT_HOURS="${ALERT_REPEAT_HOURS:-6}"
@@ -95,6 +102,21 @@ if [ -d "$BACKUP_DIR" ]; then
     || note "backup no database dump in $BACKUP_DIR newer than ${MAX_BACKUP_AGE_HOURS}h — the nightly backup has stopped"
 else
   note "backup $BACKUP_DIR does not exist — no backup has ever run here"
+fi
+
+# A backup nobody has ever restored is a belief, not a backup. caflow-restore-check
+# writes its state file only when a drill passed, so the file's age is the age
+# of the last time anyone actually knew the firm could be brought back — and
+# that is the number worth watching, because a drill failing every Sunday and a
+# drill not running at all look identical from anywhere else.
+if [ "$MAX_RESTORE_AGE_DAYS" -gt 0 ] 2>/dev/null; then
+  if [ -f "$RESTORE_STATE_FILE" ]; then
+    fresh=$(find "$RESTORE_STATE_FILE" -mmin "-$((MAX_RESTORE_AGE_DAYS * 1440))" -print 2>/dev/null)
+    [ -n "$fresh" ] \
+      || note "restore no successful restore drill in ${MAX_RESTORE_AGE_DAYS} days — the backups have not been proven restorable"
+  else
+    note "restore no restore drill has ever passed on this box — caflow-restore-check is not installed or has never succeeded"
+  fi
 fi
 
 # Shared hardware with seven other applications, and this one writes dumps to

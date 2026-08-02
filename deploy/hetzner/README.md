@@ -215,20 +215,124 @@ then restarts everything and polls `/health/ready` until it answers. `.env`,
 `.venv/`, `var/` (uploaded documents) and the beat schedule are excluded from
 the rsync, which is also what protects them from `--delete`.
 
-To roll back, check out the previous commit and deploy again — but a migration
-is not undone by deploying the code that predates it. Take a dump first if the
-schema moved:
+Before it syncs, the deploy snapshots what is about to be overwritten, and if
+the migration check finds the schema is about to move it dumps the database
+into that snapshot's directory first. A deploy that fails its health check
+prints the rollback command rather than running it — a deploy can fail for a
+reason a rollback makes worse, so the choice stays with whoever is reading.
+
+## Rolling back
 
 ```bash
-sudo -u postgres pg_dump -Fc caflow > /var/backups/caflow-$(date +%F).dump
+./deploy/hetzner/rollback.sh --list          # what is available
+./deploy/hetzner/rollback.sh                 # the state before the last deploy
+./deploy/hetzner/rollback.sh 20260802T171500Z  # a specific snapshot
 ```
+
+A snapshot is a hardlink copy of `/opt/CAFlow` taken before each deploy, so it
+costs inodes and no data; the newest five are kept. `.env`, `.venv/` and
+`backend/var/` (uploaded client documents) are excluded in both directions —
+restoring a fortnight-old documents directory over the live one is a worse
+outage than whatever prompted the rollback.
+
+**The database is not rolled back.** The snapshot records the Alembic revision
+that was live, and the restore compares it against what the database is
+actually on. When they differ it says so and exits 3: the code is back, the
+schema is not. `alembic downgrade` drops the columns the migration added, and
+the rows written into them since are not coming back, so the command is printed
+rather than run. The `pre-migration.dump` left in the release directory is the
+other way out, and it is the one that keeps those rows.
+
+## Backups
+
+```bash
+install -m 0755 deploy/hetzner/caflow-backup.sh /usr/local/bin/caflow-backup
+install -m 0644 deploy/hetzner/caflow-backup.{service,timer} /etc/systemd/system/
+install -d -m 0700 /etc/caflow && install -m 0600 /dev/null /etc/caflow/backup.env
+systemctl daemon-reload && systemctl enable --now caflow-backup.timer
+```
+
+Nightly at 02:15 IST: a custom-format dump of the database and a tarball of the
+uploaded documents, which are the two things a deploy cannot rebuild. Both are
+written to `.part` and renamed only after being read back — an exit status says
+the command ran, not what landed in the file, and a truncated dump is otherwise
+discovered on the day it is needed. Fourteen days are kept locally.
+
+Set `OFFSITE_DEST=user@host:/path` in `/etc/caflow/backup.env` to get a copy off
+the box, verified by sha256 on the far end and kept for thirty days. Until that
+is set, every run says out loud that the only copy of the night's backup is on
+the same disk as the database it came from. `/etc/caflow/backup.env` rather than
+`/opt/CAFlow/.env`: that file belongs to the `caflow` user and is read by four
+services with no business knowing where the backups go.
+
+Note the file one directory up, `deploy/caflow-backup.sh`, is the *Compose*
+variant — it shells into `docker compose exec postgres` and does not work here.
+
+## Restore drills
+
+```bash
+install -m 0755 deploy/hetzner/caflow-restore-check.sh /usr/local/bin/caflow-restore-check
+install -m 0644 deploy/hetzner/caflow-restore-check.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now caflow-restore-check.timer
+```
+
+Weekly, Sunday 03:30 IST: the newest dump is restored into a scratch database,
+checked, and dropped again. `systemctl start caflow-restore-check` is the thing
+to run by hand before trusting the backups with something.
+
+The nightly verification stops at the archive's table of contents, which proves
+the file is not truncated and nothing else. It does not restore a single row —
+so an archive with an intact TOC and an empty data section passes it every
+night for a year. The drill catches that, and three others a valid archive
+cannot show you: a dump of the wrong cluster, a schema that no longer matches
+the deployed code, and a documents tarball that unpacks perfectly while missing
+a fortnight of uploads.
+
+What it checks, once restored: every core table is present, the seeded
+compliance types are there (a firm can legitimately have no clients on its
+first day, but no database has ever had no compliance types), the client count
+is in the same league as the live one, and the documents archive holds roughly
+what is on disk. A dump whose Alembic revision trails the deployed code is
+reported, not failed — that is normal for a night-old dump, and the point is to
+know beforehand that a restore from it needs `alembic upgrade head` afterwards.
+
+The scratch database is dropped on the failures as well as the passes, by the
+script's own trap and again by `ExecStopPost` for the ways a process does not
+reach one. `KEEP_SCRATCH=1` is the deliberate exception. `caflow-monitor` reads
+the drill's state file and alerts when no drill has passed in ten days, which
+covers both a drill that started failing and one that stopped running.
+
+## Monitoring
+
+```bash
+install -m 0755 deploy/hetzner/caflow-monitor.sh /usr/local/bin/caflow-monitor
+install -m 0644 deploy/hetzner/caflow-monitor.{service,timer} /etc/systemd/system/
+install -d -m 0700 /etc/caflow && install -m 0600 /dev/null /etc/caflow/monitor.env
+systemctl daemon-reload && systemctl enable --now caflow-monitor.timer
+```
+
+Every five minutes: the readiness probe, the public URL through Caddy, the four
+systemd units, the age of the newest backup, the age of the last passing restore
+drill, and free disk space. The last four are the ones worth having — a dead
+worker serves every page perfectly and sends no reminders, and a backup timer
+that stopped a fortnight ago looks exactly like one that has been working.
+`MAX_RESTORE_AGE_DAYS=0` turns off the drill check on a box that has
+deliberately not installed it.
+
+Alerts go to the journal always, and to `ALERT_WEBHOOK` and/or `ALERT_EMAIL_TO`
+(via SendGrid) when set in `/etc/caflow/monitor.env`. Two consecutive failures
+are required before anyone is told, so a deploy's restart does not page; the
+same outage is then re-said every six hours, and an outage that grows a second
+cause is said again.
 
 ## What this deployment is not
 
-Single host, no registry, no orchestrator, **no backups configured**. The
-`caflow-backup.{sh,service,timer}` files one directory up are written against
-the Compose deployment (they shell into `docker compose exec postgres`) and do
-**not** work here as-is; adapting them to `sudo -u postgres pg_dump` and a
-tarball of `/opt/CAFlow/backend/var/documents` is the outstanding work before
-this holds a real firm's records. There is also no zero-downtime story: a
-deploy drops requests for the second or two the API takes to come back.
+Single host, no registry, no orchestrator. There is no zero-downtime story: a
+deploy drops requests for the second or two the API takes to come back. The
+offsite backup target has to be a machine someone else owns to be worth much,
+and pointing `OFFSITE_DEST` at one is the step this box still needs.
+
+The restore drill proves the archives restore; it does not rehearse the actual
+recovery, which is a new box, a fresh install, and someone finding out under
+pressure how long that takes. Nobody has timed that here, so the honest answer
+to "how long to bring the firm back up" is still a guess.

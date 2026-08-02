@@ -1,0 +1,55 @@
+# One restore drill. Started by caflow-restore-check.timer, though
+# `systemctl start caflow-restore-check` is exactly what to run before trusting
+# the backups with something — a migration, a hardware move, a bad morning.
+#
+#   install -m 0755 deploy/hetzner/caflow-restore-check.sh /usr/local/bin/caflow-restore-check
+#   install -m 0644 deploy/hetzner/caflow-restore-check.{service,timer} /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now caflow-restore-check.timer
+#
+# Root, for the same reason caflow-backup is: the restore goes through
+# `sudo -u postgres`, and the dumps it reads are mode 0600 in a root-owned
+# directory. That the four application services stay unprivileged is the point
+# of the split; this file is not an argument against it.
+
+[Unit]
+Description=CAFlow — restore last night's backup into a scratch database and check it
+Documentation=https://github.com/r2st/CAFlow
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Nothing to drill without the checkout: the revision check reads Alembic from
+# it, and its absence means this box is not running CAFlow any more.
+ConditionPathExists=/opt/CAFlow
+
+[Service]
+Type=oneshot
+# Shares backup.env with caflow-backup, because the two files answer to the
+# same settings — BACKUP_DIR above all, which has to be the directory the
+# drill reads and the one the backup writes or the drill is checking nothing.
+EnvironmentFile=-/etc/caflow/backup.env
+Environment=BACKUP_DIR=/var/backups/caflow
+Environment=APP_DIR=/opt/CAFlow
+Environment=SCRATCH_DB=caflow_restore_check
+# Remembers when the drill last passed; caflow-monitor reads its age.
+StateDirectory=caflow
+Environment=STATE_FILE=/var/lib/caflow/restore-check.state
+ExecStart=/usr/local/bin/caflow-restore-check
+# A full restore of a growing database on a box with 4 GB of RAM shared eight
+# ways. Generous now, and the ceiling that matters is the disk rather than the
+# clock — but a drill that hangs must not still be holding a scratch copy of
+# the firm's data when next week's fires.
+TimeoutStartSec=3600
+
+# The scratch database is dropped by the script's own EXIT trap. This is what
+# covers the ways a process does not reach its trap — SIGKILL, the timeout
+# above, the OOM killer, which on this box is a real possibility during a
+# restore. Without it, the failure mode is a full-size copy of a CA firm's
+# client records sitting in the cluster until someone notices the disk.
+ExecStopPost=/bin/sh -c 'sudo -u postgres dropdb --if-exists caflow_restore_check || true'
+
+# The restore writes a second copy of the most sensitive data on this box.
+# Nothing but root reads anything this run creates.
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=caflow-restore-check

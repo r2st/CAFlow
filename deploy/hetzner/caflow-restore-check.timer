@@ -1,0 +1,29 @@
+# Weekly, Sunday at 03:30 India time.
+#
+# Weekly rather than nightly because of what it costs and what it catches. The
+# cost is a full second copy of the database restored onto a 38 GB disk shared
+# with seven other applications; the catch is a class of failure — a data
+# section that does not restore, a dump of the wrong cluster, a schema drifting
+# from the code — that takes weeks to appear and does not appear any faster for
+# being looked at every night.
+#
+# Sunday 03:30 IST is after the nightly backup at 02:15 has finished and its
+# offsite copy has gone, so the drill reads the archive the timer just wrote,
+# on the quietest night of a CA firm's week.
+
+[Unit]
+Description=CAFlow — weekly restore drill
+
+[Timer]
+# The zone is named rather than assumed: this box runs UTC, and a bare calendar
+# spec would put the run at 22:00 IST on Saturday — which is a working evening
+# in a filing week, and before the backup it means to check.
+OnCalendar=Sun *-*-* 03:30:00 Asia/Kolkata
+# Catch up after an outage. A missed drill is the week nobody finds out, and
+# unlike a health check there is nothing stale about running it late.
+Persistent=true
+RandomizedDelaySec=900
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

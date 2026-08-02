@@ -115,6 +115,12 @@ def monitor(tmp_path):
     fresh = backup_dir / "caflow-db-20260802T021500Z.dump"
     fresh.write_text("last night's dump")
 
+    # A restore drill that passed this morning, so the healthy baseline is
+    # actually healthy. The drill's own freshness is a check like any other
+    # here, and the tests that care about it override this.
+    restore_state = tmp_path / "restore-check.state"
+    restore_state.write_text("passed=20260802T033000Z\n")
+
     state_file = tmp_path / "monitor.state"
     curl_log = tmp_path / "curl.log"
     alert_body = tmp_path / "alerts.txt"
@@ -125,6 +131,7 @@ def monitor(tmp_path):
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "BACKUP_DIR": str(backup_dir),
             "STATE_FILE": str(state_file),
+            "RESTORE_STATE_FILE": str(restore_state),
             "HOSTNAME_LABEL": "test-box",
             "FAKE_CURL_LOG": str(curl_log),
             "FAKE_ALERT_BODY": str(alert_body),
@@ -147,6 +154,7 @@ def monitor(tmp_path):
 
     run.state = state_file  # type: ignore[attr-defined]
     run.backups = backup_dir  # type: ignore[attr-defined]
+    run.restore_state = restore_state  # type: ignore[attr-defined]
     run.alerts = alert_body  # type: ignore[attr-defined]
     run.requests = curl_log  # type: ignore[attr-defined]
     return run
@@ -260,6 +268,57 @@ class TestWhatEachCheckCatches:
             os.utime(dump, (yesterday, yesterday))
 
         assert monitor().returncode == 0
+
+    def test_a_restore_drill_that_has_silently_stopped(self, monitor):
+        """A fortnight since anyone knew the backups were restorable.
+
+        The dumps are still arriving nightly and still passing their read-back,
+        so every other check on this box is green. What has stopped is the only
+        thing that distinguishes a backup from a belief.
+        """
+        stale = time.time() - 14 * 86400
+        os.utime(monitor.restore_state, (stale, stale))
+
+        result = monitor()
+
+        assert result.returncode != 0
+        assert "not been proven restorable" in result.stderr
+
+    def test_a_drill_that_has_never_passed_is_not_silence(self, monitor, tmp_path):
+        """The blind spot the backup check has too, and for longer.
+
+        A box where the drill was never installed, and one where it has failed
+        every Sunday since it was, both have no state file. Neither is a box
+        whose backups anyone should be relying on, so the absence is reported
+        rather than read as nothing to say.
+        """
+        result = monitor(RESTORE_STATE_FILE=str(tmp_path / "never"))
+
+        assert result.returncode != 0
+        assert "has ever passed" in result.stderr
+
+    def test_last_sunday_is_fresh_enough(self, monitor):
+        """The drill is weekly with a fifteen-minute jitter and Persistent=true.
+
+        Ten days rather than seven, so one missed run is tolerated and the
+        second is not — the same argument as the backup window, at the
+        cadence this timer actually runs at.
+        """
+        last_sunday = time.time() - 8 * 86400
+        os.utime(monitor.restore_state, (last_sunday, last_sunday))
+
+        assert monitor().returncode == 0
+
+    def test_the_drill_check_can_be_turned_off(self, monitor, tmp_path):
+        """For a box that has deliberately not installed it.
+
+        Without an escape hatch the only way to quiet this check is to stop
+        reading the alerts, which is how the other four get ignored too.
+        """
+        result = monitor(RESTORE_STATE_FILE=str(tmp_path / "never"), MAX_RESTORE_AGE_DAYS="0")
+
+        assert result.returncode == 0, result.stderr
+        assert "all checks passed" in result.stdout
 
     def test_a_disk_about_to_fill(self, monitor):
         """Not one failure — Postgres refusing writes, uploads failing, and the
