@@ -320,6 +320,141 @@ class TestCategoriseDocument:
         assert result.confidence == pytest.approx(expected)
 
 
+class TestAModelThatIgnoresTheSchema:
+    """The models here are the free tier, so the schema is a request, not a promise.
+
+    Categorising a document is the one part of an upload allowed to be wrong.
+    It is not allowed to lose the file: categorisation runs inline while the
+    upload is being stored, so anything raising out of it becomes a 500 and the
+    client never gets their document in.
+    """
+
+    @pytest.mark.parametrize(
+        "reported",
+        ["high", {"level": "high"}, ["0.9"], True, float("nan"), "", "null"],
+    )
+    def test_a_confidence_that_is_not_a_number_does_not_lose_the_upload(
+        self, capture_posts, reported
+    ):
+        _, queue = capture_posts
+        queue.append(
+            _StubResponse(
+                _content(json.dumps({"category": "bank_statement", "confidence": reported}))
+            )
+        )
+
+        result = categorise_document(
+            "statement.pdf", client=OpenRouterClient(api_key="sk-or-test")
+        )
+
+        # The model still classified the document, so its answer stands; only
+        # the unusable confidence is replaced.
+        assert result.category is DocumentCategory.BANK_STATEMENT
+        assert result.confidence == pytest.approx(0.6)
+
+    def test_a_boolean_confidence_is_not_read_as_certainty(self, capture_posts):
+        # json true is not 100% confidence; it is a model that ignored the
+        # schema, and a document shown as certain is never queried by hand.
+        _, queue = capture_posts
+        queue.append(
+            _StubResponse(_content(json.dumps({"category": "other", "confidence": True})))
+        )
+
+        result = categorise_document("x.pdf", client=OpenRouterClient(api_key="sk-or-test"))
+
+        assert result.confidence == pytest.approx(0.6)
+
+    @pytest.mark.parametrize("reported", ["not-a-pan", "ABCDE1234", "12345", "see attached"])
+    def test_a_malformed_pan_is_dropped_rather_than_stored(self, capture_posts, reported):
+        """A hallucinated identifier reaching a client record is worse than none.
+
+        The regexes guarantee a well-formed identifier and the model guarantees
+        nothing, but both land in the same field — so a practitioner reading
+        "PAN: ABCDE1234F" cannot tell which one produced it.
+        """
+        _, queue = capture_posts
+        queue.append(
+            _StubResponse(
+                _content(json.dumps({"category": "other", "confidence": 0.9, "pan": reported}))
+            )
+        )
+
+        result = categorise_document(
+            "doc.pdf", client=OpenRouterClient(api_key="sk-or-test")
+        )
+
+        assert "pan" not in result.extracted
+
+    def test_a_well_formed_identifier_is_kept_and_normalised(self, capture_posts):
+        _, queue = capture_posts
+        queue.append(
+            _StubResponse(
+                _content(
+                    json.dumps(
+                        {
+                            "category": "other",
+                            "confidence": 0.9,
+                            "pan": " aabcn2345p ",
+                            "gstin": "27aabcn2345p1zv",
+                        }
+                    )
+                )
+            )
+        )
+
+        result = categorise_document(
+            "doc.pdf", client=OpenRouterClient(api_key="sk-or-test")
+        )
+
+        assert result.extracted["pan"] == "AABCN2345P"
+        assert result.extracted["gstin"] == "27AABCN2345P1ZV"
+
+    def test_a_malformed_gstin_is_dropped(self, capture_posts):
+        _, queue = capture_posts
+        queue.append(
+            _StubResponse(
+                _content(json.dumps({"category": "other", "gstin": "27AABCN2345P"}))
+            )
+        )
+
+        result = categorise_document("doc.pdf", client=OpenRouterClient(api_key="sk-or-test"))
+
+        assert "gstin" not in result.extracted
+
+    @pytest.mark.parametrize("reported", ["Rs 1,23,456", "about eight lakh", True])
+    def test_an_amount_that_is_not_a_number_is_not_stored_as_one(
+        self, capture_posts, reported
+    ):
+        # The field is asked for as a number and read as one downstream, so it
+        # holds a number or nothing.
+        _, queue = capture_posts
+        queue.append(
+            _StubResponse(
+                _content(
+                    json.dumps(
+                        {"category": "other", "total_amount_inr": reported}
+                    )
+                )
+            )
+        )
+
+        result = categorise_document("doc.pdf", client=OpenRouterClient(api_key="sk-or-test"))
+
+        assert "total_amount_inr" not in result.extracted
+
+    def test_a_numeric_amount_sent_as_a_string_is_kept(self, capture_posts):
+        _, queue = capture_posts
+        queue.append(
+            _StubResponse(
+                _content(json.dumps({"category": "other", "total_amount_inr": "845000"}))
+            )
+        )
+
+        result = categorise_document("doc.pdf", client=OpenRouterClient(api_key="sk-or-test"))
+
+        assert result.extracted["total_amount_inr"] == pytest.approx(845000)
+
+
 # ------------------------------------------------------------ message drafting --
 
 

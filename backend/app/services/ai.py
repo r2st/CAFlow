@@ -124,6 +124,62 @@ def extract_json(text: str) -> dict[str, Any]:
     return json.loads(candidate)
 
 
+def confidence_or(value: Any, default: float = 0.6) -> float:
+    """Read a model-supplied confidence, clamped to 0-1.
+
+    This cannot be a bare ``float()``. The models here are the free tier, and
+    they answer ``"high"``, ``true`` or an object often enough to matter — and
+    the conversion used to sit *after* the try block that catches everything
+    else the model gets wrong, so a one-word confidence raised out of
+    categorisation, out of the upload endpoint, and into a 500. Categorising a
+    document is the one part of an upload allowed to be wrong; it is not
+    allowed to lose the file.
+    """
+    if isinstance(value, bool):
+        # json true is not 100% confidence; it is a model that ignored the schema.
+        return default
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return default
+    if confidence != confidence:  # NaN, which clamps to itself
+        return default
+    return min(max(confidence, 0.0), 1.0)
+
+
+# The model is asked for these, and what comes back is checked the way the
+# deterministic extraction is: both land in the same field, so a practitioner
+# reading "PAN: ABCDE1234F" cannot tell which produced it. A hallucinated or
+# document-injected identifier that reaches a client record is worse than an
+# absent one.
+LLM_FIELD_PATTERNS: dict[str, re.Pattern[str]] = {
+    "pan": PAN_PATTERN,
+    "gstin": GSTIN_PATTERN,
+}
+
+
+def clean_llm_field(key: str, value: Any) -> Any | None:
+    """Normalise one model-supplied field, or None if it cannot be trusted."""
+    if value in (None, "", "null"):
+        return None
+
+    if pattern := LLM_FIELD_PATTERNS.get(key):
+        candidate = str(value).strip().upper()
+        return candidate if pattern.fullmatch(candidate) else None
+
+    if key == "total_amount_inr":
+        # Asked for as a number; stored as one or not at all, so that nothing
+        # downstream has to guess whether this field holds "₹1,23,456".
+        if isinstance(value, bool):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return value
+
+
 def heuristic_category(filename: str) -> tuple[DocumentCategory, float]:
     lowered = filename.lower()
     for hint, category in FILENAME_HINTS.items():
@@ -195,11 +251,14 @@ def categorise_document(
         return CategorisationResult(fallback_category, fallback_confidence, extracted)
 
     for key in ("pan", "gstin", "period", "total_amount_inr"):
-        if data.get(key) not in (None, "", "null"):
-            extracted.setdefault(key, data[key])
+        # setdefault: a value the regexes found in the document itself outranks
+        # anything the model reports.
+        if (value := clean_llm_field(key, data.get(key))) is not None:
+            extracted.setdefault(key, value)
 
-    confidence = float(data.get("confidence") or 0.6)
-    return CategorisationResult(category, min(max(confidence, 0.0), 1.0), extracted, source="llm")
+    return CategorisationResult(
+        category, confidence_or(data.get("confidence")), extracted, source="llm"
+    )
 
 
 DRAFT_SYSTEM = (
