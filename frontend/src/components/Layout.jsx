@@ -8,6 +8,7 @@ export default function Layout() {
   // Only meaningful under the mobile breakpoint, where the sidebar collapses
   // to a header bar. On a wide screen the nav is always visible.
   const [navOpen, setNavOpen] = useState(false)
+  const isFirmAdmin = practitioner?.role === 'owner' || practitioner?.role === 'partner'
 
   // Navigating means the menu has done its job — leaving it open would cover
   // the page the user just asked for.
@@ -44,6 +45,9 @@ export default function Layout() {
           <NavLink to="/tasks">Tasks</NavLink>
           <NavLink to="/reminders">Reminders</NavLink>
           <NavLink to="/billing">Billing</NavLink>
+          {/* Offered only to the roles the API will actually serve — a link
+              that always 403s is worse than no link. */}
+          {isFirmAdmin && <NavLink to="/audit">Audit trail</NavLink>}
         </nav>
 
         <div className="sidebar-footer">

@@ -3,6 +3,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout'
 import { Loading } from './components/ui'
 import { useAuth } from './context/AuthContext'
+import AuditLog from './pages/AuditLog'
 import Billing from './pages/Billing'
 import Calendar from './pages/Calendar'
 import ClientDetail from './pages/ClientDetail'
@@ -57,6 +58,10 @@ export default function App() {
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/reminders" element={<Reminders />} />
           <Route path="/billing" element={<Billing />} />
+          {/* The server is the authority on who may read this; the route
+              stays reachable so a 403 explains itself rather than a redirect
+              silently pretending the page does not exist. */}
+          <Route path="/audit" element={<AuditLog />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

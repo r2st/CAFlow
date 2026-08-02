@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
 from app.api.routes import (
+    audit,
     auth,
     clients,
     compliance,
@@ -98,6 +99,13 @@ TAGS_METADATA = [
         "description": (
             "The client-facing portal, plus the practitioner endpoints that grant and "
             "revoke access to it."
+        ),
+    },
+    {
+        "name": "audit",
+        "description": (
+            "The append-only record of every mutating action. Read-only, and "
+            "restricted to owners and partners."
         ),
     },
     {"name": "meta", "description": "Health and readiness probes."},
@@ -190,6 +198,7 @@ def create_app() -> FastAPI:
     app.include_router(tasks.router, prefix=api_prefix)
     app.include_router(invoices.router, prefix=api_prefix)
     app.include_router(reminders.router, prefix=api_prefix)
+    app.include_router(audit.router, prefix=api_prefix)
     # Carries both /clients/{id}/portal-* (practitioner) and /portal/* (client).
     app.include_router(portal.router, prefix=api_prefix)
     # Unprefixed: probes should not move when the API version does.

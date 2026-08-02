@@ -242,6 +242,10 @@ export const api = {
     request('/reminders/cancel-scheduled', { method: 'POST', params: { client_id: clientId } }),
   pendingReminderCount: () => request('/reminders/pending-count'),
 
+  // --- Audit trail (owners and partners only) ---
+  listAuditLog: (params) => request('/audit', { params }),
+  auditActions: () => request('/audit/actions'),
+
   // --- Portal access (practitioner side) ---
   portalAccess: (clientId) => request(`/clients/${clientId}/portal-access`),
   createPortalLink: (clientId, payload = {}) =>

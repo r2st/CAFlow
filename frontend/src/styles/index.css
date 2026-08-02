@@ -761,6 +761,24 @@ button.link:hover:not(:disabled) { background: none; text-decoration: underline;
 
 /* -------------------------------------------------------------- mobile -- */
 
+/* --------------------------------------------------------- audit changes -- */
+
+.change-row > td { background: var(--surface-alt); padding: 14px 18px; }
+
+.change-table { width: 100%; font-size: 0.88rem; }
+.change-table th {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+.change-table td { vertical-align: top; word-break: break-word; }
+
+/* Struck-through old value, emphasised new one: the diff should be readable
+   without comparing two columns character by character. */
+.change-table .was { color: var(--text-muted); text-decoration: line-through; }
+.change-table .now { color: var(--text); font-weight: 500; }
+
 /* ---------------------------------------------------- client work panels -- */
 
 .work-grid {

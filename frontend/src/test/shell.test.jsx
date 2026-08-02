@@ -119,4 +119,34 @@ describe('Layout', () => {
       'false',
     )
   })
+
+  it('reaches every work surface', async () => {
+    renderLayout()
+
+    for (const name of ['Documents', 'Tasks', 'Reminders', 'Billing']) {
+      expect(await screen.findByRole('link', { name })).toBeInTheDocument()
+    }
+  })
+
+  it('offers the audit trail to an owner', async () => {
+    renderLayout()
+    expect(await screen.findByRole('link', { name: 'Audit trail' })).toBeInTheDocument()
+  })
+
+  it('offers the audit trail to a partner', async () => {
+    api.me.mockResolvedValue({ ...PRACTITIONER, role: 'partner' })
+    renderLayout()
+
+    expect(await screen.findByRole('link', { name: 'Audit trail' })).toBeInTheDocument()
+  })
+
+  it.each(['manager', 'junior'])('hides the audit trail from a %s', async (role) => {
+    api.me.mockResolvedValue({ ...PRACTITIONER, role })
+    renderLayout()
+
+    // The API would refuse them anyway; a link that always 403s is worse
+    // than no link.
+    await screen.findByRole('link', { name: 'Billing' })
+    expect(screen.queryByRole('link', { name: 'Audit trail' })).not.toBeInTheDocument()
+  })
 })

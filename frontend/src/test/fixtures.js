@@ -449,3 +449,32 @@ export const DASHBOARD_STATS = {
   unbilled_fee_paise: 1250000,
   by_category: { gst: 20, tds: 12, income_tax: 5 },
 }
+
+export function auditEntry(overrides = {}) {
+  return {
+    id: 'a-1',
+    firm_id: 'f-1',
+    actor_practitioner_id: 'p-1',
+    actor_label: 'Anita Sharma <anita@sharma-ca.in>',
+    action: 'client.update',
+    entity_type: 'client',
+    entity_id: 'c-1',
+    summary: 'Updated Nimbus Textiles Pvt Ltd',
+    changes: {
+      before: { contact_person: 'Rohit Nair', gst_registered: false },
+      after: { contact_person: 'Priya Nair', gst_registered: true },
+    },
+    ip_address: '203.0.113.4',
+    user_agent: 'Mozilla/5.0',
+    created_at: '2026-08-01T09:30:00Z',
+    ...overrides,
+  }
+}
+
+export const AUDIT_ACTIONS = {
+  actions: [
+    { action: 'client.update', count: 12 },
+    { action: 'client.create', count: 3 },
+  ],
+  entity_types: ['client', 'invoice'],
+}
