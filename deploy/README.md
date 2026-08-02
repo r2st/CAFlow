@@ -108,6 +108,17 @@ same disk as the thing they back up**, which covers a bad migration and covers
 nothing else. Ship them off the box — `rclone`, `restic`, a provider snapshot,
 anything — before this is a real firm's records.
 
+Each archive is written to `.part` and read back before it is given its real
+name: the dump through `pg_restore --list`, which has to show the `clients`
+table, and the tarball through `tar -tzf`. An exit status only says the command
+ran, not what landed in the file, and a redirect that caught an error message
+is the right size and the wrong contents. A run that fails this check exits
+non-zero, leaves nothing named like a backup, and — because the prune is the
+last line — **deletes nothing**. That ordering is deliberate: a fortnight of
+quiet failures must not end with the last good backup pruned on day fifteen.
+`backend/tests/test_backup.py` runs the script against a stubbed `docker` and
+holds it to all of that.
+
 Restoring:
 
 ```bash
