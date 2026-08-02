@@ -26,6 +26,23 @@ if [[ ${1:-} != "--no-build" ]]; then
   (cd frontend && npm run build)
 fi
 
+# What is about to be overwritten, kept as a hardlink copy — inodes, no data.
+# rsync renames over its targets rather than writing through them, so the
+# snapshot holds still while the sync below replaces the tree beside it.
+#
+# Taken before anything moves, so it records the deployment as it was working
+# a moment ago: the code, and the Alembic revision that code expects. That
+# second half is the one a file copy cannot supply on its own, and the one
+# that decides whether a rollback is a rollback or a second incident.
+echo "==> snapshotting the current release"
+GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+"${SSH[@]}" "install -m 0755 /dev/stdin /usr/local/bin/caflow-release" \
+  <"$REPO_ROOT/deploy/hetzner/caflow-release.sh"
+"${SSH[@]}" "caflow-release snapshot '$GIT_SHA'" || {
+  echo "could not snapshot the current release — refusing to deploy over it" >&2
+  exit 1
+}
+
 echo "==> syncing to $HOST:$REMOTE"
 # The excludes are also what protects them from --delete: .env, the server's
 # venv, the beat schedule and the uploaded documents live only on the box and
@@ -44,7 +61,9 @@ rsync -az --delete -e "ssh -i $SSH_KEY" \
   frontend/dist/ "root@$HOST:$REMOTE/frontend/dist/"
 
 echo "==> installing deps, migrating, restarting"
-"${SSH[@]}" bash -euo pipefail <<'REMOTE_SCRIPT'
+# `if` rather than a bare command: `set -e` would otherwise exit here, and the
+# one thing worth printing on a failed deploy is how to undo it.
+if "${SSH[@]}" bash -euo pipefail <<'REMOTE_SCRIPT'
 # rsync runs as root; leaving root-owned files under a service that runs as
 # `caflow` is the classic post-deploy 500.
 chown -R caflow:caflow /opt/CAFlow
@@ -58,6 +77,36 @@ systemctl stop caflow-beat caflow-worker || true
 # The whole .env, not just DATABASE_URL: app/config.py validates the full
 # settings object at import, so a partial environment would either fail the
 # production checks or — worse — pass them under development defaults.
+pending=$(sudo -u caflow bash -euo pipefail -c '
+  set -a; . /opt/CAFlow/.env; set +a
+  cd /opt/CAFlow/backend
+  current=$(/opt/CAFlow/.venv/bin/alembic current 2>/dev/null | awk "NF {print \$1; exit}")
+  head=$(/opt/CAFlow/.venv/bin/alembic heads 2>/dev/null | awk "NF {print \$1; exit}")
+  [ "$current" = "$head" ] || echo "$current -> $head"
+')
+
+# Only when the schema is actually about to move. A dump on every deploy would
+# be minutes of IO and a growing pile of identical files on a 38 GB disk shared
+# eight ways; a dump on none of them is the deploy that cannot be undone.
+#
+# This is the copy a rollback needs, and it is deliberately not the nightly
+# backup: that one is up to a day old, and the rows written between it and now
+# are exactly the ones a botched migration is about to be blamed for.
+if [ -n "$pending" ]; then
+  release=$(ls -1d /opt/CAFlow-releases/*/ 2>/dev/null | sort | tail -n 1)
+  echo "==> migration pending ($pending) — dumping first"
+  if [ -n "$release" ]; then
+    sudo -u postgres pg_dump -d caflow --format=custom >"$release/pre-migration.dump"
+    sudo -u postgres pg_restore --list <"$release/pre-migration.dump" \
+      | grep -q 'TABLE DATA public clients' \
+      || { echo "the pre-migration dump does not read back — stopping" >&2; exit 1; }
+    echo "    ${release}pre-migration.dump"
+  else
+    echo "no release directory to dump into — stopping" >&2
+    exit 1
+  fi
+fi
+
 sudo -u caflow bash -euo pipefail -c '
   set -a; . /opt/CAFlow/.env; set +a
   cd /opt/CAFlow/backend
@@ -85,5 +134,22 @@ done
 echo "health check never came up — journalctl -u caflow-api -n 50" >&2
 exit 1
 REMOTE_SCRIPT
+then
+  echo "==> done: https://caflow.aiknol.com"
+else
+  status=$?
+  # The one moment someone needs the rollback command is the moment they are
+  # least able to look it up. Printed rather than run: a deploy that failed its
+  # health check may have failed for a reason a rollback makes worse, and the
+  # choice belongs to whoever is reading this.
+  cat >&2 <<ROLLBACK
 
-echo "==> done: https://caflow.aiknol.com"
+==> the deploy did not come up healthy.
+
+    ./deploy/hetzner/rollback.sh --list      what is available
+    ./deploy/hetzner/rollback.sh             back to the state before this deploy
+
+    journalctl -u caflow-api -n 50 --no-pager
+ROLLBACK
+  exit "$status"
+fi
