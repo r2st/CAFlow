@@ -8,8 +8,9 @@ import ComplianceTable from '../components/ComplianceTable'
 import ErrorBoundary from '../components/ErrorBoundary'
 import Layout from '../components/Layout'
 import RouteAnnouncer, { titleForPath } from '../components/RouteAnnouncer'
+import { TableScroll } from '../components/ui'
 import { AuthProvider } from '../context/AuthContext'
-import { DASHBOARD_STATS, FIRM, PRACTITIONER, complianceItem } from './fixtures'
+import { DASHBOARD_STATS, FIRM, PRACTITIONER, complianceItem, portalOverview } from './fixtures'
 
 function Boom() {
   throw new Error('Cannot read properties of undefined')
@@ -237,6 +238,159 @@ describe('naming pages as the app is navigated', () => {
         'Compliance calendar page',
       ),
     )
+  })
+})
+
+describe('the screens with no app shell', () => {
+  /**
+   * The portal and the two auth pages render outside the Layout, so the
+   * `<main>` it provides is not theirs. Without one, "jump to the content"
+   * has nowhere to jump — on the portal that means a client on a screen
+   * reader wades through a masthead and six stat tiles every visit.
+   */
+  it('gives the sign-in page a main landmark', () => {
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+
+    expect(screen.getByRole('main')).toBeInTheDocument()
+  })
+
+  it('gives the registration page a main landmark', () => {
+    render(
+      <MemoryRouter initialEntries={['/register']}>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+
+    expect(screen.getByRole('main')).toBeInTheDocument()
+  })
+
+  it('gives the portal a main landmark holding what the client came for', async () => {
+    window.sessionStorage.setItem('caflow.portal_token', 'magic')
+    vi.spyOn(api, 'portalOverview').mockResolvedValue(portalOverview())
+
+    render(
+      <MemoryRouter initialEntries={['/portal']}>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+
+    // Waited for by content, not by landmark: the loading state has a `main`
+    // of its own, so findByRole('main') would resolve before the data lands.
+    await screen.findByRole('heading', { name: 'Your filings' })
+
+    const main = screen.getByRole('main')
+    // The masthead and the contact footer sit outside it — they are not what
+    // the client opened the link to read.
+    expect(within(main).getByRole('heading', { name: 'Your filings' })).toBeInTheDocument()
+    expect(within(main).queryByRole('contentinfo')).not.toBeInTheDocument()
+  })
+
+  it('gives the expired-link notice a main landmark too', async () => {
+    // No token at all: the client gets the dead-end screen, which still has
+    // to be a page a screen reader can navigate.
+    render(
+      <MemoryRouter initialEntries={['/portal']}>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+
+    const main = await screen.findByRole('main')
+    expect(within(main).getByRole('heading', { name: /isn't working/i })).toBeInTheDocument()
+  })
+})
+
+describe('a table too wide for the screen', () => {
+  /**
+   * jsdom lays nothing out, so both widths are 0 and nothing ever overflows.
+   * Stating them is what lets the two cases be told apart at all.
+   */
+  function widths(scrollWidth, clientWidth) {
+    vi.spyOn(Element.prototype, 'scrollWidth', 'get').mockReturnValue(scrollWidth)
+    vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(clientWidth)
+  }
+
+  function scroller(label = 'Filings') {
+    return (
+      <TableScroll label={label}>
+        <table>
+          <tbody>
+            <tr>
+              <td>GSTR-3B</td>
+            </tr>
+          </tbody>
+        </table>
+      </TableScroll>
+    )
+  }
+
+  it('can be reached and scrolled from the keyboard', () => {
+    widths(900, 360)
+    render(scroller())
+
+    // Without a tab stop the columns past the fold are unreachable to anyone
+    // not using a pointer — which on a phone is every column but the first.
+    const region = screen.getByRole('region', { name: 'Filings' })
+    expect(region).toHaveAttribute('tabindex', '0')
+  })
+
+  it('names itself, so arriving there says what it is', () => {
+    widths(900, 360)
+    render(scroller('Invoices'))
+
+    expect(screen.getByRole('region', { name: 'Invoices' })).toBeInTheDocument()
+  })
+
+  it('adds no tab stop while it fits', () => {
+    widths(360, 360)
+    const { container } = render(scroller())
+
+    // A landmark and a tab stop on a table that fits are only obstacles on
+    // the way to the buttons under it.
+    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    expect(container.querySelector('.table-wrap')).not.toHaveAttribute('tabindex')
+  })
+
+  it('notices when a row arrives and pushes it over the edge', () => {
+    widths(360, 360)
+    const { rerender } = render(scroller())
+    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+
+    // A row appearing changes what overflows without resizing the box it
+    // overflows, so a resize observer alone would never notice.
+    widths(900, 360)
+    rerender(scroller())
+
+    expect(screen.getByRole('region', { name: 'Filings' })).toBeInTheDocument()
+  })
+
+  it('keeps the caller className alongside its own', () => {
+    widths(360, 360)
+    const { container } = render(
+      <TableScroll label="Tasks" className="is-refreshing">
+        <table>
+          <tbody>
+            <tr>
+              <td>x</td>
+            </tr>
+          </tbody>
+        </table>
+      </TableScroll>,
+    )
+
+    const wrap = container.querySelector('.table-wrap')
+    expect(wrap).toHaveClass('table-wrap', 'is-refreshing')
   })
 })
 

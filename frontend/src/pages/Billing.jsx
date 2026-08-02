@@ -10,6 +10,7 @@ import {
   Skeleton,
   SkeletonStats,
   Stat,
+  TableScroll,
   formatDate,
   formatRupees,
   invoiceTone,
@@ -108,7 +109,7 @@ function UnbilledPanel({ billable, onGenerate, busy }) {
           </button>
         </div>
       </div>
-      <div className="table-wrap">
+      <TableScroll label="Unbilled work">
         <table>
           <thead>
             <tr>
@@ -137,7 +138,7 @@ function UnbilledPanel({ billable, onGenerate, busy }) {
             ))}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
     </div>
   )
 }
@@ -448,7 +449,7 @@ export default function Billing() {
           <Skeleton rows={6} />
         ) : invoices.length > 0 ? (
           <>
-            <div className={`table-wrap ${loading ? 'is-refreshing' : ''}`}>
+            <TableScroll label="Invoices" className={loading ? 'is-refreshing' : ''}>
               <table>
                 <thead>
                   <tr>
@@ -550,7 +551,7 @@ export default function Billing() {
                   })}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
 
             {total > PAGE_SIZE && (
               <div className="card-header pager">

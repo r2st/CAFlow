@@ -7,6 +7,7 @@ import {
   EmptyState,
   Skeleton,
   Stat,
+  TableScroll,
   formatBytes,
   formatDate,
   formatDateTime,
@@ -336,7 +337,7 @@ export default function Documents() {
           <Skeleton rows={6} />
         ) : documents.length > 0 ? (
           <>
-            <div className={`table-wrap ${loading ? 'is-refreshing' : ''}`}>
+            <TableScroll label="Documents" className={loading ? 'is-refreshing' : ''}>
               <table>
                 <thead>
                   <tr>
@@ -409,7 +410,7 @@ export default function Documents() {
                   })}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
 
             {total > PAGE_SIZE && (
               <div className="card-header pager">

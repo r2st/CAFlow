@@ -1,5 +1,53 @@
 /** Small presentational helpers shared across pages. */
 
+import { useCallback, useEffect, useRef, useState } from 'react'
+
+/**
+ * A table that scrolls sideways when it outgrows the screen.
+ *
+ * Every table in the app is wider than a phone, and the wrapper that lets
+ * them scroll was reachable by dragging and by nothing else. Someone driving
+ * the page from a keyboard — or from a switch, or from voice control — could
+ * read the first two columns of a filing and had no way to get to the status
+ * in the last one.
+ *
+ * A scroll container becomes keyboard-scrollable by being focusable, and
+ * worth arriving at by being named. Both are applied only while it actually
+ * overflows: a tab stop and a region landmark on a desktop table that fits
+ * are noise on the way to the buttons underneath.
+ */
+export function TableScroll({ label, className = '', children }) {
+  const ref = useRef(null)
+  const [overflowing, setOverflowing] = useState(false)
+
+  const measure = useCallback(() => {
+    const node = ref.current
+    if (node) setOverflowing(node.scrollWidth > node.clientWidth)
+  }, [])
+
+  // No dependency list: a row arriving changes what overflows without
+  // changing the size of the box it overflows, so nothing else would say.
+  useEffect(measure)
+
+  useEffect(() => {
+    // jsdom has no ResizeObserver; the measurement above still runs, so the
+    // component degrades to "correct whenever React renders".
+    const node = ref.current
+    if (!node || typeof ResizeObserver !== 'function') return undefined
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [measure])
+
+  const reachable = overflowing ? { role: 'region', 'aria-label': label, tabIndex: 0 } : {}
+
+  return (
+    <div ref={ref} className={`table-wrap ${className}`.trim()} {...reachable}>
+      {children}
+    </div>
+  )
+}
+
 const DISPLAY_LABELS = {
   upcoming: 'Upcoming',
   due_soon: 'Due soon',

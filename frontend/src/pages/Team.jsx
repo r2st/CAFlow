@@ -9,6 +9,7 @@ import {
   ROLE_DESCRIPTIONS,
   ROLE_LABELS,
   Skeleton,
+  TableScroll,
   formatDateTime,
 } from '../components/ui'
 
@@ -383,7 +384,7 @@ export default function Team() {
         {loading && !members ? (
           <Skeleton rows={4} />
         ) : members && members.length > 0 ? (
-          <div className={`table-wrap ${busy ? 'is-refreshing' : ''}`}>
+          <TableScroll label="Team members" className={busy ? 'is-refreshing' : ''}>
             <table>
               <thead>
                 <tr>
@@ -409,7 +410,7 @@ export default function Team() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
         ) : (
           <EmptyState title="No one else yet">
             Add the people who work with you — each gets their own sign-in and shows up on the

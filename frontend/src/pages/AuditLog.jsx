@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '../api/client'
-import { Alert, EmptyState, Skeleton, formatDateTime } from '../components/ui'
+import { Alert, EmptyState, Skeleton, TableScroll, formatDateTime } from '../components/ui'
 
 /**
  * The audit trail.
@@ -188,7 +188,7 @@ export default function AuditLog() {
           <Skeleton rows={8} />
         ) : entries.length > 0 ? (
           <>
-            <div className={`table-wrap ${loading ? 'is-refreshing' : ''}`}>
+            <TableScroll label="Audit trail" className={loading ? 'is-refreshing' : ''}>
               <table>
                 <thead>
                   <tr>
@@ -239,7 +239,7 @@ export default function AuditLog() {
                   })}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
 
             {total > PAGE_SIZE && (
               <div className="card-header pager">

@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import {
   StatusBadge,
+  TableScroll,
   formatDate,
   formatDaysRemaining,
   formatRupees,
@@ -25,7 +26,7 @@ export default function ComplianceTable({
   const allSelected = items.length > 0 && selectedIds.length === items.length
 
   return (
-    <div className="table-wrap">
+    <TableScroll label="Filings">
       <table>
         <thead>
           <tr>
@@ -85,6 +86,6 @@ export default function ComplianceTable({
           ))}
         </tbody>
       </table>
-    </div>
+    </TableScroll>
   )
 }

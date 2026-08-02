@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { formatRupees } from './ui'
+import { TableScroll, formatRupees } from './ui'
 
 /**
  * Invoice line items — the read-only view and the editor.
@@ -107,7 +107,7 @@ function TotalsRows({ subtotal, tax, total, gstRateBps, colSpan }) {
 export function InvoiceLineTable({ invoice }) {
   const lines = invoice.lines ?? []
   return (
-    <div className="table-wrap">
+    <TableScroll label={`Line items for invoice ${invoice.invoice_number}`}>
       <table className="line-table">
         <caption className="visually-hidden">
           Line items for invoice {invoice.invoice_number}
@@ -161,7 +161,7 @@ export function InvoiceLineTable({ invoice }) {
         </tfoot>
       </table>
       {invoice.notes && <p className="small muted line-notes">{invoice.notes}</p>}
-    </div>
+    </TableScroll>
   )
 }
 
@@ -355,7 +355,7 @@ export function InvoiceForm({ clients, invoice, onSubmit, onCancel, busy }) {
           </div>
         </div>
 
-        <div className="table-wrap">
+        <TableScroll label="Invoice lines">
           <table className="line-table editable">
             <thead>
               <tr>
@@ -400,7 +400,7 @@ export function InvoiceForm({ clients, invoice, onSubmit, onCancel, busy }) {
               />
             </tfoot>
           </table>
-        </div>
+        </TableScroll>
 
         <div className="button-row line-actions">
           <button

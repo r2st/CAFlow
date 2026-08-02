@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
 import { useAuth } from '../context/AuthContext'
-import { Alert, ENTITY_TYPE_LABELS, EmptyState, Skeleton } from '../components/ui'
+import { Alert, ENTITY_TYPE_LABELS, EmptyState, Skeleton, TableScroll } from '../components/ui'
 
 const PAGE_SIZE = 25
 
@@ -101,7 +101,7 @@ export default function Clients() {
           <Skeleton rows={6} />
         ) : page && page.items.length > 0 ? (
           <>
-            <div className={`table-wrap ${loading ? 'is-refreshing' : ''}`}>
+            <TableScroll label="Clients" className={loading ? 'is-refreshing' : ''}>
               <table>
                 <thead>
                   <tr>
@@ -143,7 +143,7 @@ export default function Clients() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
 
             {total > PAGE_SIZE && (
               <div className="card-header" style={{ borderTop: '1px solid var(--border)', borderBottom: 'none' }}>

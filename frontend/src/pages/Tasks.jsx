@@ -8,6 +8,7 @@ import {
   Skeleton,
   TASK_PRIORITY_LABELS,
   TASK_STATUS_LABELS,
+  TableScroll,
   formatDate,
   formatDaysRemaining,
   formatMinutes,
@@ -502,7 +503,7 @@ export default function Tasks() {
           <Skeleton rows={6} />
         ) : items.length > 0 ? (
           <>
-            <div className={`table-wrap ${loading ? 'is-refreshing' : ''}`}>
+            <TableScroll label="Tasks" className={loading ? 'is-refreshing' : ''}>
               <table>
                 <thead>
                   <tr>
@@ -572,7 +573,7 @@ export default function Tasks() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
 
             {total > PAGE_SIZE && (
               <div className="card-header pager">

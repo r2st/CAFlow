@@ -9,6 +9,7 @@ import {
   REMINDER_STATUS_LABELS,
   REMINDER_TYPE_LABELS,
   Skeleton,
+  TableScroll,
   formatDateTime,
   reminderTone,
 } from '../components/ui'
@@ -349,7 +350,7 @@ export default function Reminders() {
           <Skeleton rows={6} />
         ) : reminders.length > 0 ? (
           <>
-            <div className={`table-wrap ${loading ? 'is-refreshing' : ''}`}>
+            <TableScroll label="Reminders" className={loading ? 'is-refreshing' : ''}>
               <table>
                 <thead>
                   <tr>
@@ -405,7 +406,7 @@ export default function Reminders() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableScroll>
 
             {total > PAGE_SIZE && (
               <div className="card-header pager">

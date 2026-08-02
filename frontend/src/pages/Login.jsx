@@ -33,7 +33,7 @@ export default function Login() {
 
   return (
     <div className="auth-shell">
-      <div className="auth-card">
+      <main className="auth-card">
         <div className="auth-head">
           <div className="brand">
             <span className="brand-mark">CA</span>
@@ -85,7 +85,7 @@ export default function Login() {
         <div className="auth-switch">
           New here? <Link to="/register">Register your firm</Link>
         </div>
-      </div>
+      </main>
     </div>
   )
 }
