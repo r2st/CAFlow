@@ -8,6 +8,8 @@ import bcrypt
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.api.deps import _active_firm
 from app.core.security import (
@@ -18,7 +20,8 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
-from app.models.firm import Firm
+from app.models.base import PractitionerRole
+from app.models.firm import Firm, Practitioner
 from tests.conftest import FIRM_REGISTRATION
 
 API = "/api/v1"
@@ -440,6 +443,184 @@ class TestPractitioners:
             json={"email": "temp@sharma-ca.in", "password": "temp-password-123"},
         )
         assert response.status_code == 403
+
+
+class TestAnEmailSignsInToOneAccount:
+    """An address reaches one account, or it reaches an unusable one.
+
+    ``/auth/login`` is handed an address and a password and no firm, so the
+    address is the identity. Uniqueness was per firm, and the duplicate check
+    when adding a team member only looked inside the adding firm — so two firms
+    could each hold an account for one address, and the second was unreachable
+    for ever: sign-in resolved to one of the rows, that row's hash never matched
+    the other password, and the member was told their own credentials were
+    wrong. The firm that added them had seen a 201.
+
+    Not a contrived pairing. A part-time accountant on two firms' books is one
+    route to it; someone leaving one practice for another is the ordinary one,
+    because a departing member's row is deactivated and kept for the history
+    hanging off it.
+    """
+
+    SHARED = "bob@shared-accountant.in"
+
+    def _second_firm_token(self, client: TestClient) -> str:
+        payload = FIRM_REGISTRATION | {
+            "firm_name": "Iyer & Co",
+            "firm_email": "office@iyer-ca.in",
+            "owner_email": "meera@iyer-ca.in",
+            "icai_registration_number": "998877S",
+        }
+        response = client.post(f"{API}/auth/register", json=payload)
+        assert response.status_code == 201, response.text
+        return response.json()["access_token"]
+
+    def _add(self, client: TestClient, token: str, password: str, name: str):
+        return client.post(
+            f"{API}/auth/practitioners",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "full_name": name,
+                "email": self.SHARED,
+                "password": password,
+                "role": "junior",
+            },
+        )
+
+    def test_a_second_firm_cannot_add_an_address_already_in_use(
+        self, client: TestClient, registered_firm: dict, auth_headers: dict
+    ):
+        second = self._second_firm_token(client)
+        first = self._add(client, registered_firm["access_token"], "sharma-password-1", "Bob")
+        assert first.status_code == 201, first.text
+
+        clash = self._add(client, second, "iyer-password-1", "Bob")
+        assert clash.status_code == 409, clash.text
+        # The refusal must not confirm that the address belongs to someone at
+        # another firm — an admin may type any address into this form, and the
+        # answer is not theirs to have.
+        assert "iyer" not in clash.text.lower()
+        assert "sharma" not in clash.text.lower()
+
+    def test_the_account_that_does_exist_still_signs_in(
+        self, client: TestClient, registered_firm: dict
+    ):
+        second = self._second_firm_token(client)
+        self._add(client, registered_firm["access_token"], "sharma-password-1", "Bob")
+        self._add(client, second, "iyer-password-1", "Bob")
+
+        response = client.post(
+            f"{API}/auth/login",
+            json={"email": self.SHARED, "password": "sharma-password-1"},
+        )
+        assert response.status_code == 200, response.text
+
+    def test_rejoining_at_another_firm_is_refused_rather_than_locked_out(
+        self, client: TestClient, registered_firm: dict, auth_headers: dict
+    ):
+        """The case that made this silent: leaving one firm and joining another.
+
+        The old code created the second account happily and then refused every
+        sign-in against it. Refusing the *creation* is what turns an
+        indefinite, unexplained lockout into a message at the moment someone
+        can still act on it.
+        """
+        second = self._second_firm_token(client)
+        created = self._add(
+            client, registered_firm["access_token"], "sharma-password-1", "Bob"
+        ).json()
+        gone = client.patch(
+            f"{API}/auth/practitioners/{created['id']}",
+            headers=auth_headers,
+            json={"is_active": False},
+        )
+        assert gone.status_code == 200, gone.text
+
+        rejoin = self._add(client, second, "iyer-password-1", "Bob")
+        assert rejoin.status_code == 409, rejoin.text
+
+    def test_the_database_refuses_it_even_when_the_route_is_bypassed(
+        self, db: Session, registered_firm: dict
+    ):
+        """Two firms adding one address at the same moment both read "free".
+
+        The route's check is a read followed by a write, so under concurrency
+        it is a suggestion. The unique index is the part that holds.
+        """
+        firm_id = uuid.UUID(registered_firm["firm"]["id"])
+        other = Firm(name="Iyer & Co", email="office@iyer-ca.in")
+        db.add(other)
+        db.flush()
+
+        for owner_firm in (firm_id, other.id):
+            db.add(
+                Practitioner(
+                    firm_id=owner_firm,
+                    full_name="Bob",
+                    email=self.SHARED,
+                    password_hash=hash_password("a-password-here"),
+                    role=PractitionerRole.JUNIOR,
+                )
+            )
+        with pytest.raises(IntegrityError):
+            db.flush()
+        db.rollback()
+
+    def test_case_only_differences_are_the_same_address(
+        self, client: TestClient, registered_firm: dict
+    ):
+        """Sign-in lowercases, so ``Bob@`` and ``bob@`` must not be two accounts."""
+        second = self._second_firm_token(client)
+        assert (
+            self._add(client, registered_firm["access_token"], "sharma-password-1", "Bob")
+        ).status_code == 201
+
+        clash = client.post(
+            f"{API}/auth/practitioners",
+            headers={"Authorization": f"Bearer {second}"},
+            json={
+                "full_name": "Bob",
+                "email": self.SHARED.upper(),
+                "password": "iyer-password-1",
+                "role": "junior",
+            },
+        )
+        assert clash.status_code == 409, clash.text
+
+    def test_a_full_firm_reusing_an_address_is_told_which_one_stopped_it(
+        self, client: TestClient, registered_firm: dict, auth_headers: dict
+    ):
+        """A duplicate is a duplicate, not a reason to go and buy more seats.
+
+        The slot was claimed before the address was checked, so a firm at its
+        plan ceiling that mistyped an existing address was answered 402 and
+        sent to the pricing page over a typo.
+        """
+        # The "practice" plan allows 5; the owner holds one.
+        for index in range(4):
+            filled = client.post(
+                f"{API}/auth/practitioners",
+                headers=auth_headers,
+                json={
+                    "full_name": f"Staff {index}",
+                    "email": f"seat{index}@sharma-ca.in",
+                    "password": "staff-password-123",
+                    "role": "junior",
+                },
+            )
+            assert filled.status_code == 201, filled.text
+
+        response = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Duplicate Anita",
+                "email": FIRM_REGISTRATION["owner_email"],
+                "password": "another-good-password",
+                "role": "junior",
+            },
+        )
+        assert response.status_code == 409, response.text
 
 
 class TestThePlanCeilingIsVisible:

@@ -72,7 +72,17 @@ class Practitioner(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         # Sign-in matches on lower(email), which cannot use the plain email
         # index. Expressed as text so it renders identically on PostgreSQL and
         # on the SQLite database the test-suite builds.
-        Index("ix_practitioner_email_lower", text("lower(email)")),
+        #
+        # Unique, and unique *globally* rather than per firm, because that is
+        # what sign-in assumes: `/auth/login` is given an address and no firm,
+        # so the address is the identity. Two firms could each add the same
+        # person — the per-firm constraint above permits it — and the second
+        # account was then unreachable for ever: the lookup returned one row of
+        # the two, the other password never matched it, and the member was told
+        # their own credentials were wrong. Creation is refused in the route as
+        # well; this is what makes the refusal hold when two firms add the same
+        # address at the same moment.
+        Index("ix_practitioner_email_lower", text("lower(email)"), unique=True),
     )
 
     firm_id: Mapped[uuid.UUID] = mapped_column(

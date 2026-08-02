@@ -45,6 +45,42 @@ def _claim_user_slot(db: Session, firm: Firm) -> None:
         ) from exc
 
 
+def practitioner_by_email(db: Session, email: str) -> Practitioner | None:
+    """The one account signing in with ``email``, or None.
+
+    Case-insensitive, and deliberately not scoped to a firm: ``/auth/login``
+    receives an address and a password and nothing else, so the address is the
+    identity. ``ix_practitioner_email_lower`` is what makes "the one account"
+    true — see :func:`_refuse_duplicate_email`.
+    """
+    return db.scalar(select(Practitioner).where(func.lower(Practitioner.email) == email.lower()))
+
+
+def _refuse_duplicate_email(db: Session, email: str) -> None:
+    """Stop an address that already signs in somewhere being reused.
+
+    Checked across the deployment rather than within the firm. An address is
+    what sign-in resolves an account by, so a second account under one is an
+    account that can never be reached: the lookup returns one row, that row's
+    hash does not match the other password, and the member is told their
+    credentials are wrong while the firm that added them saw a 201.
+
+    The message does not say *where* the address is already in use. A firm
+    admin may add any address they like, and confirming that it belongs to
+    someone at another firm would answer a question they are not entitled to
+    ask by typing addresses into this form.
+    """
+    if practitioner_by_email(db, email) is None:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "This email address is already in use. An address signs in to one "
+            "CAFlow account, so each team member needs their own."
+        ),
+    )
+
+
 def _token_response(practitioner: Practitioner, firm: Firm) -> TokenResponse:
     token = create_access_token(
         practitioner_id=practitioner.id, firm_id=firm.id, role=practitioner.role
@@ -65,14 +101,7 @@ def _token_response(practitioner: Practitioner, firm: Firm) -> TokenResponse:
 )
 def register_firm(payload: FirmRegisterRequest, request: Request, db: DbSession):
     """Create a firm together with its owner practitioner."""
-    existing = db.scalar(
-        select(Practitioner).where(func.lower(Practitioner.email) == payload.owner_email.lower())
-    )
-    if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A practitioner with this email already exists",
-        )
+    _refuse_duplicate_email(db, payload.owner_email)
 
     firm = Firm(
         name=payload.firm_name,
@@ -117,14 +146,17 @@ def register_firm(payload: FirmRegisterRequest, request: Request, db: DbSession)
 
 @router.post("/login", response_model=TokenResponse, summary="Sign in")
 def login(payload: LoginRequest, request: Request, db: DbSession):
-    practitioner = db.scalar(
-        select(Practitioner).where(func.lower(Practitioner.email) == payload.email.lower())
-    )
+    practitioner = practitioner_by_email(db, payload.email)
     # Handing the absent case to verify_password rather than short-circuiting
     # on it is what makes the claim true: both paths spend a full bcrypt round,
     # so the reply takes the same time whether or not the email is known here.
     stored_hash = practitioner.password_hash if practitioner is not None else None
-    if not verify_password(payload.password, stored_hash):
+    # Evaluated into a name before it is tested, so that no rearrangement of
+    # this condition can grow a short circuit that skips the bcrypt round on
+    # the unknown-email path. `practitioner is None` implies the check below
+    # failed anyway; naming both makes that an assertion rather than a trace.
+    password_matches = verify_password(payload.password, stored_hash)
+    if practitioner is None or not password_matches:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password"
         )
@@ -188,19 +220,12 @@ def add_practitioner(
             status_code=status.HTTP_400_BAD_REQUEST, detail="A firm can only have one owner"
         )
 
+    # Before the slot is claimed, so a firm that is both full and re-using an
+    # address is told which of the two actually stopped it. Claiming first
+    # reported a plan limit for what was really a duplicate, and sent an admin
+    # to the pricing page over a typo in an email.
+    _refuse_duplicate_email(db, payload.email)
     _claim_user_slot(db, firm)
-
-    duplicate = db.scalar(
-        select(Practitioner).where(
-            Practitioner.firm_id == firm.id,
-            func.lower(Practitioner.email) == payload.email.lower(),
-        )
-    )
-    if duplicate is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A practitioner with this email already exists in the firm",
-        )
 
     practitioner = Practitioner(
         firm_id=firm.id,
