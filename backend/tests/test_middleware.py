@@ -275,7 +275,8 @@ class TestClientIp:
         # their own rate-limit bucket.
         assert settings.trust_proxy_headers is False
 
-    def test_the_left_most_forwarded_address_wins_when_trusted(self, monkeypatch):
+    def test_the_client_behind_the_proxy_chain_wins_when_trusted(self, monkeypatch):
+        """The production shape: Caddy names the client, nginx appends itself."""
         monkeypatch.setattr(settings, "trust_proxy_headers", True)
 
         request = fake_request({"x-forwarded-for": "203.0.113.7, 10.0.0.1"})
@@ -349,3 +350,74 @@ class TestForwardedHeadersFromUntrustedPeers:
         request = fake_request({"x-forwarded-for": "203.0.113.7"})
 
         assert client_ip(request) == "10.0.0.9"
+
+
+class TestForwardedChainsAreReadFromTheRight:
+    """A forged prefix must not survive an appending proxy.
+
+    Every proxy in this stack appends rather than replaces — nginx forwards
+    ``$proxy_add_x_forwarded_for`` — so whatever a caller puts in the header
+    arrives here with the real hops added *after* it. Reading the left-most
+    entry would hand that caller the answer. The rule is the right-most entry
+    that is not itself a trusted proxy.
+    """
+
+    def test_a_forged_prefix_is_ignored_in_favour_of_the_real_hop(self, monkeypatch):
+        """What a caller invents sits to the left of what a proxy observed.
+
+        This is Caddy with its ``header_up`` line removed: the forged entry is
+        kept and the address Caddy actually accepted is appended to it.
+        """
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request(
+            {"x-forwarded-for": "1.2.3.4, 203.0.113.7, 172.18.0.1"}, peer="172.18.0.5"
+        )
+
+        assert client_ip(request) == "203.0.113.7"
+
+    def test_a_caller_cannot_escape_by_naming_a_public_address_first(self, monkeypatch):
+        """Two forged entries are still two entries to the left of the real one."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request(
+            {"x-forwarded-for": "198.51.100.1, 198.51.100.2, 203.0.113.7, 10.0.0.1"}
+        )
+
+        assert client_ip(request) == "203.0.113.7"
+
+    def test_a_chain_of_only_trusted_hops_falls_back_to_where_it_started(self, monkeypatch):
+        """A caller genuinely inside the network is not turned into a proxy address."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request({"x-forwarded-for": "10.1.2.3, 172.18.0.1"})
+
+        assert client_ip(request) == "10.1.2.3"
+
+    def test_junk_in_the_chain_falls_back_to_the_peer(self, monkeypatch):
+        """An unreadable hop means the rest of the chain cannot be placed."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request({"x-forwarded-for": "203.0.113.7, not-an-ip, 10.0.0.1"})
+
+        assert client_ip(request) == "10.0.0.9"
+
+    def test_a_padded_header_is_not_walked_end_to_end(self, monkeypatch):
+        """Parsing is capped, so a long header is not free work at a caller's request."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+        padding = ", ".join(["10.0.0.1"] * 500)
+
+        request = fake_request({"x-forwarded-for": f"203.0.113.7, {padding}"})
+
+        # Every entry within the cap is a trusted hop, so the walk never
+        # reaches the real client — and answers with a trusted hop rather
+        # than with whatever sat beyond the cap.
+        assert client_ip(request) == "10.0.0.1"
+
+    def test_empty_entries_do_not_shift_the_chain(self, monkeypatch):
+        """A trailing comma is a formatting quirk, not a hop."""
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+        request = fake_request({"x-forwarded-for": "203.0.113.7, 10.0.0.1,"})
+
+        assert client_ip(request) == "203.0.113.7"

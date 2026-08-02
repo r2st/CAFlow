@@ -41,12 +41,17 @@ caflow.aiknol.com {
 
 	reverse_proxy 127.0.0.1:8080 {
 		# Overwrite, not append. Caddy's default is to append the peer to
-		# whatever X-Forwarded-For the caller sent, and the app reads the
-		# left-most entry as the client — so an appended header would let a
-		# caller write its own first entry and mint a fresh rate-limit bucket
-		# per request, which is to say no rate limit at all. {remote_host} is
-		# the address Caddy actually accepted the connection from, and it is
-		# the only address in this exchange that is not a claim.
+		# whatever X-Forwarded-For the caller sent, which carries a forged
+		# prefix straight through. {remote_host} is the address Caddy actually
+		# accepted the connection from — the only address in this exchange
+		# that is not a claim — so setting it here leaves a one-entry chain
+		# with nothing invented in it.
+		#
+		# The app no longer depends on this alone: it reads the chain from the
+		# right and skips hops inside TRUSTED_PROXY_IPS, so a forged prefix is
+		# ignored even if this line goes. Keep it anyway. It is the difference
+		# between a log line naming the client and one naming the client plus
+		# whatever the caller felt like appending.
 		header_up X-Forwarded-For {remote_host}
 		header_up X-Real-IP {remote_host}
 		header_up X-Forwarded-Proto {scheme}

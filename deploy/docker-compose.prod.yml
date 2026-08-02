@@ -27,8 +27,9 @@ x-prod-env: &prod-env
   # Magic links are built from this and carry a session token, so the app
   # refuses an http:// value in production.
   PORTAL_BASE_URL: ${PORTAL_BASE_URL:-https://caflow.aiknol.com/portal}
-  # Caddy overwrites X-Forwarded-For before nginx ever sees it, so the
-  # left-most entry is the real client and the rate limiter can key on it.
+  # Caddy overwrites X-Forwarded-For before nginx ever sees it, and the app
+  # reads the chain from the right, skipping trusted hops — so the address the
+  # rate limiter keys on is one a proxy observed rather than one a caller sent.
   # Still only believed from a peer inside TRUSTED_PROXY_IPS, whose default
   # covers the compose network and nothing outside it.
   TRUST_PROXY_HEADERS: "true"

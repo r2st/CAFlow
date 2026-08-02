@@ -131,11 +131,13 @@ wrong, in `docker compose logs api`.
 nginx fronts the API on the same origin. A browser console full of CSP
 violations means something moved off that origin.
 
-**Every caller shares a rate-limit bucket.** The app reads the left-most
-`X-Forwarded-For` entry as the client. Caddy overwrites that header with the
-peer address rather than appending to it — if a proxy is added in front of
-Caddy, or that `header_up` line is removed, callers can write their own bucket
-key and the limits stop meaning anything.
+**Every caller shares a rate-limit bucket.** The app takes the right-most
+`X-Forwarded-For` entry that is not itself a trusted proxy, so a prefix a
+caller invented sits harmlessly to the left of the address a proxy actually
+observed. Caddy also overwrites the header rather than appending to it, which
+keeps the chain to one entry. Both can survive losing the other; losing both
+— `header_up` deleted *and* `TRUSTED_PROXY_IPS` widened to `*` — is where
+callers start choosing their own bucket key.
 
 **Certificates.** Caddy renews them itself. `journalctl -u caddy` is where a
 failure shows up; the usual cause is the A record or port 80 being closed,

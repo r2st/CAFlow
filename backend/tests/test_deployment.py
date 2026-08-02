@@ -5,12 +5,18 @@ Nothing here starts a container. These are the handful of lines in
 ``nginx.conf`` that the running app silently depends on — where an edit that
 looks harmless takes a protection away without anything failing.
 
-The rate limiter is the clearest case. It keys on the left-most
-``X-Forwarded-For`` entry, which is only the real client because Caddy
-overwrites the header rather than appending to it. Delete that one
-``header_up`` line and every caller can mint a fresh bucket per request; no
-test fails, no log line complains, and the limits simply stop meaning
-anything. So it is pinned here.
+The body limits are the clearest case. Caddy, nginx and the app each cap a
+request body, and the app's cap is the only one that produces the app's own
+message. Let either proxy drop below it and callers meet a bare 413 from
+something that cannot explain itself — while every test still passes, because
+nothing in the suite has an opinion about a number in a Caddyfile. So they are
+pinned against ``settings`` here rather than against a constant.
+
+Same for the published ports, the secrets the overlay refuses to default, and
+Caddy's ``header_up X-Forwarded-For``. That last one is no longer load-bearing
+on its own — ``middleware._forwarded_client`` reads the chain from the right
+and skips trusted hops, so a forged prefix is ignored regardless — but it is
+still what keeps the chain to a single honest entry.
 """
 
 from __future__ import annotations
@@ -154,15 +160,16 @@ class TestCaddyIsTheFrontDoor:
     """The reverse proxy the whole forwarded-header story rests on."""
 
     def test_it_overwrites_the_forwarded_for_header(self, caddyfile):
-        """Overwrite, not append — this is the line the rate limiter depends on.
+        """Overwrite, not append.
 
-        Caddy's default is to append the peer to whatever the caller sent. The
-        app reads the left-most entry, so an appended header lets a caller
-        write its own first entry and pick a fresh bucket for every request.
+        Caddy's default is to append the peer to whatever the caller sent,
+        carrying a forged prefix through to the app. The app defends itself
+        against that by reading the chain from the right, so this is defence in
+        depth rather than the only line — but it is what keeps the chain to one
+        entry that nobody upstream invented.
         """
         assert re.search(r"header_up\s+X-Forwarded-For\s+\{remote_host\}", caddyfile), (
-            "Caddy must set X-Forwarded-For to {remote_host}; without it a caller "
-            "chooses its own rate-limit key"
+            "Caddy must set X-Forwarded-For to {remote_host}, not append to it"
         )
         # A leading "+" is Caddy's syntax for append. It must not appear here.
         assert not re.search(r"header_up\s+\+X-Forwarded-For", caddyfile)

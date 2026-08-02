@@ -307,22 +307,64 @@ def _is_trusted_proxy(peer: str) -> bool:
     return any(address in network for network in settings.trusted_proxy_networks)
 
 
-def _forwarded_client(request: Request) -> str | None:
-    """The originating address from the proxy headers, if there is a real one.
+# A real chain is a handful of hops. Anything longer is a caller padding the
+# header, and walking all of it is parse work done at their request.
+MAX_FORWARDED_ENTRIES = 20
 
-    The value has to parse as an IP address. A proxy sends one; anything else
-    is either a misconfigured hop or a caller trying to write its own bucket
-    key, and neither should end up keying a counter or landing in a log line.
+
+def _parse_address(candidate: str) -> str | None:
+    """``candidate`` as an IP address, or None if it is not one.
+
+    A proxy sends an address; anything else is either a misconfigured hop or a
+    caller writing junk, and neither should key a counter or reach a log line.
     """
-    forwarded = request.headers.get("x-forwarded-for", "")
-    # Left-most entry is the original client.
-    candidate = forwarded.split(",")[0].strip() or request.headers.get("x-real-ip", "").strip()
-    if not candidate:
-        return None
     try:
         return str(ipaddress.ip_address(candidate))
     except ValueError:
         return None
+
+
+def _forwarded_client(request: Request) -> str | None:
+    """The originating address from the proxy headers, if there is a real one.
+
+    Walked right to left, skipping hops that are themselves trusted proxies,
+    and stopping at the first address that is not one.
+
+    The left-most entry is the conventional answer, and it is also the one a
+    caller can write. Every proxy in this stack *appends* rather than replaces
+    — nginx forwards ``$proxy_add_x_forwarded_for`` — so a header that arrives
+    with a forged prefix keeps that prefix all the way here. Reading from the
+    right instead means the first untrusted entry is the address the last
+    trusted hop actually accepted a connection from, which is the one part of
+    the chain nobody upstream could invent; anything a caller made up sits
+    harmlessly to the left of it.
+
+    That is what stops Caddy's ``header_up X-Forwarded-For {remote_host}``
+    from being the single line the rate limiter's honesty rests on. Overwriting
+    at the edge is still right, and still tested — but losing it now costs a
+    tidy log line rather than the limits themselves.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    entries = [entry.strip() for entry in forwarded.split(",") if entry.strip()]
+    if not entries:
+        candidate = request.headers.get("x-real-ip", "").strip()
+        return _parse_address(candidate) if candidate else None
+
+    walked: list[str] = []
+    for entry in reversed(entries[-MAX_FORWARDED_ENTRIES:]):
+        address = _parse_address(entry)
+        if address is None:
+            # A hop that is not an address means the chain cannot be read past
+            # this point. Fall back to the peer rather than guess at which
+            # side of the junk the client was on.
+            return None
+        if not _is_trusted_proxy(address):
+            return address
+        walked.append(address)
+
+    # Every hop was a trusted proxy, so the caller is inside the network too
+    # and the left-most entry is where it started.
+    return walked[-1]
 
 
 def client_ip(request: Request) -> str:
