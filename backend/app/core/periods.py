@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 FY_START_MONTH = 4
-QUARTER_START_MONTHS = (4, 7, 10, 1)  # Q1..Q4 in fiscal order
 
 
 @dataclass(frozen=True)

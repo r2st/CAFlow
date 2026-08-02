@@ -114,6 +114,84 @@ class TestPeriodGeneration:
         assert Period("FY2026-27-Q4", date(2027, 1, 1), date(2027, 3, 31)).key == "Q4"
 
 
+class TestPeriodBoundaries:
+    """The edges of the generators, which is where a missing filing comes from.
+
+    Every case here survived a deliberate break of the code it exercises: the
+    generators were covered line-for-line, and the suite still passed with the
+    year rollover off by one and the window's last month dropped. A period that
+    is never generated is a statutory filing nobody is reminded about, so these
+    are checked at the boundary rather than in the middle.
+    """
+
+    def test_monthly_periods_cross_the_calendar_year(self):
+        # December is where the month counter rolls, and the label carries the
+        # year — so an off-by-one here mislabels every period after it.
+        periods = monthly_periods(date(2026, 11, 5), date(2027, 2, 10))
+        assert [p.label for p in periods] == ["2026-11", "2026-12", "2027-01", "2027-02"]
+        assert periods[1].end == date(2026, 12, 31)
+        assert periods[2].start == date(2027, 1, 1)
+
+    def test_monthly_window_ending_on_the_first_still_includes_that_month(self):
+        # The window is inclusive, and a month that has begun has a filing due
+        # for it. Excluding it loses the return entirely.
+        periods = monthly_periods(date(2026, 4, 10), date(2026, 6, 1))
+        assert [p.label for p in periods] == ["2026-04", "2026-05", "2026-06"]
+
+    def test_monthly_window_inside_one_month_yields_that_month(self):
+        periods = monthly_periods(date(2026, 4, 10), date(2026, 4, 12))
+        assert [p.label for p in periods] == ["2026-04"]
+
+    @pytest.mark.parametrize(
+        ("start", "quarter_start"),
+        [
+            (date(2026, 4, 20), date(2026, 4, 1)),
+            (date(2026, 5, 20), date(2026, 4, 1)),
+            (date(2026, 6, 20), date(2026, 4, 1)),
+            (date(2026, 7, 20), date(2026, 7, 1)),
+            (date(2026, 8, 20), date(2026, 7, 1)),
+            (date(2026, 9, 20), date(2026, 7, 1)),
+            (date(2026, 10, 20), date(2026, 10, 1)),
+            (date(2026, 11, 20), date(2026, 10, 1)),
+            (date(2026, 12, 20), date(2026, 10, 1)),
+            (date(2027, 1, 20), date(2027, 1, 1)),
+            (date(2027, 2, 20), date(2027, 1, 1)),
+            (date(2027, 3, 20), date(2027, 1, 1)),
+        ],
+    )
+    def test_quarterly_periods_rewind_to_the_quarter_containing_the_start(
+        self, start, quarter_start
+    ):
+        # Onboarding happens on whatever day a firm signs a client up, so the
+        # rewind runs from all twelve months in practice. Checked from each of
+        # them: the modulo that does it is wrong in a different month for every
+        # way of getting it wrong.
+        periods = quarterly_periods(start, start)
+        assert periods[0].start == quarter_start
+
+    def test_quarterly_window_ending_on_a_quarter_start_includes_that_quarter(self):
+        periods = quarterly_periods(date(2026, 4, 1), date(2026, 7, 1))
+        assert [p.label for p in periods] == ["FY2026-27-Q1", "FY2026-27-Q2"]
+
+    def test_annual_window_inside_one_year_yields_that_year(self):
+        periods = annual_periods(date(2026, 6, 1), date(2026, 8, 1))
+        assert [p.label for p in periods] == ["FY2026-27"]
+
+    def test_one_time_period_is_labelled_by_its_start_date(self):
+        periods = periods_for_frequency("one_time", date(2026, 7, 4), date(2026, 9, 30))
+        assert [p.label for p in periods] == ["2026-07-04"]
+        assert periods[0].end == date(2026, 9, 30)
+
+    def test_due_date_defaults_to_the_month_after_the_period(self):
+        # The default offset is what every seed omitting one relies on.
+        july = Period("2026-07", date(2026, 7, 1), date(2026, 7, 31))
+        assert compute_due_date(july, 20) == date(2026, 8, 20)
+
+    def test_due_date_clamps_a_day_past_the_end_of_a_short_month(self):
+        january = Period("2026-01", date(2026, 1, 1), date(2026, 1, 31))
+        assert compute_due_date(january, 31) == date(2026, 2, 28)
+
+
 class TestStatutoryDueDates:
     """The dates a CA would recite from memory."""
 
