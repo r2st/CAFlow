@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
-import api, { getToken, setToken } from '../api/client'
+import api, { getToken, onCredentialLost, setToken } from '../api/client'
 
 const AuthContext = createContext(null)
 
@@ -19,6 +19,27 @@ export function AuthProvider({ children }) {
   const [practitioner, setPractitioner] = useState(null)
   const [firm, setFirm] = useState(null)
   const [loading, setLoading] = useState(Boolean(getToken()))
+  // Distinguishes "signed out because the token ran out" from "signed out
+  // because you clicked sign out" — only the first needs explaining.
+  const [sessionExpired, setSessionExpired] = useState(false)
+
+  /**
+   * A token has a lifetime, and it will run out while someone is mid-sentence
+   * in a task note. The API client has already dropped the spent token by the
+   * time this fires; clearing the practitioner here is what actually moves the
+   * app to the login screen, instead of leaving it on a page where every
+   * button now fails and nothing says why.
+   */
+  useEffect(
+    () =>
+      onCredentialLost((kind) => {
+        if (kind !== 'practitioner') return
+        setPractitioner(null)
+        setFirm(null)
+        setSessionExpired(true)
+      }),
+    [],
+  )
 
   // Restore the session on reload: a stored token is only trusted once /me confirms it.
   useEffect(() => {
@@ -45,6 +66,7 @@ export function AuthProvider({ children }) {
     setToken(result.access_token)
     setPractitioner(result.practitioner)
     setFirm(result.firm)
+    setSessionExpired(false)
     return result
   }, [])
 
@@ -53,13 +75,16 @@ export function AuthProvider({ children }) {
     setToken(result.access_token)
     setPractitioner(result.practitioner)
     setFirm(result.firm)
+    setSessionExpired(false)
     return result
   }, [])
 
+  // Signing out deliberately is not an expiry, and saying so would be a lie.
   const logout = useCallback(() => {
     setToken(null)
     setPractitioner(null)
     setFirm(null)
+    setSessionExpired(false)
   }, [])
 
   const value = useMemo(
@@ -67,6 +92,7 @@ export function AuthProvider({ children }) {
       practitioner,
       firm,
       loading,
+      sessionExpired,
       isAuthenticated: Boolean(practitioner),
       isFirmAdmin: FIRM_ADMIN_ROLES.has(practitioner?.role),
       canManageClients: CLIENT_MANAGER_ROLES.has(practitioner?.role),
@@ -74,7 +100,7 @@ export function AuthProvider({ children }) {
       register,
       logout,
     }),
-    [practitioner, firm, loading, login, register, logout],
+    [practitioner, firm, loading, sessionExpired, login, register, logout],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

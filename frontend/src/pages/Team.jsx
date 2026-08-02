@@ -387,12 +387,12 @@ export default function Team() {
             <table>
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Contact</th>
-                  <th>Role</th>
-                  <th>Status</th>
-                  <th>Last sign-in</th>
-                  <th>Actions</th>
+                  <th scope="col">Name</th>
+                  <th scope="col">Contact</th>
+                  <th scope="col">Role</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Last sign-in</th>
+                  <th scope="col">Actions</th>
                 </tr>
               </thead>
               <tbody>

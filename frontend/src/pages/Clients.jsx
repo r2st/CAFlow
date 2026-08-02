@@ -105,12 +105,12 @@ export default function Clients() {
               <table>
                 <thead>
                   <tr>
-                    <th>Name</th>
-                    <th>Entity type</th>
-                    <th>PAN</th>
-                    <th>GSTIN</th>
-                    <th>Registrations</th>
-                    <th>Status</th>
+                    <th scope="col">Name</th>
+                    <th scope="col">Entity type</th>
+                    <th scope="col">PAN</th>
+                    <th scope="col">GSTIN</th>
+                    <th scope="col">Registrations</th>
+                    <th scope="col">Status</th>
                   </tr>
                 </thead>
                 <tbody>

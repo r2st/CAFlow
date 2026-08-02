@@ -506,7 +506,7 @@ export default function Tasks() {
               <table>
                 <thead>
                   <tr>
-                    <th className="tick">
+                    <th scope="col" className="tick">
                       <input
                         type="checkbox"
                         aria-label="Select all tasks"
@@ -514,12 +514,12 @@ export default function Tasks() {
                         onChange={toggleAll}
                       />
                     </th>
-                    <th>Task</th>
-                    <th>Client</th>
-                    <th>Assignee</th>
-                    <th>Due</th>
-                    <th>Priority</th>
-                    <th>Status</th>
+                    <th scope="col">Task</th>
+                    <th scope="col">Client</th>
+                    <th scope="col">Assignee</th>
+                    <th scope="col">Due</th>
+                    <th scope="col">Priority</th>
+                    <th scope="col">Status</th>
                   </tr>
                 </thead>
                 <tbody>

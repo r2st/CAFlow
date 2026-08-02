@@ -30,7 +30,7 @@ export default function ComplianceTable({
         <thead>
           <tr>
             {selectable && (
-              <th style={{ width: 34 }}>
+              <th scope="col" style={{ width: 34 }}>
                 <input
                   type="checkbox"
                   aria-label="Select all filings"
@@ -39,12 +39,12 @@ export default function ComplianceTable({
                 />
               </th>
             )}
-            {showClient && <th>Client</th>}
-            <th>Filing</th>
-            <th>Period</th>
-            <th>Due date</th>
-            <th>Status</th>
-            {showFee && <th className="num">Fee</th>}
+            {showClient && <th scope="col">Client</th>}
+            <th scope="col">Filing</th>
+            <th scope="col">Period</th>
+            <th scope="col">Due date</th>
+            <th scope="col">Status</th>
+            {showFee && <th scope="col" className="num">Fee</th>}
           </tr>
         </thead>
         <tbody>

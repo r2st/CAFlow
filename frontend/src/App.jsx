@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout'
+import RouteAnnouncer from './components/RouteAnnouncer'
 import { Loading } from './components/ui'
 import { useAuth } from './context/AuthContext'
 import AuditLog from './pages/AuditLog'
@@ -37,6 +38,9 @@ export default function App() {
     // Keyed on the path so navigating away from a crashed route clears the
     // fallback instead of stranding the user on it.
     <ErrorBoundary resetKey={location.pathname}>
+      {/* Outside the routes, so it names every screen including the ones with
+          no app shell — the portal, and both auth pages. */}
+      <RouteAnnouncer />
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />

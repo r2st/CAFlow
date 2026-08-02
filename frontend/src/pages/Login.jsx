@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext'
 import { Alert } from '../components/ui'
 
 export default function Login() {
-  const { login, isAuthenticated } = useAuth()
+  const { login, isAuthenticated, sessionExpired } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
 
@@ -43,6 +43,14 @@ export default function Login() {
         </div>
 
         <Alert kind="error">{error}</Alert>
+        {/* Landing here without asking to is disconcerting on its own. Saying
+            the session ran out — rather than showing a bare login form —
+            stops it reading as lost work or a broken app. */}
+        {!error && sessionExpired && (
+          <Alert kind="warning">
+            Your session has expired. Sign in again to pick up where you left off.
+          </Alert>
+        )}
 
         <form onSubmit={handleSubmit}>
           <div className="field">

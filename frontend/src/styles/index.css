@@ -605,6 +605,61 @@ button.link:hover:not(:disabled) { background: none; text-decoration: underline;
 .crash-card p { margin: 0 0 10px; }
 .crash-card .button-row { justify-content: center; margin-top: 16px; }
 
+/* One route failed inside a working shell — it gets a card, not the viewport,
+   because the navigation beside it is still the way out. */
+.crash-inline {
+  padding: 24px;
+  border-color: var(--overdue);
+}
+.crash-inline h2 { margin-bottom: 8px; color: var(--overdue); }
+.crash-inline p { margin: 0 0 10px; }
+.crash-inline .button-row { margin-top: 16px; }
+
+/* --------------------------------------------------------------- skip link -- */
+
+/* Off-screen until focused, then pinned over the top-left corner. Hiding it
+   with display:none would take it out of the tab order, which is the one
+   thing it exists to be in. */
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: -60px;
+  z-index: 100;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--brand);
+  color: #fff;
+  font-size: 0.9rem;
+  font-weight: 600;
+  transition: top 0.12s ease-in;
+}
+.skip-link:focus {
+  top: 8px;
+  text-decoration: none;
+}
+
+/* Focus is never decoration — it is the only thing telling a keyboard user
+   where they are. The default ring all but disappears against a filled brand
+   button, so state it explicitly and give it room to be seen. */
+:focus-visible {
+  outline: 2px solid var(--brand-dark);
+  outline-offset: 2px;
+}
+.nav a:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--brand-dark);
+  outline-offset: 2px;
+}
+/* On the brand fill itself, a brand-coloured ring has nothing to sit against. */
+button:not(.secondary):not(.link):focus-visible,
+.skip-link:focus-visible {
+  outline-color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skip-link { transition: none; }
+}
+
 /* ---------------------------------------------------------- file upload -- */
 
 /* Off-screen rather than display:none — a hidden input is still focusable

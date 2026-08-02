@@ -340,12 +340,12 @@ export default function Documents() {
               <table>
                 <thead>
                   <tr>
-                    <th>File</th>
-                    <th>Client</th>
-                    <th>Category</th>
-                    <th>Filing</th>
-                    <th>Received</th>
-                    <th />
+                    <th scope="col">File</th>
+                    <th scope="col">Client</th>
+                    <th scope="col">Category</th>
+                    <th scope="col">Filing</th>
+                    <th scope="col">Received</th>
+                    <th scope="col" />
                   </tr>
                 </thead>
                 <tbody>

@@ -112,10 +112,10 @@ function UnbilledPanel({ billable, onGenerate, busy }) {
         <table>
           <thead>
             <tr>
-              <th>Client</th>
-              <th>Filed work</th>
-              <th className="numeric">Items</th>
-              <th className="numeric">Value</th>
+              <th scope="col">Client</th>
+              <th scope="col">Filed work</th>
+              <th scope="col" className="numeric">Items</th>
+              <th scope="col" className="numeric">Value</th>
             </tr>
           </thead>
           <tbody>
@@ -452,14 +452,14 @@ export default function Billing() {
               <table>
                 <thead>
                   <tr>
-                    <th>Invoice</th>
-                    <th>Client</th>
-                    <th>Issued</th>
-                    <th>Due</th>
-                    <th className="numeric">Total</th>
-                    <th className="numeric">Balance</th>
-                    <th>Status</th>
-                    <th />
+                    <th scope="col">Invoice</th>
+                    <th scope="col">Client</th>
+                    <th scope="col">Issued</th>
+                    <th scope="col">Due</th>
+                    <th scope="col" className="numeric">Total</th>
+                    <th scope="col" className="numeric">Balance</th>
+                    <th scope="col">Status</th>
+                    <th scope="col" />
                   </tr>
                 </thead>
                 <tbody>

@@ -43,9 +43,9 @@ function ChangeTable({ changes }) {
     <table className="change-table">
       <thead>
         <tr>
-          <th>Field</th>
-          <th>Before</th>
-          <th>After</th>
+          <th scope="col">Field</th>
+          <th scope="col">Before</th>
+          <th scope="col">After</th>
         </tr>
       </thead>
       <tbody>
@@ -192,11 +192,11 @@ export default function AuditLog() {
               <table>
                 <thead>
                   <tr>
-                    <th>When</th>
-                    <th>Who</th>
-                    <th>Action</th>
-                    <th>What happened</th>
-                    <th />
+                    <th scope="col">When</th>
+                    <th scope="col">Who</th>
+                    <th scope="col">Action</th>
+                    <th scope="col">What happened</th>
+                    <th scope="col" />
                   </tr>
                 </thead>
                 <tbody>

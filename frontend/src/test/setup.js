@@ -43,6 +43,9 @@ delete window.URL.createObjectURL
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  // `restoreAllMocks` does not reach globals replaced with `stubGlobal`, so a
+  // stubbed `fetch` would otherwise answer every later test in the file.
+  vi.unstubAllGlobals()
 })
 
 beforeEach(() => {

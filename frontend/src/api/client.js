@@ -74,10 +74,43 @@ function authHeaders(auth) {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
+const credentialListeners = new Set()
+
+/**
+ * Subscribe to credentials being dropped mid-session. Returns an unsubscribe.
+ *
+ * Clearing the token is only half of what a 401 means. Without this, the
+ * signed-in state upstream still says the practitioner is here, so the app
+ * keeps rendering pages whose every request now fails — the session is gone
+ * but nothing says so until the user thinks to reload. The listener is what
+ * turns a spent credential into a sign-out the user can actually see.
+ */
+export function onCredentialLost(listener) {
+  credentialListeners.add(listener)
+  return () => credentialListeners.delete(listener)
+}
+
+function announceCredentialLost(kind) {
+  for (const listener of credentialListeners) {
+    // A listener that throws must not replace the API error the caller is
+    // waiting on — that error is the one that explains what actually failed.
+    try {
+      listener(kind)
+    } catch (err) {
+      console.error('Credential listener failed', err)
+    }
+  }
+}
+
 /** A 401 means the credential we sent is spent — drop it, don't keep retrying with it. */
 function forgetCredential(auth) {
-  if (auth === 'portal') setPortalToken(null)
-  else if (auth !== false && auth !== 'none') setToken(null)
+  if (auth === 'portal') {
+    setPortalToken(null)
+    announceCredentialLost('portal')
+  } else if (auth !== false && auth !== 'none') {
+    setToken(null)
+    announceCredentialLost('practitioner')
+  }
 }
 
 function buildUrl(path, params) {

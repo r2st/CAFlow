@@ -353,13 +353,13 @@ export default function Reminders() {
               <table>
                 <thead>
                   <tr>
-                    <th>Client</th>
-                    <th>Message</th>
-                    <th>Type</th>
-                    <th>Channel</th>
-                    <th>Scheduled</th>
-                    <th>Status</th>
-                    <th />
+                    <th scope="col">Client</th>
+                    <th scope="col">Message</th>
+                    <th scope="col">Type</th>
+                    <th scope="col">Channel</th>
+                    <th scope="col">Scheduled</th>
+                    <th scope="col">Status</th>
+                    <th scope="col" />
                   </tr>
                 </thead>
                 <tbody>
