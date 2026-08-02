@@ -63,14 +63,32 @@ def recipient_for(client: Client, channel: ReminderChannel) -> str | None:
             return client.email
 
 
-def _already_queued(existing: list[Reminder], kind: str, offset: int) -> bool:
+def _kind_of(reminder: Reminder) -> str:
+    """Which chase a queued reminder was, defaulting to the one that predates the key.
+
+    Filing reminders were the first kind and wrote only ``offset_days``, so a
+    row with no ``kind`` is one of those. Reading it that way is what lets the
+    check below distinguish kinds without a backfill: without the default,
+    every filing reminder already queued would look like a different kind and
+    be chased a second time on the next run.
+    """
+    return (reminder.extra or {}).get("kind", "filing")
+
+
+def already_queued(existing: list[Reminder], kind: str, offset: int) -> bool:
     """One reminder per (target, kind, offset), checked in Python.
+
+    Per *kind*, not per offset alone: a filing falling due in ten days can be
+    both the subject of a document chase and of the deadline reminder itself,
+    and those say different things. Matching on the offset alone meant whichever
+    job ran first silenced the other — the client was asked for a bank statement
+    and never told when the return was due.
 
     A JSON containment predicate would behave differently on SQLite and
     PostgreSQL; the candidate set here is small enough that it does not matter.
     """
     return any(
-        (r.extra or {}).get("kind") == kind and (r.extra or {}).get("offset_days") == offset
+        _kind_of(r) == kind and (r.extra or {}).get("offset_days") == offset
         for r in existing
     )
 
@@ -120,7 +138,7 @@ def queue_document_reminders(
                     select(Reminder).where(Reminder.compliance_item_id == item.id)
                 ).all()
             )
-            if _already_queued(existing, "document", days_left):
+            if already_queued(existing, "document", days_left):
                 continue
 
             missing_labels = [
@@ -197,7 +215,7 @@ def queue_payment_reminders(
         existing = list(
             db.scalars(select(Reminder).where(Reminder.invoice_id == invoice.id)).all()
         )
-        if _already_queued(existing, "payment", days_overdue):
+        if already_queued(existing, "payment", days_overdue):
             continue
 
         channel = preferred_channel(client)

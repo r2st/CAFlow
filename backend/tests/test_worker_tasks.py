@@ -30,6 +30,7 @@ from app.models.client import Client
 from app.models.compliance import ComplianceItem, ComplianceType
 from app.models.firm import Firm
 from app.models.reminder import Reminder
+from app.services import reminders as reminder_service
 from app.worker import tasks
 from app.worker.celery_app import celery_app
 
@@ -116,7 +117,7 @@ def make_reminder(db, firm, client, *, scheduled_for, recipient="accounts@nimbus
     reminder = Reminder(
         firm_id=firm.id,
         client_id=client.id,
-        reminder_type=ReminderType.FILING,
+        reminder_type=kwargs.pop("reminder_type", ReminderType.FILING),
         channel=ReminderChannel.EMAIL,
         status=kwargs.pop("status", ReminderStatus.SCHEDULED),
         recipient=recipient,
@@ -632,6 +633,95 @@ class TestDispatchSendsEachReminderOnce:
             }
 
         assert "batch limit" not in caplog.text
+
+
+class TestADocumentChaseDoesNotSilenceTheFilingReminder:
+    """Two different messages about one filing, on the same day.
+
+    "We still need your bank statement" and "your GSTR-3B is due on the 20th"
+    answer different questions, and both offset lists are configured
+    independently — the defaults overlap at ten, five and two days out. The
+    filing job matched any reminder carrying that offset, so whichever job beat
+    it to the item silenced it, and the client was asked for documents without
+    ever being told the deadline.
+    """
+
+    def queue_filing_reminder(self, db, *, run_date=RUN_DATE) -> int:
+        return tasks.schedule_compliance_reminders_task(today=run_date.isoformat())["queued"]
+
+    def setup_item(self, db, *, days_out=10):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        ctype = get_type(db, "GSTR3B_MONTHLY")  # offsets [10, 5, 2, 1]
+        item = make_item(db, firm, client, ctype, due_date=RUN_DATE + timedelta(days=days_out))
+        return firm, client, item
+
+    def test_a_document_chase_at_the_same_offset_does_not_suppress_it(self, db):
+        firm, client, item = self.setup_item(db)
+        make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC),
+            compliance_item_id=item.id,
+            reminder_type=ReminderType.DOCUMENT,
+            extra={"kind": "document", "offset_days": 10},
+        )
+        db.commit()
+
+        assert self.queue_filing_reminder(db) == 1
+
+    def test_the_filing_reminder_still_only_fires_once(self, db):
+        """The kind is added to the check, not swapped in for the offset."""
+        self.setup_item(db)
+        db.commit()
+
+        assert self.queue_filing_reminder(db) == 1
+        assert self.queue_filing_reminder(db) == 0
+
+    def test_a_row_queued_before_the_kind_was_recorded_still_counts(self, db):
+        """Filing reminders were the first kind and wrote no ``kind`` at all.
+
+        Read as a different kind, every one already in a live queue would be
+        sent a second time on the first run after this deploys.
+        """
+        firm, client, item = self.setup_item(db)
+        make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC),
+            compliance_item_id=item.id,
+            extra={"offset_days": 10},
+        )
+        db.commit()
+
+        assert self.queue_filing_reminder(db) == 0
+
+    def test_a_filing_reminder_does_not_suppress_the_document_chase(self, db):
+        """The other direction, which already held — and has to keep holding."""
+        firm, client, item = self.setup_item(db)
+        make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC),
+            compliance_item_id=item.id,
+            extra={"kind": "filing", "offset_days": 10},
+        )
+        db.commit()
+
+        existing = list(db.scalars(select(Reminder)).all())
+        assert reminder_service.already_queued(existing, "document", 10) is False
+
+    def test_a_new_filing_reminder_records_its_kind(self, db):
+        """So the next kind added does not have to guess at these rows too."""
+        self.setup_item(db)
+        db.commit()
+
+        self.queue_filing_reminder(db)
+
+        assert db.scalars(select(Reminder)).one().extra["kind"] == "filing"
 
 
 class TestWorkerRuntimeLimits:

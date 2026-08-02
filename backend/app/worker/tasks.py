@@ -94,12 +94,14 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
             if client is None or not client.is_active:
                 continue
 
-            # One reminder per (item, offset) — checked in Python so the JSON
-            # predicate behaves identically on PostgreSQL and SQLite.
-            existing = db.scalars(
-                select(Reminder).where(Reminder.compliance_item_id == item.id)
-            ).all()
-            if any((r.extra or {}).get("offset_days") == days_left for r in existing):
+            # One *filing* reminder per (item, offset) — a document chase for
+            # the same filing on the same day is a different message and must
+            # not silence this one. Checked in Python so the JSON predicate
+            # behaves identically on PostgreSQL and SQLite.
+            existing = list(
+                db.scalars(select(Reminder).where(Reminder.compliance_item_id == item.id)).all()
+            )
+            if reminder_service.already_queued(existing, "filing", days_left):
                 continue
 
             body = draft_client_message(
@@ -127,7 +129,7 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
                     body=body,
                     recipient=client.email,
                     scheduled_for=_ist_morning(run_date),
-                    extra={"offset_days": days_left},
+                    extra={"kind": "filing", "offset_days": days_left},
                 )
             )
             queued += 1
