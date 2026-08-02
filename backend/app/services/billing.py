@@ -341,12 +341,45 @@ def record_payment(
 
 
 def release_items(db: Session, invoice: Invoice) -> int:
-    """Un-bill the filings an invoice covered, so they can be re-invoiced."""
-    item_ids = [line.compliance_item_id for line in invoice.lines if line.compliance_item_id]
+    """Un-bill the filings an invoice covered, so they can be re-invoiced.
+
+    Only the filings no *other* live invoice still cites. ``is_billed`` is a
+    bare flag with no record of which invoice set it, so an invoice releasing
+    every filing it happens to name can clear a claim that has since moved on:
+    cancel an invoice, re-bill the freed work on a second one, then cancel the
+    first again and that filing is back in the billable pile while the second
+    invoice is still charging for it — straight to billing the client twice.
+
+    Cancelled invoices are ignored, which is what makes releasing a claim
+    possible at all; the invoice being released is excluded so re-sending a
+    draft's own lines stays the no-op it looks like.
+    """
+    item_ids = {line.compliance_item_id for line in invoice.lines if line.compliance_item_id}
     if not item_ids:
         return 0
+
+    claimed_elsewhere = set(
+        db.scalars(
+            select(InvoiceLine.compliance_item_id)
+            .join(Invoice, InvoiceLine.invoice_id == Invoice.id)
+            .where(
+                InvoiceLine.compliance_item_id.in_(item_ids),
+                Invoice.id != invoice.id,
+                Invoice.status != InvoiceStatus.CANCELLED,
+            )
+        ).all()
+    )
+    releasable = item_ids - claimed_elsewhere
+    if not releasable:
+        return 0
+
     items = db.scalars(
-        select(ComplianceItem).where(ComplianceItem.id.in_(item_ids))
+        select(ComplianceItem).where(
+            ComplianceItem.id.in_(releasable),
+            # Scoped for the same reason ``referenced_items`` is: nothing should
+            # be able to write ``is_billed`` onto another firm's row.
+            ComplianceItem.firm_id == invoice.firm_id,
+        )
     ).all()
     for item in items:
         item.is_billed = False

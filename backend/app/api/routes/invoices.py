@@ -396,6 +396,14 @@ def record_payment(
 def cancel_invoice(invoice_id: uuid.UUID, practitioner: Manager, db: DbSession):
     """Cancel an invoice and release its filings back to the billable pool."""
     invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id)
+    if invoice.status == InvoiceStatus.CANCELLED:
+        # Refused rather than waved through: a second cancel has no work left to
+        # do, and the filings it named may since have been re-billed on another
+        # invoice. Told plainly, the way an already-sent invoice is.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Invoice {invoice.invoice_number} has already been cancelled",
+        )
     if invoice.status == InvoiceStatus.PAID:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="A paid invoice cannot be cancelled"

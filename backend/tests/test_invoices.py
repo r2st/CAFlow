@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.models.base import InvoiceStatus
+from app.models.compliance import ComplianceItem
 from app.models.invoice import Invoice, InvoiceLine
 from app.schemas.common import MAX_AMOUNT_PAISE
 from app.services import billing, firms
@@ -973,6 +974,192 @@ class TestLinesCitingFilings:
             ],
         )
         assert response.status_code == 404
+
+
+class TestReleasingWorkACancelledInvoiceNoLongerOwns:
+    """``is_billed`` does not record *which* invoice set it.
+
+    So an invoice releasing every filing it happens to name can clear a claim
+    that has since moved on: cancel an invoice, put the freed work on a second
+    one, cancel the first again, and that filing is billable once more while
+    the second invoice is still charging for it. Invoice it again and the
+    client pays twice for one filing — the exact leakage the ``is_billed``
+    flag exists to prevent, running backwards.
+    """
+
+    @staticmethod
+    def _billable_ids(client, auth_headers) -> list[str]:
+        body = client.get("/api/v1/invoices/billable", headers=auth_headers).json()
+        return [item["compliance_item_id"] for g in body["clients"] for item in g["items"]]
+
+    def _one_filing(self, client, auth_headers) -> str:
+        file_everything(client, auth_headers)
+        return self._billable_ids(client, auth_headers)[0]
+
+    @staticmethod
+    def _citing(item_id: str) -> dict:
+        return {
+            "description": "Annual filing, agreed fee",
+            "quantity": 1,
+            "unit_price_paise": 100_000,
+            "compliance_item_id": item_id,
+        }
+
+    def _invoice_citing(self, client, auth_headers, client_id, item_id) -> dict:
+        response = make_invoice(
+            client, auth_headers, client_id, lines=[self._citing(item_id)]
+        )
+        assert response.status_code == 201
+        return response.json()
+
+    def test_cancelling_an_invoice_twice_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        """Told plainly, the way an already-sent invoice is."""
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/cancel", headers=auth_headers)
+
+        second = client.post(
+            f"/api/v1/invoices/{invoice['id']}/cancel", headers=auth_headers
+        )
+
+        assert second.status_code == 409
+        assert "already been cancelled" in second.json()["detail"]
+
+    def test_a_second_cancel_does_not_hand_back_work_another_invoice_bills(
+        self, client, auth_headers, client_id
+    ):
+        item_id = self._one_filing(client, auth_headers)
+        first = self._invoice_citing(client, auth_headers, client_id, item_id)
+        client.post(f"/api/v1/invoices/{first['id']}/cancel", headers=auth_headers)
+        self._invoice_citing(client, auth_headers, client_id, item_id)
+
+        client.post(f"/api/v1/invoices/{first['id']}/cancel", headers=auth_headers)
+
+        assert item_id not in self._billable_ids(client, auth_headers)
+
+    def test_the_work_cannot_then_be_put_on_a_third_invoice(
+        self, client, auth_headers, client_id, db
+    ):
+        """What the leak actually costs: the same filing billed twice.
+
+        The service is asked directly, because the route now refuses the second
+        cancel outright — this is the guard underneath that one, which has to
+        hold on its own for any caller that reaches it another way.
+        """
+        item_id = self._one_filing(client, auth_headers)
+        first = self._invoice_citing(client, auth_headers, client_id, item_id)
+        client.post(f"/api/v1/invoices/{first['id']}/cancel", headers=auth_headers)
+        self._invoice_citing(client, auth_headers, client_id, item_id)
+
+        stale = db.get(Invoice, uuid.UUID(first["id"]))
+        released = billing.release_items(db, stale)
+        db.commit()
+
+        assert released == 0
+        third = make_invoice(
+            client, auth_headers, client_id, lines=[self._citing(item_id)]
+        )
+        assert third.status_code == 409
+        assert "already on another invoice" in third.json()["detail"]
+
+    def test_cancelling_still_frees_the_work_it_was_the_last_to_bill(
+        self, client, auth_headers, client_id
+    ):
+        """The guard withholds a claim that moved on, not every claim."""
+        item_id = self._one_filing(client, auth_headers)
+        invoice = self._invoice_citing(client, auth_headers, client_id, item_id)
+        assert item_id not in self._billable_ids(client, auth_headers)
+
+        response = client.post(
+            f"/api/v1/invoices/{invoice['id']}/cancel", headers=auth_headers
+        )
+
+        assert response.status_code == 200
+        assert item_id in self._billable_ids(client, auth_headers)
+
+    def test_a_cancelled_invoice_does_not_hold_work_hostage(
+        self, client, auth_headers, client_id, db
+    ):
+        """Cancelled invoices keep their lines, and must not count as claimants.
+
+        Otherwise the first cancel frees the filing and every later one is
+        blocked by the corpse of the first — work no one bills, that no one
+        can bill again.
+        """
+        item_id = self._one_filing(client, auth_headers)
+        first = self._invoice_citing(client, auth_headers, client_id, item_id)
+        client.post(f"/api/v1/invoices/{first['id']}/cancel", headers=auth_headers)
+        second = self._invoice_citing(client, auth_headers, client_id, item_id)
+
+        client.post(f"/api/v1/invoices/{second['id']}/cancel", headers=auth_headers)
+
+        assert item_id in self._billable_ids(client, auth_headers)
+
+    def test_the_audit_note_counts_only_the_filings_actually_freed(
+        self, client, auth_headers, client_id
+    ):
+        """A practitioner reads that line to know what went back on the pile."""
+        file_everything(client, auth_headers)
+        generated = client.post(
+            "/api/v1/invoices/generate", json={}, headers=auth_headers
+        ).json()["invoices"][0]
+        expected = len(
+            client.get(f"/api/v1/invoices/{generated['id']}", headers=auth_headers)
+            .json()["lines"]
+        )
+
+        client.post(f"/api/v1/invoices/{generated['id']}/cancel", headers=auth_headers)
+
+        entries = client.get(
+            "/api/v1/audit", params={"action": "invoice.cancel"}, headers=auth_headers
+        ).json()["items"]
+        assert f"{expected} filing(s) returned to unbilled" in entries[0]["summary"]
+
+    def test_a_release_cannot_reach_another_firms_filing(
+        self, client, auth_headers, client_id, db
+    ):
+        """The same guard ``referenced_items`` puts on the way in.
+
+        Nothing routable builds such a line today; this is the store refusing
+        to write ``is_billed`` onto a row that is not ours even if one appears.
+        """
+        outsider = client.post(
+            "/api/v1/auth/register",
+            json={
+                "firm_name": "Meridian & Co",
+                "icai_registration_number": "998877W",
+                "firm_email": "office@meridian-ca.in",
+                "pan": "AAACM7788K",
+                "owner_full_name": "Vikram Rao",
+                "owner_email": "vikram@meridian-ca.in",
+                "owner_password": "another-correct-horse",
+            },
+        ).json()
+        outsider_headers = {"Authorization": f"Bearer {outsider['access_token']}"}
+        their_client = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(pan="AAECM3456L", gstin="27AAECM3456L1Z2"),
+            headers=outsider_headers,
+        ).json()["client"]
+        their_item_id = uuid.UUID(
+            client.get(
+                "/api/v1/compliance/calendar",
+                params={"client_id": their_client["id"], "limit": 1},
+                headers=outsider_headers,
+            ).json()["items"][0]["id"]
+        )
+        their_item = db.get(ComplianceItem, their_item_id)
+        their_item.is_billed = True
+        db.commit()
+
+        ours = db.get(Invoice, uuid.UUID(make_invoice(client, auth_headers, client_id).json()["id"]))
+        ours.lines[0].compliance_item_id = their_item_id
+        db.flush()
+
+        assert billing.release_items(db, ours) == 0
+        db.rollback()
+        assert db.get(ComplianceItem, their_item_id).is_billed is True
 
 
 class TestAmountBounds:
