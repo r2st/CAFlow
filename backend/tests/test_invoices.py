@@ -2119,3 +2119,77 @@ class TestClearingAFieldOnADraft:
 
         assert response.status_code == 200, response.text
         assert response.json()["due_date"] is None
+
+
+class TestAListingWindowThatRunsBackwards:
+    """``GET /invoices`` took a date window and never checked its order.
+
+    A reversed window matches nothing, so the list came back ``200`` with an
+    empty page — which is exactly what a firm with no invoices in that window
+    sees, and nothing in the response tells the two apart. The year is the
+    digit that gets mistyped in a date field, and an empty billing table reads
+    as "this work was never invoiced": the practitioner raises the invoice
+    again, and the client is billed twice for work already on a bill the
+    filter was hiding.
+
+    Every other endpoint in the API that takes a window already refuses this —
+    ``/invoices/revenue``, ``/compliance/calendar``, ``/documents/outstanding``
+    and ``/audit``. This was the one that did not.
+    """
+
+    def _list(self, client, auth_headers, **params):
+        return client.get("/api/v1/invoices", params=params, headers=auth_headers)
+
+    def test_a_reversed_window_is_refused_rather_than_answered_empty(
+        self, client, auth_headers, client_id: str
+    ):
+        assert make_invoice(client, auth_headers, client_id).status_code == 201
+
+        response = self._list(
+            client, auth_headers, from_date="2026-12-01", to_date="2026-01-01"
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == "to_date must not be before from_date"
+
+    def test_the_same_day_at_both_ends_is_a_window(
+        self, client, auth_headers, client_id: str
+    ):
+        """One day is the narrowest real window, not a contradiction."""
+        today = clock.today()
+        assert (
+            make_invoice(
+                client, auth_headers, client_id, issue_date=today.isoformat()
+            ).status_code
+            == 201
+        )
+
+        response = self._list(
+            client, auth_headers, from_date=today.isoformat(), to_date=today.isoformat()
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == 1
+
+    def test_one_end_alone_is_never_out_of_order(
+        self, client, auth_headers, client_id: str
+    ):
+        """A half-open window is a window; there is no pair to compare."""
+        assert make_invoice(client, auth_headers, client_id).status_code == 201
+
+        assert self._list(client, auth_headers, from_date="2035-01-01").status_code == 200
+        assert self._list(client, auth_headers, to_date="2000-01-01").status_code == 200
+
+    def test_a_window_in_the_right_order_still_filters(
+        self, client, auth_headers, client_id: str
+    ):
+        """The refusal is about the order of the two dates, not about matching
+        nothing: a well-formed window that happens to be empty is still 200."""
+        assert make_invoice(client, auth_headers, client_id).status_code == 201
+
+        response = self._list(
+            client, auth_headers, from_date="2000-01-01", to_date="2000-12-31"
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == 0

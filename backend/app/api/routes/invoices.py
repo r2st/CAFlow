@@ -85,6 +85,19 @@ def serialise_detail(invoice: Invoice, today: date | None = None) -> InvoiceDeta
     )
 
 
+def _reject_reversed_window(from_date: date | None, to_date: date | None) -> None:
+    """Refuse a date window nobody meant to ask for.
+
+    Only when the caller gave both ends. A half-open window is a window, and
+    one end alone cannot be in the wrong order with anything.
+    """
+    if from_date is not None and to_date is not None and to_date < from_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="to_date must not be before from_date",
+        )
+
+
 def _reject_due_before_issue(issue_date: date, due_date: date | None) -> None:
     """A payment term cannot run backwards.
 
@@ -329,6 +342,16 @@ def list_invoices(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
+    # The same refusal ``/invoices/revenue`` gives, and for a sharper reason.
+    # A window running backwards matches nothing, so the list came back empty
+    # with a 200 — which is exactly what a firm with no invoices in the window
+    # sees, and there is no way to tell the two apart from the response. The
+    # year is the digit that gets mistyped in a date field, and what the
+    # practitioner reads off an empty billing table is that a client was never
+    # invoiced: they raise the invoice again, and the client is billed twice
+    # for work already on a bill they cannot see.
+    _reject_reversed_window(from_date, to_date)
+
     filters = [Invoice.firm_id == practitioner.firm_id]
     if client_id is not None:
         filters.append(Invoice.client_id == client_id)
