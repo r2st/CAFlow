@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 from app.models.audit import AuditLog
 from tests.conftest import (
     FIRM_REGISTRATION,
-    first_item_of_type,
     first_lapsed_item_of_type,
     make_client_payload,
 )

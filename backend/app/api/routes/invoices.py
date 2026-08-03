@@ -383,7 +383,7 @@ def update_invoice(
     # already reads as nothing to say.
     _reject_due_before_issue(
         updates.get("issue_date") or invoice.issue_date,
-        updates["due_date"] if "due_date" in updates else invoice.due_date,
+        updates.get("due_date", invoice.due_date),
     )
     for key in CLEARABLE_FIELDS:
         if key in updates:
