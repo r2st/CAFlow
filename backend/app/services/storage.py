@@ -56,6 +56,23 @@ LEGACY_OFFICE_TYPES: dict[str, str] = {
     ".xls": "application/vnd.ms-excel",
 }
 
+# The three shapes a zip container starts with: a local file header, an empty
+# archive's end-of-central-directory record, and a spanned archive's marker.
+ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+# The modern half of the same problem the OLE signature poses. A .docx and a
+# .xlsx *are* zip archives, and so is a .zip full of anything at all — the
+# container says nothing about what is in it, exactly as the OLE header says
+# nothing about whether it holds a workbook or an installer.
+#
+# So the same answer: the extension decides, and only these two get in. Without
+# it the archive rule refused RAR, 7-Zip and gzip while the format a client
+# actually reaches for walked straight past — and the portal upload that writes
+# it is reachable by anyone holding a magic link.
+OOXML_TYPES: dict[str, str] = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
 # Formats we can pull text out of without an OCR/PDF dependency. PDFs and
 # images fall back to filename-based categorisation until OCR is wired up.
 TEXT_CONTENT_TYPES = frozenset({"text/plain", "text/csv", "application/json"})
@@ -92,7 +109,9 @@ CONTENT_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"RIFF", "image/webp"),  # narrowed below by the WEBP tag
     (b"II*\x00", "image/tiff"),
     (b"MM\x00*", "image/tiff"),
-    (b"PK\x03\x04", "application/zip"),  # .docx / .xlsx are zip containers
+    # Zip containers are handled ahead of this table, by ``is_zip_container``:
+    # the extension decides which of them is a document, so they cannot be
+    # resolved from the signature alone.
 )
 
 
@@ -128,15 +147,34 @@ def legacy_office_type(filename: str) -> str | None:
     return LEGACY_OFFICE_TYPES.get(Path(filename or "").suffix.lower())
 
 
+def ooxml_type(filename: str) -> str | None:
+    """The content type a ``.docx``/``.xlsx`` name claims, or None for anything else."""
+    return OOXML_TYPES.get(Path(filename or "").suffix.lower())
+
+
+def is_zip_container(data: bytes) -> bool:
+    return data.startswith(ZIP_SIGNATURES)
+
+
 def sniff_content_type(data: bytes, filename: str = "") -> str | None:
     """The content type implied by the leading bytes, or None if unrecognised.
 
-    ``filename`` only matters for OLE compound files, where the bytes say
-    "legacy Office container" and the extension is the only thing that says
-    which one.
+    ``filename`` matters for the two container formats, where the bytes say
+    only which container it is and the extension is the only thing that says
+    what is inside: an OLE compound file is a workbook or a letter or an
+    installer, and a zip is a .docx or a .xlsx or an archive of anything.
+
+    A zip that is not named like an Office document is still reported as one —
+    ``validate_upload`` refuses it before this is reached, and reporting the
+    container honestly is better than claiming a type it does not have.
     """
     if data.startswith(OLE_SIGNATURE):
         return legacy_office_type(filename)
+    if is_zip_container(data):
+        # Recorded as the document it is rather than as the container it ships
+        # in, so a browser sending octet-stream for a spreadsheet does not cost
+        # the record the one fact worth keeping about the file.
+        return ooxml_type(filename) or "application/zip"
     for signature, content_type in CONTENT_SIGNATURES:
         if not data.startswith(signature):
             continue
@@ -189,6 +227,21 @@ def validate_upload(
             "This file is a legacy Office container, and only .doc and .xls files "
             "are accepted in that format. Save it as .docx, .xlsx or PDF and "
             "upload that."
+        )
+
+    # And the modern half of it. .docx and .xlsx are zip archives, so the
+    # archive rule above could not simply refuse the signature — which left the
+    # one archive format a client actually reaches for as the only one that got
+    # in. RAR, 7-Zip and gzip were turned away with "upload the documents
+    # themselves"; a .zip of the very same documents, or of an executable
+    # inside a container nothing here can see into, was stored.
+    #
+    # The extension is the only evidence there is, exactly as it is for OLE.
+    if is_zip_container(head) and ooxml_type(filename) is None:
+        raise UnsupportedFileType(
+            "This file is a zip container, and only .docx and .xlsx files are "
+            "accepted in that format. Upload the documents themselves rather "
+            "than an archive."
         )
 
     # A missing content type is treated as octet-stream rather than rejected;

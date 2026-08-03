@@ -93,10 +93,12 @@ class TestUploadSignatures:
 
     def test_an_office_document_is_accepted(self):
         # .docx / .xlsx are zip containers and must not trip the archive rule.
+        # The name is what says which zip this is, exactly as it is for OLE.
         storage.validate_upload(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             8,
             b"PK\x03\x04\x14\x00\x06\x00",
+            "ledger.xlsx",
         )
 
     def test_the_size_limit_still_applies_first(self):
@@ -163,6 +165,7 @@ class TestLegacyOfficeUploads:
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             8,
             b"PK\x03\x04\x14\x00\x06\x00",
+            "form-16.docx",
         )
 
     def test_a_renamed_executable_is_not_let_in_by_its_extension(self):
@@ -176,6 +179,92 @@ class TestLegacyOfficeUploads:
     def test_an_archive_is_refused_with_somewhere_to_go_too(self):
         with pytest.raises(storage.UnsupportedFileType, match="rather than an archive"):
             storage.validate_upload("application/zip", 64, b"Rar!\x1a\x07\x00payload")
+
+
+class TestZipContainerUploads:
+    """The modern half of the OLE problem, and the half that was open.
+
+    A .docx and a .xlsx *are* zip archives, so the archive rule could not
+    simply refuse the signature — which left the one archive format a client
+    actually reaches for as the only one that got in. RAR, 7-Zip and gzip were
+    turned away with "upload the documents themselves"; a .zip of the very same
+    documents, or of an executable inside a container nothing here can see
+    into, was stored. The portal upload that writes it is reachable by anyone
+    holding a magic link.
+    """
+
+    LOCAL_HEADER = b"PK\x03\x04\x14\x00\x06\x00"
+
+    def test_a_plain_zip_is_refused(self):
+        with pytest.raises(storage.UnsupportedFileType, match="rather than an archive"):
+            storage.validate_upload("application/zip", 64, self.LOCAL_HEADER, "records.zip")
+
+    def test_a_zip_with_no_extension_at_all_is_refused(self):
+        with pytest.raises(storage.UnsupportedFileType, match="zip container"):
+            storage.validate_upload(None, 64, self.LOCAL_HEADER, "attachment")
+
+    def test_a_zip_wearing_a_pdf_name_is_refused(self):
+        """The extension is the only evidence there is, and it has to agree
+        with the bytes rather than merely be present."""
+        with pytest.raises(storage.UnsupportedFileType, match="zip container"):
+            storage.validate_upload("application/pdf", 64, self.LOCAL_HEADER, "statement.pdf")
+
+    def test_an_empty_archive_record_is_refused_too(self):
+        # PK\x05\x06 is what a zip with nothing in it starts with; it is still
+        # a container, and matching only the local-file-header signature would
+        # walk straight past it.
+        with pytest.raises(storage.UnsupportedFileType, match="zip container"):
+            storage.validate_upload(None, 64, b"PK\x05\x06" + b"\x00" * 18, "records.zip")
+
+    def test_a_spanned_archive_marker_is_refused_too(self):
+        with pytest.raises(storage.UnsupportedFileType, match="zip container"):
+            storage.validate_upload(None, 64, b"PK\x07\x08payload", "records.zip")
+
+    def test_the_two_office_formats_are_let_through(self):
+        for filename in ("form-16.docx", "ledger.xlsx"):
+            storage.validate_upload(None, 64, self.LOCAL_HEADER, filename)
+
+    def test_the_extension_is_matched_whatever_its_case(self):
+        storage.validate_upload(None, 64, self.LOCAL_HEADER, "LEDGER.XLSX")
+
+    def test_the_refusal_says_what_to_send_instead(self):
+        with pytest.raises(storage.UnsupportedFileType) as refusal:
+            storage.validate_upload("application/zip", 64, self.LOCAL_HEADER, "records.zip")
+
+        message = str(refusal.value)
+        assert ".docx and .xlsx" in message
+        assert "rather than an archive" in message
+
+    def test_the_other_archive_formats_are_still_refused(self):
+        for head in (b"Rar!\x1a\x07\x00", b"7z\xbc\xaf\x27\x1c", b"\x1f\x8b\x08"):
+            with pytest.raises(storage.UnsupportedFileType):
+                storage.validate_upload(None, 64, head + b"payload", "records.docx")
+
+    def test_an_executable_inside_the_container_name_is_still_refused(self):
+        """The signature is read first, so naming a payload .docx does not buy
+        it anything."""
+        with pytest.raises(storage.UnsupportedFileType, match="Windows executable"):
+            storage.validate_upload(None, 64, b"MZ\x90\x00payload", "form-16.docx")
+
+    def test_a_docx_is_recorded_as_a_document_not_as_a_container(self):
+        assert storage.sniff_content_type(self.LOCAL_HEADER, "form-16.docx") == (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        assert storage.sniff_content_type(self.LOCAL_HEADER, "ledger.xlsx") == (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    def test_a_mislabelled_spreadsheet_is_recorded_as_a_spreadsheet(self):
+        """Browsers routinely send octet-stream for .xlsx, and recording that
+        would lose the one fact worth keeping about the file."""
+        assert storage.effective_content_type(
+            "application/octet-stream", self.LOCAL_HEADER, "ledger.xlsx"
+        ) == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    def test_any_other_zip_is_still_reported_honestly_as_a_container(self):
+        """``validate_upload`` refuses it before this is reached, so the only
+        question left is whether the sniffer lies about it. It does not."""
+        assert storage.sniff_content_type(self.LOCAL_HEADER, "records.zip") == "application/zip"
 
 
 class TestRefusalOrder:
