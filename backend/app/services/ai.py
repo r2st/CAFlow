@@ -63,6 +63,45 @@ class OpenRouterError(RuntimeError):
     pass
 
 
+def _answer(payload: dict[str, Any]) -> str:
+    """The model's reply, or ``ValueError`` if there is not one in there.
+
+    A well-formed response carrying nothing is the shape this missed. The
+    models here are the free tier: they return ``"content": null`` when a
+    provider drops the completion, and an empty or whitespace-only string when
+    a safety filter or a token limit ends the generation before a word of it —
+    and the envelope around that is perfectly valid, so ``raise_for_status``
+    passes and the key lookups all succeed.
+
+    What came back was ``None`` or ``""``, handed to callers that had no reason
+    to expect either:
+
+    * ``categorise_document`` regex-searches it, so ``None`` raised
+      ``TypeError`` — which is not in the tuple it catches — out of
+      ``ingest_upload`` and into a 500. The file the client had just uploaded
+      was already on disk with no row pointing at it. Categorising a document
+      is the one part of an upload allowed to be wrong; it is not allowed to
+      lose the file.
+    * ``draft_client_message`` calls ``.strip()`` on it, so ``None`` raised
+      ``AttributeError`` out of a queueing sweep. The whole run is one
+      transaction, so every reminder built before that point was thrown away —
+      the same loss ``DraftingBudget`` exists to prevent, arriving by a
+      different road.
+    * The empty string raised nothing at all, which is the worse half: the
+      reminder was queued with a blank body and the dispatcher mailed it. A
+      client received an empty email, under their CA's sender name and
+      reply-to.
+
+    Reported as a failure of *that model*, so the fallback is tried and, if it
+    answers with the same nothing, the ``OpenRouterError`` every caller already
+    handles is what comes out — the heuristic category, the template wording.
+    """
+    content = payload["choices"][0]["message"]["content"]
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError(f"the model returned no content ({content!r})")
+    return content
+
+
 class OpenRouterClient:
     """Thin wrapper over the OpenRouter chat-completions endpoint."""
 
@@ -106,7 +145,7 @@ class OpenRouterClient:
                     timeout=settings.openrouter_timeout_seconds,
                 )
                 response.raise_for_status()
-                return response.json()["choices"][0]["message"]["content"]
+                return _answer(response.json())
             except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
                 logger.warning("OpenRouter call failed on model %s: %s", model, exc)
                 last_error = exc

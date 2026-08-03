@@ -763,3 +763,112 @@ class TestTheTemplateSaysTheRightThing:
         )
 
         assert message.endswith("Regards,\nSharma & Associates")
+
+
+class TestAReplyWithNothingInIt:
+    """A well-formed response carrying no completion.
+
+    The models here are the free tier: they return ``"content": null`` when a
+    provider drops the completion, and an empty string when a safety filter or
+    a token limit ends the generation before a word of it. The envelope around
+    that is perfectly valid, so the status check passes and every key lookup
+    succeeds — and what reached the callers was ``None`` or ``""``, which
+    neither had any reason to expect.
+    """
+
+    def _reply(self, content):
+        return _StubResponse({"choices": [{"message": {"content": content}}]})
+
+    @pytest.mark.parametrize("content", [None, "", "   \n\t "])
+    def test_it_is_a_failure_of_that_model(self, capture_posts, content):
+        _, queue = capture_posts
+        queue.extend([self._reply(content), self._reply(content)])
+
+        with pytest.raises(OpenRouterError, match="All OpenRouter models failed"):
+            OpenRouterClient(api_key="sk-or-test").complete("sys", "user")
+
+    def test_the_fallback_model_is_asked(self, capture_posts):
+        """Reported as this model's failure, not the feature's: the second
+        model has not answered yet and may well have the words."""
+        calls, queue = capture_posts
+        queue.extend([self._reply(None), _StubResponse(_content("the fallback answered"))])
+
+        assert (
+            OpenRouterClient(api_key="sk-or-test").complete("sys", "user")
+            == "the fallback answered"
+        )
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize("content", [None, ""])
+    def test_an_upload_still_keeps_its_file(self, capture_posts, content):
+        """``categorise_document`` regex-searches the reply, so ``None`` raised
+        ``TypeError`` — which is not in the tuple it catches — out of the
+        upload endpoint and into a 500, with the client's file already on disk
+        and no row pointing at it."""
+        _, queue = capture_posts
+        queue.extend([self._reply(content), self._reply(content)])
+
+        result = categorise_document(
+            "hdfc-bank-statement.pdf", "PAN AABCN2345P", OpenRouterClient(api_key="sk-or-test")
+        )
+
+        assert result.source == "heuristic"
+        assert result.category == DocumentCategory.BANK_STATEMENT
+        # The deterministic extraction is unaffected by the model saying nothing.
+        assert result.extracted["pan"] == "AABCN2345P"
+
+    @pytest.mark.parametrize("content", [None, ""])
+    def test_a_sweep_still_queues_its_reminders(self, capture_posts, content):
+        """``draft_client_message`` called ``.strip()`` on the reply, so
+        ``None`` raised ``AttributeError`` out of a queueing sweep — and the
+        whole run is one transaction, so every reminder built before that point
+        was thrown away."""
+        _, queue = capture_posts
+        queue.extend([self._reply(content), self._reply(content)])
+
+        message = draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={"invoice_number": "INV-0042", "amount_inr": "25,000.00"},
+            llm=OpenRouterClient(api_key="sk-or-test"),
+            firm_name="Sharma & Associates",
+        )
+
+        assert message.startswith("Dear Ravi Traders,")
+        assert "INV-0042" in message
+        assert message.endswith("Sharma & Associates")
+
+    def test_a_client_is_never_sent_a_blank_message(self, capture_posts):
+        """The empty string raised nothing at all, which is the worse half: the
+        reminder was queued with a blank body and the dispatcher mailed it, so
+        a client received an empty email under their CA's sender name."""
+        _, queue = capture_posts
+        queue.extend([self._reply("   "), self._reply("")])
+
+        message = draft_client_message(
+            purpose="document_request",
+            client_name="Nimbus Textiles Pvt Ltd",
+            context={"compliance": "GSTR-1", "documents": ["Bank statement"]},
+            llm=OpenRouterClient(api_key="sk-or-test"),
+        )
+
+        assert message.strip(), "an empty body goes out over the firm's own name"
+        assert "Bank statement" in message
+
+    def test_the_budget_counts_it_as_a_template(self, capture_posts):
+        """The time was spent whether or not the model answered, and a provider
+        answering with nothing is exactly when the allowance has to stop the
+        run reaching for it again."""
+        _, queue = capture_posts
+        queue.extend([self._reply(None), self._reply(None)])
+        budget = ai.DraftingBudget(seconds=60)
+
+        draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={},
+            llm=OpenRouterClient(api_key="sk-or-test"),
+            budget=budget,
+        )
+
+        assert (budget.drafted, budget.templated) == (0, 1)
