@@ -98,6 +98,54 @@ def _reject_reversed_window(from_date: date | None, to_date: date | None) -> Non
         )
 
 
+def _reject_impossible_payment_date(invoice: Invoice, payment_date: date | None) -> None:
+    """A receipt cannot be dated before the bill, or after today.
+
+    ``payment_date`` is the firm's record of the day money arrived, and it is
+    the one field on a receipt the practitioner types rather than derives.
+    Nothing checked it against anything, so both impossible directions went
+    straight onto the record:
+
+    * a date in the future says money has arrived that has not. It is what a
+      mistyped year produces — the digit that gets mistyped in a date field —
+      and it becomes the invoice's ``payment_date`` for good, so the ledger
+      says a client settled in 2099 while the bank feed says nothing;
+    * a date before the invoice was raised says the client paid a bill that
+      did not yet exist. That is the ordinary slip of entering last year's
+      receipt against this year's invoice while reconciling, and it lands on
+      the wrong invoice with no marker that it did.
+
+    Neither is recoverable from the record afterwards: there is one
+    ``payment_date`` per invoice and nothing keeps what it was before. The
+    refusal names both dates, because which of the two is wrong is the
+    practitioner's to decide — a genuinely old receipt may belong to a
+    different invoice entirely.
+
+    Only when the caller gave a date. Omitting it books the payment today,
+    which cannot produce either.
+    """
+    if payment_date is None:
+        return
+    today = clock.today()
+    if payment_date > today:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"payment_date {payment_date:%d %b %Y} is in the future — a "
+                "payment cannot be recorded before it has been received"
+            ),
+        )
+    if payment_date < invoice.issue_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"payment_date {payment_date:%d %b %Y} falls before invoice "
+                f"{invoice.invoice_number} was raised on "
+                f"{invoice.issue_date:%d %b %Y}"
+            ),
+        )
+
+
 def _reject_due_before_issue(issue_date: date, due_date: date | None) -> None:
     """A payment term cannot run backwards.
 
@@ -494,6 +542,9 @@ def record_payment(
     # receipts entered at once each overwrite the other's. See
     # ``billing.load_for_update``.
     invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id, for_update=True)
+    # After the invoice is loaded, because the date is checked against the day
+    # it was raised, and before anything is applied.
+    _reject_impossible_payment_date(invoice, payload.payment_date)
     try:
         billing.record_payment(
             invoice,

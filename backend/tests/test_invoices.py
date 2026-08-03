@@ -2193,3 +2193,122 @@ class TestAListingWindowThatRunsBackwards:
 
         assert response.status_code == 200, response.text
         assert response.json()["total"] == 0
+
+
+class TestAReceiptDatedWhenItCannotHaveArrived:
+    """``payment_date`` is the firm's record of the day money arrived, and it
+    is the one field on a receipt a practitioner types rather than derives.
+    Nothing checked it against anything.
+
+    Both impossible directions went onto the record. A future date says money
+    has arrived that has not — what a mistyped year produces — and a date
+    before the invoice was raised says the client paid a bill that did not
+    exist, which is the everyday slip of booking last year's receipt against
+    this year's invoice while reconciling. Neither is recoverable: there is
+    one ``payment_date`` per invoice and nothing keeps what it was before.
+    """
+
+    def _sent(self, client, auth_headers, client_id, **overrides):
+        invoice = make_invoice(client, auth_headers, client_id, **overrides).json()
+        return client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+
+    def _pay(self, client, auth_headers, invoice, **payload):
+        return client.post(
+            f"/api/v1/invoices/{invoice['id']}/payments",
+            json={"amount_paise": 1000, **payload},
+            headers=auth_headers,
+        )
+
+    def test_a_payment_dated_in_the_future_is_refused(
+        self, client, auth_headers, client_id: str
+    ):
+        sent = self._sent(client, auth_headers, client_id)
+        ahead = clock.today() + timedelta(days=1)
+
+        response = self._pay(client, auth_headers, sent, payment_date=ahead.isoformat())
+
+        assert response.status_code == 422, response.text
+        assert "is in the future" in response.json()["detail"]
+
+    def test_a_mistyped_year_is_the_case_this_catches(
+        self, client, auth_headers, client_id: str
+    ):
+        sent = self._sent(client, auth_headers, client_id)
+
+        response = self._pay(client, auth_headers, sent, payment_date="2099-04-01")
+
+        assert response.status_code == 422, response.text
+        assert "01 Apr 2099" in response.json()["detail"]
+
+    def test_a_payment_dated_before_the_invoice_was_raised_is_refused(
+        self, client, auth_headers, client_id: str
+    ):
+        raised = clock.today() - timedelta(days=10)
+        sent = self._sent(
+            client, auth_headers, client_id, issue_date=raised.isoformat()
+        )
+
+        response = self._pay(
+            client,
+            auth_headers,
+            sent,
+            payment_date=(raised - timedelta(days=1)).isoformat(),
+        )
+
+        assert response.status_code == 422, response.text
+        detail = response.json()["detail"]
+        assert "falls before invoice" in detail
+        assert sent["invoice_number"] in detail
+
+    def test_the_day_the_invoice_was_raised_is_allowed(
+        self, client, auth_headers, client_id: str
+    ):
+        """Payment on receipt is an ordinary term, not a contradiction."""
+        raised = clock.today() - timedelta(days=10)
+        sent = self._sent(
+            client, auth_headers, client_id, issue_date=raised.isoformat()
+        )
+
+        response = self._pay(
+            client, auth_headers, sent, payment_date=raised.isoformat()
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["payment_date"] == raised.isoformat()
+
+    def test_today_is_allowed(self, client, auth_headers, client_id: str):
+        sent = self._sent(client, auth_headers, client_id)
+        today = clock.today()
+
+        response = self._pay(client, auth_headers, sent, payment_date=today.isoformat())
+
+        assert response.status_code == 200, response.text
+        assert response.json()["payment_date"] == today.isoformat()
+
+    def test_omitting_the_date_still_books_it_today(
+        self, client, auth_headers, client_id: str
+    ):
+        """The default cannot produce either failure, so it is left alone."""
+        sent = self._sent(client, auth_headers, client_id)
+
+        response = self._pay(client, auth_headers, sent)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["payment_date"] == clock.today().isoformat()
+
+    def test_a_refused_date_leaves_the_invoice_untouched(
+        self, client, auth_headers, client_id: str
+    ):
+        """Checked before anything is applied, so the balance does not move."""
+        sent = self._sent(client, auth_headers, client_id)
+
+        self._pay(client, auth_headers, sent, payment_date="2099-04-01")
+
+        after = client.get(
+            f"/api/v1/invoices/{sent['id']}", headers=auth_headers
+        ).json()
+        assert after["amount_paid_paise"] == 0
+        assert after["payment_date"] is None
+        assert after["status"] == sent["status"]
