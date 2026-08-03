@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentFirm, CurrentPractitioner, DbSession, Manager
 from app.core import clock
+from app.core.search import LIKE_ESCAPE, contains_pattern
 from app.models.base import ComplianceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
@@ -262,14 +263,17 @@ def list_clients(
     offset: int = Query(default=0, ge=0),
 ):
     filters = [Client.firm_id == practitioner.firm_id]
-    if search:
-        pattern = f"%{search.strip()}%"
+    # ``%`` and ``_`` in the caller's own text are pattern syntax, not text —
+    # see :mod:`app.core.search`. A PAN or GSTIN fragment is exactly where an
+    # underscore turns up, and a client the firm has on its books reading as
+    # "no such client" is how a duplicate gets created.
+    if (pattern := contains_pattern(search)) is not None:
         filters.append(
             or_(
-                Client.name.ilike(pattern),
-                Client.pan.ilike(pattern),
-                Client.gstin.ilike(pattern),
-                Client.email.ilike(pattern),
+                Client.name.ilike(pattern, escape=LIKE_ESCAPE),
+                Client.pan.ilike(pattern, escape=LIKE_ESCAPE),
+                Client.gstin.ilike(pattern, escape=LIKE_ESCAPE),
+                Client.email.ilike(pattern, escape=LIKE_ESCAPE),
             )
         )
     if is_active is not None:

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession, Manager
 from app.core import clock
+from app.core.search import LIKE_ESCAPE, contains_pattern
 from app.models.base import TaskPriority, TaskStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
@@ -311,9 +312,15 @@ def list_tasks(
         filters.extend([Task.due_date < today, Task.status.in_(OPEN_STATUSES)])
     if due_before is not None:
         filters.append(Task.due_date <= due_before)
-    if search:
-        pattern = f"%{search.strip()}%"
-        filters.append(or_(Task.title.ilike(pattern), Task.description.ilike(pattern)))
+    # Escaped, because ``%`` and ``_`` in the caller's text are pattern syntax
+    # rather than text — see :mod:`app.core.search`.
+    if (pattern := contains_pattern(search)) is not None:
+        filters.append(
+            or_(
+                Task.title.ilike(pattern, escape=LIKE_ESCAPE),
+                Task.description.ilike(pattern, escape=LIKE_ESCAPE),
+            )
+        )
 
     total = db.scalar(select(func.count(Task.id)).where(*filters)) or 0
     rows = list(

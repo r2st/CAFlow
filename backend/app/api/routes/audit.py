@@ -18,6 +18,7 @@ from sqlalchemy import func, or_, select
 
 from app.api.deps import DbSession, FirmAdmin
 from app.core import clock
+from app.core.search import LIKE_ESCAPE, contains_pattern
 from app.models.audit import AuditLog
 from app.schemas.audit import AuditActionOut, AuditActionsResponse, AuditLogOut
 from app.schemas.common import Page
@@ -98,9 +99,18 @@ def list_audit_log(
     if end is not None:
         filters.append(AuditLog.created_at <= end)
 
-    if search:
-        pattern = f"%{search.strip()}%"
-        filters.append(or_(AuditLog.summary.ilike(pattern), AuditLog.actor_label.ilike(pattern)))
+    # Escaped, because ``%`` and ``_`` in the caller's text are pattern syntax
+    # rather than text — see :mod:`app.core.search`. A summary quotes invoice
+    # numbers and email addresses, which is where an underscore lives, and a
+    # trail that silently answers a narrower question than it was asked is one
+    # nobody can rely on.
+    if (pattern := contains_pattern(search)) is not None:
+        filters.append(
+            or_(
+                AuditLog.summary.ilike(pattern, escape=LIKE_ESCAPE),
+                AuditLog.actor_label.ilike(pattern, escape=LIKE_ESCAPE),
+            )
+        )
 
     total = db.scalar(select(func.count(AuditLog.id)).where(*filters)) or 0
     rows = db.scalars(
