@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, Generic, TypeVar
+from typing import Annotated, Any, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+)
+
+from app.core.security import MAX_PASSWORD_BYTES
 
 T = TypeVar("T")
 
@@ -108,4 +117,43 @@ def validate_tan(value: str | None) -> str | None:
     return value
 
 
-PasswordField = Field(min_length=8, max_length=72)
+def within_bcrypt_limit(value: str) -> str:
+    """Refuse a password bcrypt could not hash whole.
+
+    bcrypt takes at most 72 *bytes* and truncates silently past that, so
+    :func:`~app.core.security.hash_password` refuses a longer one outright. A
+    character limit is a different limit: UTF-8 spends three bytes on every
+    Devanagari letter and two on every accented Latin one, so a 30-character
+    Hindi passphrase is ninety bytes — well inside a 72-character cap and well
+    outside what can be hashed.
+
+    Nothing checked the bytes before the hash was attempted, so that
+    passphrase reached ``hash_password``, raised, and came back as a 500 with
+    the generic "something went wrong on our side" and a request id. Nothing
+    named the field, nothing said a shorter one would work, and the firm being
+    turned away was signing up. The one class of user it hit is the one whose
+    password is not in ASCII — which, for a product sold to Indian
+    accountants, is not an edge.
+
+    Checked here rather than only in the hasher because this is where a caller
+    is told which field is wrong and why. The hasher keeps its own check: it
+    is what makes silent truncation impossible for any caller, including one
+    that never went through a schema.
+    """
+    if len(value.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"Password must be at most {MAX_PASSWORD_BYTES} bytes. Accented and "
+            "Indic characters count as two or three bytes each, so this one is "
+            "longer than it looks — please shorten it."
+        )
+    return value
+
+
+# Every field a caller sets a password through. The byte check rides on the
+# type rather than being attached per field, so a new password field cannot be
+# added without it.
+Password = Annotated[
+    str,
+    Field(min_length=8, max_length=MAX_PASSWORD_BYTES),
+    AfterValidator(within_bcrypt_limit),
+]

@@ -95,6 +95,109 @@ class TestRegistration:
         assert response.status_code == 422
 
 
+class TestAPasswordIsMeasuredInBytes:
+    """bcrypt takes at most 72 bytes; the schema capped 72 *characters*.
+
+    UTF-8 spends three bytes on every Devanagari letter and two on every
+    accented Latin one, so a thirty-character Hindi passphrase is ninety bytes
+    — well inside the character cap and well outside what can be hashed.
+    Nothing checked the bytes before the hash was attempted, so it reached
+    ``hash_password``, raised, and came back as a 500 with the generic
+    "something went wrong on our side" and a request id: nothing named the
+    field, nothing said a shorter one would work, and the firm being turned
+    away was signing up.
+
+    The one class of user it hit is the one whose password is not in ASCII,
+    which for a product sold to Indian accountants is not an edge.
+    """
+
+    # 35 characters, 105 bytes.
+    HINDI_PASSPHRASE = "पासवर्ड" * 5
+    # 60 characters, 75 bytes — three over, from the accents alone.
+    ACCENTED = "café" * 15
+
+    def test_the_two_measures_really_do_disagree(self):
+        """Guards the premise: if this stops holding the tests below prove nothing."""
+        assert len(self.HINDI_PASSPHRASE) <= 72 < len(self.HINDI_PASSPHRASE.encode())
+        assert len(self.ACCENTED) <= 72 < len(self.ACCENTED.encode())
+
+    @pytest.mark.parametrize("password", [HINDI_PASSPHRASE, ACCENTED])
+    def test_registration_names_the_field_instead_of_failing(
+        self, client: TestClient, password: str
+    ):
+        payload = FIRM_REGISTRATION | {
+            "owner_password": password,
+            "owner_email": "x@y.in",
+        }
+        response = client.post(f"{API}/auth/register", json=payload)
+
+        assert response.status_code == 422, response.text
+        body = response.json()
+        assert body["error"]["fields"][0]["field"] == "owner_password"
+        assert "bytes" in body["error"]["fields"][0]["message"]
+
+    def test_the_refusal_happens_before_the_firm_is_built(
+        self, client: TestClient, db: Session
+    ):
+        """``register_firm`` adds and flushes the firm before it hashes the
+        owner's password, so the old failure got as far as a half-built firm
+        and relied on the session rollback to undo it. Refused at the door,
+        nothing is built to undo."""
+        client.post(
+            f"{API}/auth/register",
+            json=FIRM_REGISTRATION
+            | {"owner_password": self.HINDI_PASSPHRASE, "owner_email": "x@y.in"},
+        )
+        assert db.query(Firm).count() == 0
+
+    def test_adding_a_team_member_is_refused_the_same_way(
+        self, client: TestClient, auth_headers: dict
+    ):
+        response = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Vikram Rao",
+                "email": "vikram@sharma-ca.in",
+                "password": self.HINDI_PASSPHRASE,
+                "role": "manager",
+            },
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["fields"][0]["field"] == "password"
+
+    def test_a_passphrase_that_fits_is_still_accepted(self, client: TestClient):
+        """The limit is bytes, not ASCII — non-Latin passwords are not banned."""
+        password = "पासवर्ड-२०२६"  # 12 characters, 30 bytes
+        assert len(password.encode()) <= 72
+        payload = FIRM_REGISTRATION | {"owner_password": password, "owner_email": "x@y.in"}
+
+        assert client.post(f"{API}/auth/register", json=payload).status_code == 201
+
+        signed_in = client.post(
+            f"{API}/auth/login", json={"email": "x@y.in", "password": password}
+        )
+        assert signed_in.status_code == 200, signed_in.text
+
+    def test_seventy_two_ascii_characters_still_fit(self, client: TestClient):
+        """The boundary is unchanged for the passwords that always worked."""
+        payload = FIRM_REGISTRATION | {"owner_password": "a" * 72, "owner_email": "x@y.in"}
+        assert client.post(f"{API}/auth/register", json=payload).status_code == 201
+
+    def test_signing_in_with_one_too_long_is_still_just_a_wrong_password(
+        self, client: TestClient, registered_firm: dict
+    ):
+        """Being checked is not the same as being set. No account can hold one,
+        so it is wrong rather than malformed — and answering 422 would come
+        back faster than a real attempt and say so."""
+        response = client.post(
+            f"{API}/auth/login",
+            json={"email": "anita@sharma-ca.in", "password": self.HINDI_PASSPHRASE},
+        )
+        assert response.status_code == 401
+
+
 class TestLogin:
     def test_login_succeeds(self, client: TestClient, registered_firm: dict):
         response = client.post(

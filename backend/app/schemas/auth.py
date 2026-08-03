@@ -8,7 +8,13 @@ from datetime import datetime
 from pydantic import EmailStr, Field, field_validator
 
 from app.models.base import FirmPlan, PractitionerRole
-from app.schemas.common import ORMModel, SanitizedModel, validate_gstin, validate_pan
+from app.schemas.common import (
+    ORMModel,
+    Password,
+    SanitizedModel,
+    validate_gstin,
+    validate_pan,
+)
 
 
 class FirmRegisterRequest(SanitizedModel):
@@ -25,7 +31,7 @@ class FirmRegisterRequest(SanitizedModel):
     # The first practitioner — becomes the firm owner.
     owner_full_name: str = Field(min_length=2, max_length=255)
     owner_email: EmailStr
-    owner_password: str = Field(min_length=8, max_length=72)
+    owner_password: Password
     owner_membership_number: str | None = Field(default=None, max_length=32)
 
     _validate_pan = field_validator("pan")(validate_pan)
@@ -34,13 +40,18 @@ class FirmRegisterRequest(SanitizedModel):
 
 class LoginRequest(SanitizedModel):
     email: EmailStr
+    # Not ``Password``: this one is being checked, not set. A password too long
+    # for bcrypt cannot be the one on any account, and ``verify_password``
+    # already turns it into the same 401 as any other wrong password — while
+    # still spending the same time on it. A 422 here would answer faster than
+    # a real attempt and say so.
     password: str = Field(min_length=1, max_length=72)
 
 
 class PractitionerCreate(SanitizedModel):
     full_name: str = Field(min_length=2, max_length=255)
     email: EmailStr
-    password: str = Field(min_length=8, max_length=72)
+    password: Password
     role: PractitionerRole = PractitionerRole.JUNIOR
     phone: str | None = Field(default=None, max_length=20)
     membership_number: str | None = Field(default=None, max_length=32)
