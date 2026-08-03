@@ -1436,3 +1436,52 @@ class TestWhatADepartingMemberIsStillNamedOn:
         assert response.json()["created"] > 0
 
         assert self._items_of(client, auth_headers, assigned_to=junior["id"])
+
+
+class TestASelectionThatNamesOneTaskTwice:
+    """``skipped`` was measured against the raw id list, so a task named twice
+    counted as one the board could not find.
+
+    A selection is built by clicking rows, and the board re-reads between
+    clicks, so a repeat is ordinary. Counting it as a skip reports work that
+    was done as work that was not — see the compliance-calendar counterpart,
+    which had the same arithmetic.
+    """
+
+    def test_a_repeated_id_is_not_reported_as_skipped(self, client, auth_headers):
+        task_id = create_task(client, auth_headers).json()["id"]
+
+        response = client.post(
+            "/api/v1/tasks/bulk",
+            json={"task_ids": [task_id] * 3, "status": "in_progress"},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"updated": 1, "skipped": 0}
+
+    def test_the_repeated_task_is_still_updated(self, client, auth_headers):
+        task_id = create_task(client, auth_headers).json()["id"]
+
+        client.post(
+            "/api/v1/tasks/bulk",
+            json={"task_ids": [task_id, task_id], "priority": "urgent"},
+            headers=auth_headers,
+        )
+
+        body = client.get(f"/api/v1/tasks/{task_id}", headers=auth_headers).json()
+        assert body["priority"] == "urgent"
+
+    def test_an_unknown_id_is_still_counted_once_beside_a_repeat(
+        self, client, auth_headers
+    ):
+        task_id = create_task(client, auth_headers).json()["id"]
+        stranger = str(uuid.uuid4())
+
+        response = client.post(
+            "/api/v1/tasks/bulk",
+            json={"task_ids": [task_id, task_id, stranger, stranger], "status": "done"},
+            headers=auth_headers,
+        )
+
+        assert response.json() == {"updated": 1, "skipped": 1}

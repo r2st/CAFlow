@@ -411,8 +411,16 @@ def bulk_update_status(
         },
     )
     db.commit()
+    # Counted against the *distinct* ids asked for. A selection is built by
+    # clicking rows, and a list rebuilt between clicks — the calendar re-reads
+    # on every filter change — hands the same filing back twice. Measured
+    # against the raw list, each repeat became a phantom skip: "12 updated, 3
+    # skipped" for a batch of fifteen clicks on twelve filings, all twelve of
+    # which were written. There is nothing to go and look for, and the number
+    # a practitioner is meant to act on is the one naming filings the firm
+    # cannot reach — a stale id, or another firm's.
     return BulkStatusUpdateResult(
-        updated=len(items), skipped=len(payload.item_ids) - len(items)
+        updated=len(items), skipped=len(set(payload.item_ids)) - len(items)
     )
 
 

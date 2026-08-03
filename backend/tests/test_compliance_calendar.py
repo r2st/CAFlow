@@ -1677,3 +1677,68 @@ class TestWorkFollowingADeadlineThatMoves:
         db.refresh(task)
         assert task.status == TaskStatus.CANCELLED
         assert task.due_date == was
+
+
+class TestASelectionThatNamesOneFilingTwice:
+    """``skipped`` was measured against the raw id list, so a repeat counted
+    as a filing the endpoint could not find.
+
+    A selection is built by clicking rows, and the calendar re-reads on every
+    filter change — so the same filing arrives twice often enough to matter.
+    What came back was "12 updated, 3 skipped" for a batch of fifteen clicks
+    on twelve filings, every one of which was written. The number a
+    practitioner is meant to act on is the one naming filings the firm cannot
+    reach; a phantom skip sends them looking for work that is already done,
+    and at the end of a deadline that is the wrong thing to spend an hour on.
+    """
+
+    def test_a_repeated_id_is_not_reported_as_skipped(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": [str(item.id)] * 3, "status": "in_progress"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"updated": 1, "skipped": 0}
+
+    def test_the_repeated_filing_is_still_updated(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": [str(item.id), str(item.id)], "status": "in_progress"},
+        )
+
+        body = client.get(f"{API}/compliance/items/{item.id}", headers=auth_headers).json()
+        assert body["status"] == "in_progress"
+
+    def test_an_unreachable_id_is_still_counted_once_beside_a_repeat(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The count still names what the firm cannot reach — which is the
+        whole point of reporting it — and a repeated unknown id is one miss,
+        not two."""
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        stranger = str(uuid.uuid4())
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(item.id), str(item.id), stranger, stranger],
+                "status": "filed",
+            },
+        )
+
+        assert response.json() == {"updated": 1, "skipped": 1}

@@ -201,8 +201,12 @@ def bulk_update_tasks(
         },
     )
     db.commit()
+    # Distinct ids, for the reason ``compliance.bulk_update_status`` gives: a
+    # selection built by clicking rows on a board that re-reads between clicks
+    # repeats ids, and counting the repeats as skips reports work that was
+    # done as work that was not.
     return BulkTaskUpdateResult(
-        updated=len(tasks), skipped=len(payload.task_ids) - len(tasks)
+        updated=len(tasks), skipped=len(set(payload.task_ids)) - len(tasks)
     )
 
 
