@@ -590,6 +590,53 @@ class RevenueSummary:
     by_category: dict[str, int] = field(default_factory=dict)
 
 
+# What separates two clients a firm has given the same name.
+#
+# A client's name is not unique and nothing pretends it is — only the PAN is,
+# and that is optional. Two entities of one family or group under one trading
+# name is ordinary ("Kumar Enterprises" at two GSTINs), and so is the same name
+# typed twice by mistake, which is the case this most needs to survive.
+UNNAMED_CLIENT = "—"
+
+
+def _client_label(client: Client | None) -> str:
+    return client.name if client is not None else UNNAMED_CLIENT
+
+
+def _disambiguate(totals: dict[uuid.UUID, tuple[Client | None, int]]) -> dict[str, int]:
+    """Name each client's revenue, telling apart any two that share a name.
+
+    ``by_client`` is keyed by name and was accumulated by name, so two clients
+    called the same thing were added together: the breakdown showed one of them
+    carrying both their revenues and the other missing entirely. It is a
+    revenue report, and the firm reads it to see who it has billed — so the
+    reading is that one client owes twice what they do and another has been
+    billed nothing all year, which is exactly the conclusion that gets acted
+    on.
+
+    Only a repeated name is qualified, so the ordinary breakdown is untouched
+    and the qualifier appears precisely where a human would otherwise have to
+    guess. The PAN is what a practitioner would reach for to tell two clients
+    apart; a client without one falls back to the leading digits of its id,
+    which is at least stable and at least distinct.
+    """
+    seen: dict[str, int] = {}
+    for client, _ in totals.values():
+        name = _client_label(client)
+        seen[name] = seen.get(name, 0) + 1
+
+    labelled: dict[str, int] = {}
+    for client_id, (client, amount) in totals.items():
+        name = _client_label(client)
+        if seen[name] > 1:
+            qualifier = (client.pan if client is not None and client.pan else None) or (
+                str(client_id)[:8]
+            )
+            name = f"{name} ({qualifier})"
+        labelled[name] = labelled.get(name, 0) + amount
+    return labelled
+
+
 def revenue_summary(
     db: Session,
     firm_id: uuid.UUID,
@@ -614,6 +661,9 @@ def revenue_summary(
         ).all()
     )
 
+    # Accumulated by client id and named afterwards, because a name does not
+    # identify a client; see :func:`_disambiguate`.
+    per_client: dict[uuid.UUID, tuple[Client | None, int]] = {}
     for invoice in invoices:
         if invoice.status == InvoiceStatus.CANCELLED:
             continue
@@ -628,8 +678,10 @@ def revenue_summary(
         if invoice.due_date and invoice.due_date < today and invoice.balance_paise > 0:
             summary.overdue_paise += invoice.balance_paise
 
-        name = invoice.client.name if invoice.client else "—"
-        summary.by_client[name] = summary.by_client.get(name, 0) + invoice.total_paise
+        _, running = per_client.get(invoice.client_id, (invoice.client, 0))
+        per_client[invoice.client_id] = (invoice.client, running + invoice.total_paise)
+
+    summary.by_client = _disambiguate(per_client)
 
     # Work that is finished but has not made it onto an invoice yet.
     for item in unbilled_items(db, firm_id):

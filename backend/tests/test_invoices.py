@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.core import clock
+from app.core.periods import fiscal_year_start
 from app.models.base import InvoiceStatus
 from app.models.compliance import ComplianceItem
 from app.models.invoice import Invoice, InvoiceLine
@@ -209,12 +210,17 @@ class TestRedatingADraft:
     def test_a_date_inside_the_same_year_leaves_the_number_alone(
         self, client, auth_headers, client_id
     ):
+        # Both ends derived from today rather than written down, so the pair
+        # stays inside one financial year — and inside what
+        # ``validate_issue_date`` will accept — whenever this is run.
+        today = clock.today()
+        year_start = date(fiscal_year_start(today), 4, 1)
         draft = make_invoice(
-            client, auth_headers, client_id, issue_date="2026-05-02"
+            client, auth_headers, client_id, issue_date=year_start.isoformat()
         ).json()
         updated = client.patch(
             f"/api/v1/invoices/{draft['id']}",
-            json={"issue_date": "2026-09-30"},
+            json={"issue_date": today.isoformat()},
             headers=auth_headers,
         ).json()
         assert updated["invoice_number"] == draft["invoice_number"]
@@ -1149,6 +1155,162 @@ class TestRevenue:
         assert response.status_code == 422
 
 
+class TestTellingTwoClientsOfTheSameNameApart:
+    """``by_client`` was keyed by name and accumulated by name.
+
+    A client's name is not unique and nothing pretends it is — only the PAN is,
+    and that is optional. Two entities of one family or group under one trading
+    name is ordinary, and so is the same name typed twice by mistake. Either
+    way the breakdown showed one of them carrying both revenues and the other
+    missing entirely: one client appears to owe twice what they do and another
+    to have been billed nothing all year, which is exactly the conclusion that
+    gets acted on.
+    """
+
+    def _twin(self, client, auth_headers, **overrides) -> str:
+        payload = make_client_payload(**overrides)
+        response = client.post("/api/v1/clients", json=payload, headers=auth_headers)
+        assert response.status_code == 201, response.text
+        return response.json()["client"]["id"]
+
+    def _send(self, client, auth_headers, client_id, unit_price_paise) -> dict:
+        invoice = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            lines=[
+                {"description": "Annual filing", "quantity": 1, "unit_price_paise": unit_price_paise}
+            ],
+        ).json()
+        return client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+
+    def _revenue(self, client, auth_headers) -> dict:
+        return client.get("/api/v1/invoices/revenue", headers=auth_headers).json()
+
+    def test_one_client_of_a_name_is_not_qualified(self, client, auth_headers, client_id):
+        """The ordinary breakdown is untouched — the qualifier appears only
+        where a human would otherwise have to guess."""
+        sent = self._send(client, auth_headers, client_id, 200_000)
+
+        by_client = self._revenue(client, auth_headers)["by_client"]
+        assert by_client == {"Nimbus Textiles Pvt Ltd": sent["total_paise"]}
+
+    def test_two_clients_of_one_name_are_not_added_together(
+        self, client, auth_headers, client_id
+    ):
+        twin = self._twin(
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+        )
+        first = self._send(client, auth_headers, client_id, 200_000)
+        second = self._send(client, auth_headers, twin, 500_000)
+        assert first["total_paise"] != second["total_paise"]
+
+        by_client = self._revenue(client, auth_headers)["by_client"]
+        assert len(by_client) == 2
+        assert sorted(by_client.values()) == sorted(
+            [first["total_paise"], second["total_paise"]]
+        )
+
+    def test_the_pan_is_what_tells_them_apart(self, client, auth_headers, client_id):
+        """What a practitioner would reach for to separate two clients."""
+        twin = self._twin(
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+        )
+        self._send(client, auth_headers, client_id, 200_000)
+        self._send(client, auth_headers, twin, 500_000)
+
+        by_client = self._revenue(client, auth_headers)["by_client"]
+        assert "Nimbus Textiles Pvt Ltd (AABCN2345P)" in by_client
+        assert "Nimbus Textiles Pvt Ltd (AABCN9876Q)" in by_client
+
+    def test_a_twin_with_nothing_billed_does_not_qualify_the_other(
+        self, client, auth_headers, client_id
+    ):
+        """The collision is judged over the clients in the report, not over the
+        firm's whole book. A namesake with no revenue in the window is not on
+        this breakdown at all, so there is nothing for a reader to confuse the
+        row with — and qualifying it would put a PAN on a line that never
+        needed one."""
+        self._twin(
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+        )
+        sent = self._send(client, auth_headers, client_id, 200_000)
+
+        by_client = self._revenue(client, auth_headers)["by_client"]
+        assert by_client == {"Nimbus Textiles Pvt Ltd": sent["total_paise"]}
+
+    def test_a_client_with_no_pan_still_gets_a_distinct_label(
+        self, client, auth_headers, client_id
+    ):
+        """The PAN is optional, so the fallback has to be stable and distinct
+        even when there is nothing to qualify with."""
+        twin = self._twin(client, auth_headers, pan=None, gstin=None, gst_registered=False)
+        self._send(client, auth_headers, client_id, 200_000)
+        self._send(client, auth_headers, twin, 500_000)
+
+        by_client = self._revenue(client, auth_headers)["by_client"]
+        assert len(by_client) == 2
+        assert f"Nimbus Textiles Pvt Ltd ({twin[:8]})" in by_client
+
+    def test_a_third_of_the_same_name_is_still_separated(
+        self, client, auth_headers, client_id
+    ):
+        second = self._twin(
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+        )
+        third = self._twin(
+            client, auth_headers, pan="AABCN1111R", gstin="24AABCN1111R1Z3", gst_registered=False
+        )
+        self._send(client, auth_headers, client_id, 100_000)
+        self._send(client, auth_headers, second, 200_000)
+        self._send(client, auth_headers, third, 300_000)
+
+        by_client = self._revenue(client, auth_headers)["by_client"]
+        assert len(by_client) == 3
+
+    def test_each_label_carries_that_clients_own_revenue(
+        self, client, auth_headers, client_id
+    ):
+        twin = self._twin(
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+        )
+        first = self._send(client, auth_headers, client_id, 200_000)
+        second = self._send(client, auth_headers, twin, 500_000)
+
+        by_client = self._revenue(client, auth_headers)["by_client"]
+        assert by_client["Nimbus Textiles Pvt Ltd (AABCN2345P)"] == first["total_paise"]
+        assert by_client["Nimbus Textiles Pvt Ltd (AABCN9876Q)"] == second["total_paise"]
+
+    def test_a_clients_own_invoices_are_still_summed(
+        self, client, auth_headers, client_id
+    ):
+        """Splitting by id must not split one client across its own bills."""
+        twin = self._twin(
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+        )
+        one = self._send(client, auth_headers, client_id, 200_000)
+        two = self._send(client, auth_headers, client_id, 300_000)
+        self._send(client, auth_headers, twin, 500_000)
+
+        by_client = self._revenue(client, auth_headers)["by_client"]
+        assert by_client["Nimbus Textiles Pvt Ltd (AABCN2345P)"] == (
+            one["total_paise"] + two["total_paise"]
+        )
+
+    def test_the_total_is_unchanged_by_the_split(self, client, auth_headers, client_id):
+        twin = self._twin(
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+        )
+        first = self._send(client, auth_headers, client_id, 200_000)
+        second = self._send(client, auth_headers, twin, 500_000)
+
+        summary = self._revenue(client, auth_headers)
+        assert sum(summary["by_client"].values()) == summary["invoiced_paise"]
+        assert summary["invoiced_paise"] == first["total_paise"] + second["total_paise"]
+
+
 class TestAccessControl:
     def test_invoices_require_authentication(self, client):
         assert client.get("/api/v1/invoices").status_code == 401
@@ -1862,7 +2024,7 @@ class TestAPaymentTermThatRunsBackwards:
         response = client.patch(
             f"/api/v1/invoices/{draft['id']}",
             headers=auth_headers,
-            json={"issue_date": (today + timedelta(days=400)).isoformat()},
+            json={"issue_date": (today + timedelta(days=25)).isoformat()},
         )
         assert response.status_code == 422, response.text
         assert "cannot be due before it is raised" in response.json()["detail"]
@@ -1898,7 +2060,7 @@ class TestAPaymentTermThatRunsBackwards:
         client.patch(
             f"/api/v1/invoices/{draft['id']}",
             headers=auth_headers,
-            json={"issue_date": (today + timedelta(days=400)).isoformat()},
+            json={"issue_date": (today + timedelta(days=25)).isoformat()},
         )
 
         after = client.get(f"/api/v1/invoices/{draft['id']}", headers=auth_headers).json()
@@ -1909,8 +2071,8 @@ class TestAPaymentTermThatRunsBackwards:
     def test_moving_both_dates_together_is_judged_on_the_pair(
         self, client, auth_headers, client_id: str
     ):
-        """Deferring a whole draft into the next year moves both, and the two
-        stay in order — so the edit goes through."""
+        """Deferring a whole draft forward moves both, and the two stay in
+        order — so the edit goes through."""
         today = clock.today()
         draft = make_invoice(
             client,
@@ -1920,7 +2082,7 @@ class TestAPaymentTermThatRunsBackwards:
             due_date=(today + timedelta(days=15)).isoformat(),
         ).json()
 
-        moved_to = today + timedelta(days=400)
+        moved_to = today + timedelta(days=20)
         response = client.patch(
             f"/api/v1/invoices/{draft['id']}",
             headers=auth_headers,
@@ -2112,7 +2274,7 @@ class TestClearingAFieldOnADraft:
             f"/api/v1/invoices/{draft['id']}",
             json={
                 "due_date": None,
-                "issue_date": (clock.today() + timedelta(days=60)).isoformat(),
+                "issue_date": (clock.today() + timedelta(days=20)).isoformat(),
             },
             headers=auth_headers,
         )
