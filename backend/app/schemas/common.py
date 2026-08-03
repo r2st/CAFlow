@@ -157,3 +157,43 @@ Password = Annotated[
     Field(min_length=8, max_length=MAX_PASSWORD_BYTES),
     AfterValidator(within_bcrypt_limit),
 ]
+
+
+# A client's per-service fee overrides: {"<compliance_type_code>": <paise>}.
+#
+# This was the one money field with no bound on it, and it is not a field the
+# caller merely stores — ``generate_compliance_items`` copies the amount onto
+# every filing it materialises for that client, and from there it reaches the
+# dashboard's unbilled total and the invoice line the client is billed for.
+#
+# All three halves were open:
+#
+# * the *amount* had no ceiling, so ``{"GSTR3B_MONTHLY": 10**25}`` reached a
+#   BIGINT column and came back a 500 from the database driver — precisely
+#   what ``MAX_AMOUNT_PAISE`` exists to turn into a 422 naming the field. It
+#   also had no floor, and a negative fee is worse than an oversized one
+#   because nothing rejects it: it lands on a year of filings, and the
+#   dashboard's "unbilled" figure then *subtracts* it from what the firm is
+#   owed, so the number a practice reads to find its own missing revenue is
+#   quietly wrong in the direction of looking fine;
+# * the *key* was free text, so a megabyte of it could be stored per entry in
+#   a JSON column read on every visit to the client screen. A code is this
+#   system's own vocabulary — the ``ComplianceType.code`` values — and nothing
+#   longer than the column that holds them can ever match one;
+# * the *dict* had no size limit at all, so twenty thousand entries went in on
+#   one request and were read back on every one after it.
+#
+# Bounded as a type rather than per field, so both the create and the update
+# path get it and a third cannot be added without.
+MAX_SERVICE_FEE_OVERRIDES = 200
+MAX_SERVICE_CODE_LENGTH = 64
+
+ServiceFeeCode = Annotated[
+    str,
+    Field(min_length=1, max_length=MAX_SERVICE_CODE_LENGTH, pattern=r"^[A-Za-z0-9._-]+$"),
+]
+ServiceFeeAmount = Annotated[int, Field(ge=0, le=MAX_AMOUNT_PAISE)]
+ServiceFees = Annotated[
+    dict[ServiceFeeCode, ServiceFeeAmount],
+    Field(max_length=MAX_SERVICE_FEE_OVERRIDES),
+]

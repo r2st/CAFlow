@@ -24,6 +24,7 @@ from app.models.base import (
 from app.models.client import Client as ClientModel
 from app.models.compliance import ComplianceItem, ComplianceType
 from app.models.task import Task
+from app.schemas.common import MAX_AMOUNT_PAISE
 from app.services import compliance_generator
 from app.services.applicability import applies_to
 from app.services.compliance_generator import (
@@ -2098,3 +2099,114 @@ class TestCountingAClientsFilingsInTheDatabase:
             "due_soon": 0,
             "filed": 0,
         }
+
+
+class TestServiceFeeBounds:
+    """``service_fees`` is a money field, and it was the one with no bounds.
+
+    It is not merely stored: ``generate_compliance_items`` copies the amount
+    onto every filing it materialises for the client, and from there it reaches
+    the dashboard's unbilled total and the invoice line the client is billed
+    for. All three halves of the field were open — the amount, the key, and the
+    number of entries.
+    """
+
+    def _post(self, client: TestClient, auth_headers: dict, fees):
+        return client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload(service_fees=fees)
+        )
+
+    def test_an_amount_beyond_the_money_ceiling_is_refused(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """Unbounded, this reached a BIGINT column and came back a 500 from the
+        driver — which is precisely what the ceiling exists to turn into a 422
+        naming the field."""
+        response = self._post(client, auth_headers, {"GSTR3B_MONTHLY": MAX_AMOUNT_PAISE + 1})
+
+        assert response.status_code == 422, response.text
+        assert "service_fees" in response.text
+
+    def test_the_ceiling_itself_is_still_allowed(
+        self, client: TestClient, auth_headers: dict
+    ):
+        assert self._post(
+            client, auth_headers, {"GSTR3B_MONTHLY": MAX_AMOUNT_PAISE}
+        ).status_code == 201
+
+    def test_a_negative_fee_is_refused(self, client: TestClient, auth_headers: dict):
+        """The worse of the two, because nothing downstream rejects it: it
+        lands on a year of filings and the dashboard's "unbilled" figure then
+        *subtracts* it from what the firm is owed. The number a practice reads
+        to find its own missing revenue is wrong in the direction of looking
+        fine."""
+        response = self._post(client, auth_headers, {"GSTR3B_MONTHLY": -50_000})
+
+        assert response.status_code == 422, response.text
+
+    def test_a_free_text_key_is_refused(self, client: TestClient, auth_headers: dict):
+        """A key is this system's own vocabulary — a ``ComplianceType.code`` —
+        and a megabyte of anything else was stored per entry in a JSON column
+        read on every visit to the client screen."""
+        response = self._post(client, auth_headers, {"x" * 500: 1_000})
+
+        assert response.status_code == 422, response.text
+
+    def test_a_key_that_could_never_name_a_filing_is_refused(
+        self, client: TestClient, auth_headers: dict
+    ):
+        response = self._post(client, auth_headers, {"GSTR3B MONTHLY; DROP": 1_000})
+
+        assert response.status_code == 422, response.text
+
+    def test_the_number_of_overrides_is_bounded(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """Twenty thousand entries went in on one request and were read back on
+        every one after it."""
+        response = self._post(
+            client, auth_headers, {f"CODE_{n}": 1_000 for n in range(500)}
+        )
+
+        assert response.status_code == 422, response.text
+
+    def test_a_realistic_set_of_overrides_still_goes_through(
+        self, client: TestClient, auth_headers: dict
+    ):
+        response = self._post(
+            client,
+            auth_headers,
+            {"GSTR3B_MONTHLY": 150_000, "GSTR1_MONTHLY": 100_000, "ITR_FILING": 500_000},
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["client"]["service_fees"]["GSTR3B_MONTHLY"] == 150_000
+
+    def test_the_update_path_is_bounded_too(self, client: TestClient, auth_headers: dict):
+        """Bounded as a type rather than per field, so the other door to the
+        same column cannot be left open."""
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()["client"]
+
+        response = client.patch(
+            f"{API}/clients/{created['id']}",
+            headers=auth_headers,
+            json={"service_fees": {"GSTR3B_MONTHLY": -1}},
+        )
+        assert response.status_code == 422, response.text
+
+    def test_an_update_may_still_set_ordinary_overrides(
+        self, client: TestClient, auth_headers: dict
+    ):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()["client"]
+
+        response = client.patch(
+            f"{API}/clients/{created['id']}",
+            headers=auth_headers,
+            json={"service_fees": {"GSTR3B_MONTHLY": 250_000}},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["client"]["service_fees"] == {"GSTR3B_MONTHLY": 250_000}

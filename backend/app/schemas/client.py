@@ -8,7 +8,14 @@ from datetime import date, datetime
 from pydantic import EmailStr, Field, field_validator
 
 from app.models.base import EntityType, GSTFilingFrequency
-from app.schemas.common import ORMModel, SanitizedModel, validate_gstin, validate_pan, validate_tan
+from app.schemas.common import (
+    ORMModel,
+    SanitizedModel,
+    ServiceFees,
+    validate_gstin,
+    validate_pan,
+    validate_tan,
+)
 
 
 class ClientBase(SanitizedModel):
@@ -36,7 +43,7 @@ class ClientBase(SanitizedModel):
 
     assigned_practitioner_id: uuid.UUID | None = None
     notes: str | None = None
-    service_fees: dict[str, int] = Field(default_factory=dict)
+    service_fees: ServiceFees = Field(default_factory=dict)
 
     _validate_pan = field_validator("pan")(validate_pan)
     _validate_gstin = field_validator("gstin")(validate_gstin)
@@ -75,7 +82,7 @@ class ClientUpdate(SanitizedModel):
     assigned_practitioner_id: uuid.UUID | None = None
     is_active: bool | None = None
     notes: str | None = None
-    service_fees: dict[str, int] | None = None
+    service_fees: ServiceFees | None = None
 
     _validate_pan = field_validator("pan")(validate_pan)
     _validate_gstin = field_validator("gstin")(validate_gstin)
