@@ -23,6 +23,7 @@ from app.config import settings
 from app.core import clock
 from app.models.base import (
     ComplianceStatus,
+    DocumentCategory,
     EntityType,
     InvoiceStatus,
     ReminderChannel,
@@ -31,6 +32,7 @@ from app.models.base import (
 )
 from app.models.client import Client
 from app.models.compliance import ComplianceItem, ComplianceType
+from app.models.document import Document
 from app.models.firm import Firm
 from app.models.invoice import Invoice
 from app.models.reminder import Reminder
@@ -40,6 +42,7 @@ from app.worker import tasks
 from app.worker.celery_app import celery_app
 
 RUN_DATE = date(2026, 7, 1)
+PDF_BYTES = b"%PDF-1.4\n% ledger\n"
 
 
 class _StatementRecorder:
@@ -1392,6 +1395,148 @@ class TestAChaseThatNoLongerStands:
         db.commit()
 
         assert tasks.dispatch_due_reminders_task()["sent"] == 1
+        db.expire_all()
+        assert db.get(Reminder, reminder.id).status is ReminderStatus.SENT
+
+    # -------------------------------------------------------- the paperwork --
+
+    def _attach(self, db, item, requirement: str) -> Document:
+        """The client answering one checklist row, the way the portal does."""
+        document = Document(
+            firm_id=item.firm_id,
+            client_id=item.client_id,
+            compliance_item_id=item.id,
+            original_filename=f"{requirement}.pdf",
+            storage_path=f"{item.firm_id}/{item.client_id}/{requirement}.pdf",
+            content_type="application/pdf",
+            size_bytes=len(PDF_BYTES),
+            checksum_sha256="0" * 64,
+            category=DocumentCategory(requirement),
+            uploaded_via_portal=True,
+            satisfies_requirements=[],
+        )
+        db.add(document)
+        db.flush()
+        return document
+
+    def _answer_the_whole_checklist(self, db, item) -> None:
+        for requirement in item.compliance_type.required_documents:
+            self._attach(db, item, requirement)
+
+    def test_a_document_chase_is_withdrawn_once_the_documents_arrive(self, db):
+        """The ordinary case, and the one the queue cannot see.
+
+        The sweep asks at 07:00 for 09:00 and the portal is open in between.
+        The filing itself is not touched until the practitioner sits down to it
+        that afternoon, so the already-filed test catches none of this: what
+        went out was the firm asking its own client, by name, for paperwork it
+        was already holding and could see in the portal.
+        """
+        _, _, item, reminder = self._document_chase(db)
+        self._answer_the_whole_checklist(db, item)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task() == {
+            "sent": 0,
+            "failed": 0,
+            "retrying": 0,
+            "withdrawn": 1,
+        }
+        db.expire_all()
+        row = db.get(Reminder, reminder.id)
+        assert row.status is ReminderStatus.CANCELLED
+        assert "has since arrived" in row.extra["withdrawn_because"]
+        assert row.attempt_count == 0
+
+    def test_a_document_still_missing_keeps_the_chase_going(self, db):
+        """Withdrawal is for a question that has been answered, not one that
+        has been partly answered — the rest of the list is still wanted."""
+        _, _, item, _ = self._document_chase(db)
+        requirements = item.compliance_type.required_documents
+        assert len(requirements) > 1, "this test needs a list to leave a gap in"
+        for requirement in requirements[:-1]:
+            self._attach(db, item, requirement)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    def test_a_chase_whose_list_is_still_untouched_goes_out(self, db):
+        _, _, item, _ = self._document_chase(db)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    def test_the_documents_arriving_does_not_silence_the_deadline_reminder(self, db):
+        """A filing reminder is about the due date, not about the list.
+
+        Holding the paperwork is precisely when the client most needs telling
+        the return is due — the firm can now file it, and the deadline has not
+        moved an inch.
+        """
+        firm, client, item, _ = self._document_chase(db)
+        reminder = make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            compliance_item_id=item.id,
+            reminder_type=ReminderType.FILING,
+            extra={"kind": "filing", "offset_days": 10},
+        )
+        self._answer_the_whole_checklist(db, item)
+        db.commit()
+
+        tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        assert db.get(Reminder, reminder.id).status is ReminderStatus.SENT
+
+    def test_a_document_a_practitioner_uploaded_answers_the_row_too(self, db):
+        """Who sent it is not the question. A CA who receives the statement by
+        email and files it against the item is holding it just the same."""
+        _, _, item, _ = self._document_chase(db)
+        for requirement in item.compliance_type.required_documents:
+            document = self._attach(db, item, requirement)
+            document.uploaded_via_portal = False
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["withdrawn"] == 1
+
+    def test_an_explicit_requirement_answers_the_row_without_the_category(self, db):
+        """``satisfies_requirements`` is the other half of the checklist, and
+        the half a corrected category leaves behind."""
+        _, _, item, _ = self._document_chase(db)
+        for requirement in item.compliance_type.required_documents:
+            document = self._attach(db, item, requirement)
+            document.category = DocumentCategory.OTHER
+            document.satisfies_requirements = [requirement]
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["withdrawn"] == 1
+
+    def test_a_message_a_practitioner_composed_is_not_withdrawn_by_an_upload(self, db):
+        """Same standing as a filing confirmation: what a practitioner wrote is
+        theirs, and a document arriving is not this code's cue to bin it."""
+        _, client, item, _ = self._document_chase(db)
+        reminder = reminder_service.build_manual_reminder(
+            db,
+            client=client,
+            reminder_type=ReminderType.DOCUMENT,
+            subject="One more thing on the June return",
+            body="Could you confirm the closing stock figure?",
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            compliance_item_id=item.id,
+        )
+        self._answer_the_whole_checklist(db, item)
+        db.commit()
+
+        # The automated chase beside it is withdrawn; this one is not.
+        assert tasks.dispatch_due_reminders_task() == {
+            "sent": 1,
+            "failed": 0,
+            "retrying": 0,
+            "withdrawn": 1,
+        }
         db.expire_all()
         assert db.get(Reminder, reminder.id).status is ReminderStatus.SENT
 

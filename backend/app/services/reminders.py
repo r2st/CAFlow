@@ -135,11 +135,30 @@ def withdrawn_reason(db: Session, reminder: Reminder) -> str | None:
     kind = kind_of(reminder)
     if kind in ("filing", "document") and reminder.compliance_item_id is not None:
         item = db.get(ComplianceItem, reminder.compliance_item_id)
-        if item is None or item.status in OPEN_ITEM_STATUSES:
+        if item is None:
             return None
-        if item.status == ComplianceStatus.NOT_APPLICABLE:
-            return "the filing is no longer one this client owes"
-        return f"the return was {item.status.value} before this went out"
+        if item.status not in OPEN_ITEM_STATUSES:
+            if item.status == ComplianceStatus.NOT_APPLICABLE:
+                return "the filing is no longer one this client owes"
+            return f"the return was {item.status.value} before this went out"
+        # The filing is still open, which settles a *filing* reminder: the
+        # deadline is what that one is about and it has not moved. A document
+        # chase is about a list, and the list is the part that goes stale.
+        #
+        # The client uploading the last statement is the ordinary case, and it
+        # is the case the queue cannot see. The sweep asks at 07:00 for 09:00,
+        # the portal is open in between, and the filing itself is not touched
+        # until the practitioner sits down to it that afternoon — so the
+        # already-filed test above catches none of this. What went out was the
+        # firm asking its own client, by name, for paperwork the firm was
+        # already holding and could see in the portal.
+        #
+        # Recomputed rather than read from ``extra["missing"]``: that list is
+        # what was outstanding when the row was written, and the question here
+        # is what is outstanding now.
+        if kind == "document" and documents.checklist_for_item(db, item).is_complete:
+            return "every document it asked for has since arrived"
+        return None
 
     if kind == "payment" and reminder.invoice_id is not None:
         invoice = db.get(Invoice, reminder.invoice_id)
