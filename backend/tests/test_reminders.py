@@ -259,6 +259,9 @@ class TestPaymentReminders:
             "/api/v1/invoices",
             json={
                 "client_id": client_id,
+                # Raised a month ago on thirty-day terms, so it is genuinely a
+                # week late rather than due before it was raised.
+                "issue_date": (clock.today() - timedelta(days=37)).isoformat(),
                 "due_date": (clock.today() - timedelta(days=7)).isoformat(),
                 "lines": [
                     {"description": "GSTR-3B", "quantity": 1, "unit_price_paise": 200_000}
@@ -315,6 +318,9 @@ class TestPaymentReminders:
             "/api/v1/invoices",
             json={
                 "client_id": client_id,
+                # Raised a month ago on thirty-day terms, so it is genuinely a
+                # week late rather than due before it was raised.
+                "issue_date": (clock.today() - timedelta(days=37)).isoformat(),
                 "due_date": (clock.today() - timedelta(days=7)).isoformat(),
                 "lines": [{"description": "x", "quantity": 1, "unit_price_paise": 1000}],
             },

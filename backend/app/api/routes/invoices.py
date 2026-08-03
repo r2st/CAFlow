@@ -85,6 +85,37 @@ def serialise_detail(invoice: Invoice, today: date | None = None) -> InvoiceDeta
     )
 
 
+def _reject_due_before_issue(issue_date: date, due_date: date | None) -> None:
+    """A payment term cannot run backwards.
+
+    The due date is when the client was asked to pay by, counted from the day
+    the bill was raised. Nothing checked that the caller's two dates were in
+    that order, and the consequences do not wait for anyone to notice: sending
+    such an invoice runs it through ``refresh_status``, which reads a due date
+    already past and marks it *overdue* the same second it is issued. It lands
+    on the receivables list, it is counted in ``overdue_paise``, the billing
+    table shows the client in red, and the payment sweep chases them at
+    whichever offset the gap happens to match — a demand for a late payment on
+    a bill they have not had a single day to settle.
+
+    ``update_invoice`` reached it from the other side, by moving a draft's
+    issue date forward past a due date already on the record; a fat-fingered
+    year did it silently.
+
+    Only when the caller gave both. A missing due date is filled in from the
+    issue date and the firm's payment terms when the invoice is sent, which
+    cannot produce this.
+    """
+    if due_date is not None and due_date < issue_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"due_date {due_date:%d %b %Y} falls before the issue date "
+                f"{issue_date:%d %b %Y} — an invoice cannot be due before it is raised"
+            ),
+        )
+
+
 def _apply_lines(db: Session, invoice: Invoice, lines, firm_id: uuid.UUID) -> None:
     """Set an invoice's lines, translating billing refusals into HTTP.
 
@@ -225,6 +256,7 @@ def create_invoice(payload: InvoiceCreate, practitioner: Manager, db: DbSession)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
 
     issue_date = payload.issue_date or clock.today()
+    _reject_due_before_issue(issue_date, payload.due_date)
 
     def build(invoice_number: str) -> Invoice:
         invoice = Invoice(
@@ -320,6 +352,13 @@ def update_invoice(
         )
 
     updates = payload.model_dump(exclude_unset=True)
+    # Checked against the pair this patch leaves behind, not against what the
+    # caller happened to name: moving either date alone can put the two out of
+    # order, and only one of them is ever in the request.
+    _reject_due_before_issue(
+        updates.get("issue_date") or invoice.issue_date,
+        updates.get("due_date") or invoice.due_date,
+    )
     for key in ("issue_date", "due_date", "gst_rate_bps", "notes"):
         if key in updates and updates[key] is not None:
             setattr(invoice, key, updates[key])

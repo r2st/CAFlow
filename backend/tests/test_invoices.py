@@ -756,7 +756,9 @@ class TestInvoiceLifecycle:
 
     def test_a_past_due_date_shows_as_overdue(self, client, auth_headers, client_id):
         past = (clock.today() - timedelta(days=5)).isoformat()
-        invoice = make_invoice(client, auth_headers, client_id, due_date=past).json()
+        invoice = make_invoice(
+            client, auth_headers, client_id, issue_date=past, due_date=past
+        ).json()
         sent = client.post(
             f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
         ).json()
@@ -855,7 +857,9 @@ class TestPayments:
         self, client, auth_headers, client_id
     ):
         past = (clock.today() - timedelta(days=5)).isoformat()
-        invoice = make_invoice(client, auth_headers, client_id, due_date=past).json()
+        invoice = make_invoice(
+            client, auth_headers, client_id, issue_date=past, due_date=past
+        ).json()
         sent = client.post(
             f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
         ).json()
@@ -1010,6 +1014,7 @@ class TestAnInvoiceWithNothingToPay:
             client,
             auth_headers,
             client_id,
+            issue_date=past,
             due_date=past,
             lines=[{"description": "Courtesy filing", "quantity": 1, "unit_price_paise": 0}],
         ).json()
@@ -1028,6 +1033,7 @@ class TestAnInvoiceWithNothingToPay:
             client,
             auth_headers,
             client_id,
+            issue_date=past,
             due_date=past,
             lines=[{"description": "Absorbed", "quantity": 1, "unit_price_paise": 0}],
         ).json()
@@ -1043,6 +1049,7 @@ class TestAnInvoiceWithNothingToPay:
             client,
             auth_headers,
             client_id,
+            issue_date=past,
             due_date=past,
             lines=[{"description": "No charge", "quantity": 1, "unit_price_paise": 0}],
         ).json()
@@ -1058,7 +1065,9 @@ class TestAnInvoiceWithNothingToPay:
     ):
         """The guard is about a zero total, not about being lenient generally."""
         past = (clock.today() - timedelta(days=5)).isoformat()
-        invoice = make_invoice(client, auth_headers, client_id, due_date=past).json()
+        invoice = make_invoice(
+            client, auth_headers, client_id, issue_date=past, due_date=past
+        ).json()
         sent = client.post(
             f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
         ).json()
@@ -1774,3 +1783,184 @@ class TestOnlyABillThatIsOwedCanBeLate:
         row = next(inv for inv in listed if inv["id"] == draft["id"])
 
         assert row["days_overdue"] is None
+
+
+class TestAPaymentTermThatRunsBackwards:
+    """A due date is when the client was asked to pay by, counted from the day
+    the bill was raised. Nothing checked the two were in that order.
+
+    The consequence did not wait for anyone to notice: sending such an invoice
+    ran it through ``refresh_status``, which read a due date already past and
+    marked it overdue the same second it was issued — on the receivables list,
+    counted in ``overdue_paise``, red in the billing table, and chased by the
+    payment sweep at whichever offset the gap happened to match. A demand for
+    late payment on a bill the client had not had one day to settle.
+    """
+
+    def test_creating_one_due_before_it_is_raised_is_refused(
+        self, client, auth_headers, client_id: str
+    ):
+        today = clock.today()
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=today.isoformat(),
+            due_date=(today - timedelta(days=30)).isoformat(),
+        )
+        assert response.status_code == 422, response.text
+        assert "cannot be due before it is raised" in response.json()["detail"]
+
+    def test_the_same_day_is_allowed(self, client, auth_headers, client_id: str):
+        """Payable on receipt is an ordinary term, not a contradiction."""
+        today = clock.today()
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=today.isoformat(),
+            due_date=today.isoformat(),
+        )
+        assert response.status_code == 201, response.text
+
+    def test_a_backdated_invoice_may_still_be_genuinely_overdue(
+        self, client, auth_headers, client_id: str
+    ):
+        """The refusal is about the order of the two dates, not about lateness.
+        A bill raised in March and due in April is late today, and correctly so.
+        """
+        today = clock.today()
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=(today - timedelta(days=120)).isoformat(),
+            due_date=(today - timedelta(days=90)).isoformat(),
+        )
+        assert response.status_code == 201, response.text
+
+        sent = client.post(
+            f"/api/v1/invoices/{response.json()['id']}/send", headers=auth_headers
+        ).json()
+        assert sent["status"] == "overdue"
+        assert sent["days_overdue"] == 90
+
+    def test_moving_a_draft_issue_date_past_its_due_date_is_refused(
+        self, client, auth_headers, client_id: str
+    ):
+        """The other side of the same edit — and the one a fat-fingered year
+        reaches, since only the issue date is in the request."""
+        today = clock.today()
+        draft = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            due_date=(today + timedelta(days=15)).isoformat(),
+        ).json()
+
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            headers=auth_headers,
+            json={"issue_date": (today + timedelta(days=400)).isoformat()},
+        )
+        assert response.status_code == 422, response.text
+        assert "cannot be due before it is raised" in response.json()["detail"]
+
+    def test_moving_a_draft_due_date_behind_its_issue_date_is_refused(
+        self, client, auth_headers, client_id: str
+    ):
+        today = clock.today()
+        draft = make_invoice(
+            client, auth_headers, client_id, issue_date=today.isoformat()
+        ).json()
+
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            headers=auth_headers,
+            json={"due_date": (today - timedelta(days=1)).isoformat()},
+        )
+        assert response.status_code == 422, response.text
+
+    def test_a_refused_edit_leaves_the_draft_as_it_was(
+        self, client, auth_headers, client_id: str
+    ):
+        """Nothing half-applied: the dates and the number series are untouched."""
+        today = clock.today()
+        draft = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=today.isoformat(),
+            due_date=(today + timedelta(days=15)).isoformat(),
+        ).json()
+
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            headers=auth_headers,
+            json={"issue_date": (today + timedelta(days=400)).isoformat()},
+        )
+
+        after = client.get(f"/api/v1/invoices/{draft['id']}", headers=auth_headers).json()
+        assert after["issue_date"] == draft["issue_date"]
+        assert after["due_date"] == draft["due_date"]
+        assert after["invoice_number"] == draft["invoice_number"]
+
+    def test_moving_both_dates_together_is_judged_on_the_pair(
+        self, client, auth_headers, client_id: str
+    ):
+        """Deferring a whole draft into the next year moves both, and the two
+        stay in order — so the edit goes through."""
+        today = clock.today()
+        draft = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=today.isoformat(),
+            due_date=(today + timedelta(days=15)).isoformat(),
+        ).json()
+
+        moved_to = today + timedelta(days=400)
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            headers=auth_headers,
+            json={
+                "issue_date": moved_to.isoformat(),
+                "due_date": (moved_to + timedelta(days=15)).isoformat(),
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["issue_date"] == moved_to.isoformat()
+
+    def test_an_invoice_left_without_a_due_date_is_unaffected(
+        self, client, auth_headers, client_id: str
+    ):
+        """Sending fills it in from the issue date and the firm's terms, which
+        cannot produce the contradiction — so nothing here refuses it."""
+        response = make_invoice(client, auth_headers, client_id)
+        assert response.status_code == 201, response.text
+
+        sent = client.post(
+            f"/api/v1/invoices/{response.json()['id']}/send", headers=auth_headers
+        ).json()
+        assert sent["due_date"] > sent["issue_date"]
+        assert sent["status"] == "sent"
+
+    def test_the_payment_sweep_no_longer_chases_a_brand_new_bill(
+        self, client, auth_headers, client_id: str, db
+    ):
+        """What the refusal is protecting: an invoice due thirty days before it
+        was raised matched the 30-day payment offset on its first day."""
+        from app.services import reminders as reminder_service
+
+        today = clock.today()
+        refused = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=today.isoformat(),
+            due_date=(today - timedelta(days=30)).isoformat(),
+        )
+        assert refused.status_code == 422
+
+        queued = reminder_service.queue_payment_reminders(db, today=today)
+        assert queued == []
