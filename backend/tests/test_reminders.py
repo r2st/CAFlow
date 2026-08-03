@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core import clock
 from app.models.base import ReminderChannel, ReminderStatus, ReminderType
@@ -600,3 +600,148 @@ class TestWorkerTasks:
     def test_compliance_items_still_top_up(self, db):
         result = worker_tasks.generate_compliance_items_task()
         assert "created" in result
+
+
+class TestWhatAMessageMayCite:
+    """A reminder names a client and, optionally, the filing or invoice it is
+    about — and the two were never checked against each other.
+
+    Both are addressable by id alone, so a message could cite any record in the
+    deployment: another client's, or another firm's entirely. The row then held
+    a foreign key across a tenancy boundary, which is a cascade as well as an
+    untidiness — the far firm deleting that client takes this firm's queued
+    message with it, and neither firm can see why. Within one firm it is the
+    everyday version: a stale id from the wrong screen, putting one client's
+    filing on the record of a message sent to another, and a fee chase quoting
+    what somebody else owes.
+    """
+
+    OUTSIDER = {
+        "firm_name": "Meridian & Co",
+        "icai_registration_number": "998877W",
+        "firm_email": "office@meridian-ca.in",
+        "pan": "AAACM7788K",
+        "owner_full_name": "Vikram Rao",
+        "owner_email": "vikram@meridian-ca.in",
+        "owner_password": "another-correct-horse",
+    }
+
+    def _outsider(self, client) -> tuple[dict, str]:
+        from tests.conftest import make_client_payload
+
+        registered = client.post("/api/v1/auth/register", json=self.OUTSIDER).json()
+        headers = {"Authorization": f"Bearer {registered['access_token']}"}
+        their_client = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(name="Meridian Client", pan="ZZZPC9999Z"),
+            headers=headers,
+        ).json()["client"]["id"]
+        return headers, their_client
+
+    def _second_client(self, client, auth_headers) -> str:
+        from tests.conftest import make_client_payload
+
+        return client.post(
+            "/api/v1/clients",
+            json=make_client_payload(name="Second Client", pan="BBBPC1234D"),
+            headers=auth_headers,
+        ).json()["client"]["id"]
+
+    def _queue(self, client, auth_headers, **body):
+        payload = {"subject": "About your return", "body": "Please send it over."}
+        payload.update(body)
+        return client.post("/api/v1/reminders", json=payload, headers=auth_headers)
+
+    def test_a_filing_from_another_firm_is_a_404(self, client, auth_headers, client_id):
+        their_headers, _ = self._outsider(client)
+        their_item = first_item_of_type(client, their_headers, "GSTR3B_MONTHLY")
+
+        response = self._queue(
+            client, auth_headers, client_id=client_id, compliance_item_id=their_item["id"]
+        )
+        assert response.status_code == 404, response.text
+
+    def test_an_invoice_from_another_firm_is_a_404(self, client, auth_headers, client_id):
+        their_headers, their_client = self._outsider(client)
+        their_item = first_item_of_type(client, their_headers, "GSTR3B_MONTHLY")
+        client.patch(
+            f"/api/v1/compliance/items/{their_item['id']}",
+            json={"status": "filed", "fee_paise": 250_000},
+            headers=their_headers,
+        )
+        their_invoice = client.post(
+            "/api/v1/invoices/generate", json={}, headers=their_headers
+        ).json()["invoices"][0]
+
+        response = self._queue(
+            client, auth_headers, client_id=client_id, invoice_id=their_invoice["id"]
+        )
+        assert response.status_code == 404, response.text
+
+    def test_another_clients_filing_in_the_same_firm_is_a_400(
+        self, client, auth_headers, client_id
+    ):
+        """The caller can see both records, so this is a pairing mistake rather
+        than something hidden from them, and it is named as one."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        other = self._second_client(client, auth_headers)
+
+        response = self._queue(
+            client, auth_headers, client_id=other, compliance_item_id=item["id"]
+        )
+        assert response.status_code == 400, response.text
+        assert "different client" in response.json()["detail"]
+
+    def test_another_clients_invoice_in_the_same_firm_is_a_400(
+        self, client, auth_headers, client_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        client.patch(
+            f"/api/v1/compliance/items/{item['id']}",
+            json={"status": "filed", "fee_paise": 250_000},
+            headers=auth_headers,
+        )
+        invoice = client.post(
+            "/api/v1/invoices/generate", json={}, headers=auth_headers
+        ).json()["invoices"][0]
+        other = self._second_client(client, auth_headers)
+
+        response = self._queue(client, auth_headers, client_id=other, invoice_id=invoice["id"])
+        assert response.status_code == 400, response.text
+
+    def test_nothing_is_queued_when_the_link_is_refused(
+        self, client, auth_headers, client_id, db
+    ):
+        """Checked before the row is built, not after — a refused reminder that
+        is nonetheless sitting in the queue is the worse of the two failures."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        other = self._second_client(client, auth_headers)
+        before = db.scalar(select(func.count(Reminder.id)))
+
+        self._queue(client, auth_headers, client_id=other, compliance_item_id=item["id"])
+
+        assert db.scalar(select(func.count(Reminder.id))) == before
+
+    def test_the_clients_own_filing_is_accepted(self, client, auth_headers, client_id):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        response = self._queue(
+            client, auth_headers, client_id=client_id, compliance_item_id=item["id"]
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["compliance_item_id"] == item["id"]
+
+    def test_a_message_citing_nothing_is_still_fine(self, client, auth_headers, client_id):
+        assert self._queue(client, auth_headers, client_id=client_id).status_code == 201
+
+    def test_drafting_is_held_to_the_same_pairing(self, client, auth_headers, client_id):
+        """The draft quotes the filing back, so citing another client's would
+        put their period and deadline into a message addressed to this one."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        other = self._second_client(client, auth_headers)
+
+        response = client.post(
+            "/api/v1/reminders/draft",
+            json={"client_id": other, "compliance_item_id": item["id"]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400, response.text

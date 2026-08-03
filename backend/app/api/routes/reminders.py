@@ -46,6 +46,63 @@ def serialise(reminder: Reminder) -> ReminderOut:
     return out
 
 
+def _linked_filing(
+    db: Session, firm_id: uuid.UUID, client: Client, item_id: uuid.UUID | None
+) -> ComplianceItem | None:
+    """The filing a message is about, refusing one that is not this client's.
+
+    A reminder names a client and, optionally, the filing it concerns — and the
+    two were never checked against each other. A compliance item is addressable
+    by id alone, so a manual reminder could cite any filing in the deployment:
+    another client's, or another firm's entirely. The row then holds a foreign
+    key across a tenancy boundary, which is not merely untidy. It is a cascade:
+    the far firm deleting that client takes this firm's queued message with it,
+    and neither firm has any way to see why. Within one firm it is the everyday
+    version of the same mistake — a stale id from the wrong screen — and it
+    puts one client's filing on the record of a message sent to another.
+
+    Reported the way an upload against the wrong filing is: unreachable is a
+    404, since an id this firm cannot see is one it was never told about, and
+    the wrong client is a 400, because the caller can see both and named a pair
+    that does not go together.
+    """
+    if item_id is None:
+        return None
+    item = db.get(ComplianceItem, item_id)
+    if item is None or item.firm_id != firm_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Compliance item not found"
+        )
+    if item.client_id != client.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="That filing belongs to a different client",
+        )
+    return item
+
+
+def _linked_invoice(
+    db: Session, firm_id: uuid.UUID, client: Client, invoice_id: uuid.UUID | None
+) -> Invoice | None:
+    """The invoice a message is about, on the same terms as :func:`_linked_filing`.
+
+    A fee chase carries the amount outstanding, so citing the wrong invoice is
+    the more expensive half of the mistake: the client is told what somebody
+    else owes.
+    """
+    if invoice_id is None:
+        return None
+    invoice = db.get(Invoice, invoice_id)
+    if invoice is None or invoice.firm_id != firm_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found")
+    if invoice.client_id != client.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="That invoice belongs to a different client",
+        )
+    return invoice
+
+
 # ------------------------------------------------------------------ drafting --
 
 
@@ -66,12 +123,8 @@ def draft_reminder(
     context: dict = dict(payload.extra_context)
     subject = "A message from your CA"
 
-    if payload.compliance_item_id is not None:
-        item = db.get(ComplianceItem, payload.compliance_item_id)
-        if item is None or item.firm_id != practitioner.firm_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Compliance item not found"
-            )
+    item = _linked_filing(db, practitioner.firm_id, client, payload.compliance_item_id)
+    if item is not None:
         checklist = document_service.checklist_for_item(db, item)
         missing = [document_service.requirement_label(r) for r in checklist.missing]
         context.update(
@@ -85,12 +138,8 @@ def draft_reminder(
         )
         subject = f"{item.compliance_type.name} — {item.period_label}"
 
-    if payload.invoice_id is not None:
-        invoice = db.get(Invoice, payload.invoice_id)
-        if invoice is None or invoice.firm_id != practitioner.firm_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Invoice not found"
-            )
+    invoice = _linked_invoice(db, practitioner.firm_id, client, payload.invoice_id)
+    if invoice is not None:
         context.update(
             {
                 "invoice_number": invoice.invoice_number,
@@ -161,6 +210,10 @@ def create_reminder(
 ):
     """Queue a one-off reminder composed by a practitioner."""
     client = _get_client_or_404(db, practitioner.firm_id, payload.client_id)
+    # Before the row is built, so nothing is written against a filing or an
+    # invoice this client does not own — see :func:`_linked_filing`.
+    _linked_filing(db, practitioner.firm_id, client, payload.compliance_item_id)
+    _linked_invoice(db, practitioner.firm_id, client, payload.invoice_id)
     reminder = reminder_service.build_manual_reminder(
         db,
         client=client,
