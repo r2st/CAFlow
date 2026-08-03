@@ -16,6 +16,7 @@ from app.models.base import InvoiceStatus
 from app.models.compliance import ComplianceItem
 from app.models.invoice import Invoice, InvoiceLine
 from app.schemas.common import MAX_AMOUNT_PAISE
+from app.schemas.invoice import MAX_ISSUE_DATE_LEAD_DAYS
 from app.services import billing, firms
 from tests.conftest import make_client_payload
 
@@ -1153,6 +1154,145 @@ class TestRevenue:
             headers=auth_headers,
         )
         assert response.status_code == 422
+
+
+class TestHowFarAheadAnInvoiceMayBeDated:
+    """An issue date decides far more than when the bill was written.
+
+    It picks the number series, the due date is counted from it, and the
+    revenue window is the current financial year. So a mistyped year produces
+    an invoice that is numbered in FY2096-97, never goes overdue, never reaches
+    the receivables list, is never chased, and does not appear on the billing
+    screen the firm reads to find what is outstanding. The client has been
+    billed and the only record of it sits outside every view the firm looks at.
+
+    Bounded rather than closed, because dating a bill a little ahead is real
+    work — deferring revenue into the new financial year on 31 March, or
+    preparing a monthly retainer on the 28th dated the 1st. Both are days
+    ahead; a mistyped year is a year ahead.
+    """
+
+    def _horizon(self) -> date:
+        return clock.today() + timedelta(days=MAX_ISSUE_DATE_LEAD_DAYS)
+
+    def test_a_mistyped_year_is_refused(self, client, auth_headers, client_id):
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=clock.today().replace(year=clock.today().year + 70).isoformat(),
+        )
+        assert response.status_code == 422, response.text
+        assert "issue_date" in response.text
+
+    def test_next_year_is_refused_too(self, client, auth_headers, client_id):
+        """The typo that actually happens is one digit, not seven decades."""
+        today = clock.today()
+        response = make_invoice(
+            client, auth_headers, client_id, issue_date=today.replace(year=today.year + 1).isoformat()
+        )
+        assert response.status_code == 422, response.text
+
+    def test_the_day_past_the_horizon_is_refused(self, client, auth_headers, client_id):
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=(self._horizon() + timedelta(days=1)).isoformat(),
+        )
+        assert response.status_code == 422, response.text
+
+    def test_the_horizon_itself_is_allowed(self, client, auth_headers, client_id):
+        response = make_invoice(
+            client, auth_headers, client_id, issue_date=self._horizon().isoformat()
+        )
+        assert response.status_code == 201, response.text
+
+    def test_a_retainer_dated_next_month_still_goes_through(
+        self, client, auth_headers, client_id
+    ):
+        """How an advance is billed: prepared now, dated the 1st."""
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=(clock.today() + timedelta(days=10)).isoformat(),
+        )
+        assert response.status_code == 201, response.text
+
+    def test_back_dating_stays_open_with_no_bound_at_all(
+        self, client, auth_headers, client_id
+    ):
+        """Entering last year's invoices while catching up on the books is
+        ordinary, and a past date still lands in a series the firm can see."""
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=(clock.today() - timedelta(days=900)).isoformat(),
+        )
+        assert response.status_code == 201, response.text
+
+    def test_the_edit_path_is_bounded_too(self, client, auth_headers, client_id):
+        """The more dangerous of the two doors: moving a draft's issue date
+        re-numbers it into the series that date belongs to, so a mistyped year
+        both hides the invoice and burns a number decades out."""
+        draft = make_invoice(client, auth_headers, client_id).json()
+
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            headers=auth_headers,
+            json={"issue_date": (self._horizon() + timedelta(days=1)).isoformat()},
+        )
+        assert response.status_code == 422, response.text
+
+    def test_a_refused_edit_burns_no_number(self, client, auth_headers, client_id):
+        draft = make_invoice(client, auth_headers, client_id).json()
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            headers=auth_headers,
+            json={"issue_date": (self._horizon() + timedelta(days=400)).isoformat()},
+        )
+
+        after = client.get(f"/api/v1/invoices/{draft['id']}", headers=auth_headers).json()
+        assert after["invoice_number"] == draft["invoice_number"]
+        assert after["issue_date"] == draft["issue_date"]
+
+    def test_the_generate_path_is_bounded_too(self, client, auth_headers, client_id):
+        """The widest door: one mistyped date raises a future-dated invoice for
+        every client with unbilled work at once."""
+        file_everything(client, auth_headers)
+
+        response = client.post(
+            "/api/v1/invoices/generate",
+            headers=auth_headers,
+            json={"issue_date": (self._horizon() + timedelta(days=1)).isoformat()},
+        )
+        assert response.status_code == 422, response.text
+
+    def test_the_refusal_names_the_last_date_it_would_accept(
+        self, client, auth_headers, client_id
+    ):
+        """A bare "not allowed" leaves a practitioner guessing at the rule."""
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=(self._horizon() + timedelta(days=5)).isoformat(),
+        )
+        assert response.status_code == 422
+        assert f"{self._horizon():%d %b %Y}" in response.text
+
+    def test_a_refused_invoice_is_not_stored(self, client, auth_headers, client_id):
+        make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=(self._horizon() + timedelta(days=200)).isoformat(),
+        )
+
+        listing = client.get("/api/v1/invoices", headers=auth_headers).json()
+        assert listing["items"] == []
 
 
 class TestTellingTwoClientsOfTheSameNameApart:
