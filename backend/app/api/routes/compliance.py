@@ -26,6 +26,7 @@ from app.schemas.compliance import (
     DashboardStats,
 )
 from app.services import audit, firms
+from app.services import tasks as task_service
 
 router = APIRouter(prefix="/compliance", tags=["compliance"])
 
@@ -58,6 +59,37 @@ def _tally(bucket: ComplianceCalendarBucket, state: str) -> None:
     bucket.total += 1
     if state in ("upcoming", "due_soon", "overdue", "filed"):
         setattr(bucket, state, getattr(bucket, state) + 1)
+
+
+def _follow_with_tasks(db: Session, item: ComplianceItem, was: ComplianceStatus) -> None:
+    """Move the work raised for a filing whose status a practitioner just changed.
+
+    Ruling a filing not-applicable is the same decision as off-boarding the
+    client or dropping the registration behind it — the obligation is gone —
+    and both of those already take the task with them. Editing the filing
+    directly did not, and that is the path a practitioner actually uses: the
+    everyday "this one does not apply to them" on the calendar screen, and the
+    end-of-deadline batch on ``bulk-status``.
+
+    What was left behind is a task nobody can discharge. It stays TODO on
+    somebody's queue, it is counted in the workload view a manager reads to
+    decide who is drowning, and it counts down to a statutory deadline against
+    a return this firm has decided is not owed — going *overdue* on the day
+    that deadline passes, in red, for good. Marked done by someone working
+    down the list, it becomes a record that a return was filed which nobody
+    ever owed.
+
+    Reversible on the same terms as everywhere else: ``withdrawn_from_status``
+    is what a reinstatement reads, so putting the filing back puts its task
+    back at the status it held. A task a manager cancelled themselves carries
+    no marker and is left alone.
+    """
+    if was == item.status:
+        return
+    if item.status == ComplianceStatus.NOT_APPLICABLE:
+        task_service.withdraw_tasks_for_items(db, [item.id])
+    elif was == ComplianceStatus.NOT_APPLICABLE:
+        task_service.reinstate_tasks_for_items(db, [item.id])
 
 
 @router.get("/types", response_model=list[ComplianceTypeOut], summary="List compliance types")
@@ -239,6 +271,7 @@ def update_compliance_item(
     # half of the change the record most needs to carry.
     watched = set(updates) | {"status", "filed_on", "acknowledgement_number"}
     before = audit.snapshot(item, watched)
+    was_status = item.status
     for key, value in updates.items():
         setattr(item, key, value)
 
@@ -263,6 +296,10 @@ def update_compliance_item(
             filed_on=updates.get("filed_on"),
             filed_on_given="filed_on" in updates,
         )
+
+    # After the normalisation, so the transition is read off the status the
+    # item actually ends on rather than the one the caller named.
+    _follow_with_tasks(db, item, was_status)
 
     audit.record(
         db,
@@ -336,12 +373,14 @@ def bulk_update_status(
         ).all()
     )
     for item in items:
+        was_status = item.status
         item.status = payload.status
         if payload.acknowledgement_number:
             item.acknowledgement_number = payload.acknowledgement_number
         # Never "given" here: a non-filed status has just been refused a date
         # above, so reverting a batch always clears the stale one.
         _normalise_filing(item, filed_on=payload.filed_on, filed_on_given=False)
+        _follow_with_tasks(db, item, was_status)
 
     audit.record(
         db,

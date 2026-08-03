@@ -10,7 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core import clock
+from app.models.base import TaskStatus
 from app.models.compliance import ComplianceItem
+from app.models.task import Task
+from app.services import tasks as task_service
 from tests.conftest import make_client_payload
 
 API = "/api/v1"
@@ -1035,3 +1038,187 @@ class TestTheNumberThePortalIssues:
             db.refresh(item)
             assert item.acknowledgement_number is None
             assert item.filed_on is None
+
+
+class TestWorkForAFilingRuledOutByHand:
+    """Ruling a filing not-applicable takes its task with it.
+
+    Two paths already close a filing and close the work raised for it:
+    off-boarding the client, and dropping the registration behind the return.
+    Editing the filing directly did neither — and that is the path a
+    practitioner actually uses, both as the everyday "this one does not apply
+    to them" on the calendar screen and as the end-of-deadline batch on
+    ``bulk-status``.
+
+    What was left behind is a task nobody can discharge. It stays TODO on
+    somebody's queue, it is counted in the workload view a manager reads to
+    decide who is drowning, and it counts down to a statutory deadline against
+    a return this firm has decided is not owed — going overdue on the day that
+    deadline passes, in red, for good.
+    """
+
+    def _generate_tasks(self, client: TestClient, auth_headers: dict) -> int:
+        response = client.post(
+            f"{API}/tasks/generate", json={"horizon_days": 365}, headers=auth_headers
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["created"]
+
+    def _task_for(self, db: Session, item: ComplianceItem) -> Task:
+        task = db.scalars(
+            select(Task).where(Task.compliance_item_id == item.id)
+        ).first()
+        assert task is not None, "no task was raised for that filing"
+        return task
+
+    def _set_status(
+        self, client: TestClient, auth_headers: dict, item: ComplianceItem, status: str
+    ):
+        return client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": status},
+        )
+
+    def test_the_task_is_withdrawn_with_the_filing(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        task = self._task_for(db, item)
+        assert task.status == TaskStatus.TODO
+
+        response = self._set_status(client, auth_headers, item, "not_applicable")
+        assert response.status_code == 200, response.text
+
+        db.refresh(task)
+        assert task.status == TaskStatus.CANCELLED
+        assert task.withdrawn_from_status == TaskStatus.TODO
+
+    def test_putting_the_filing_back_puts_the_work_back(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Reversible on the same terms as everywhere else — task generation
+        skips a filing that already carries one, so nothing else would ever
+        raise work for it again."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        task = self._task_for(db, item)
+        client.patch(
+            f"{API}/tasks/{task.id}",
+            headers=auth_headers,
+            json={"status": "in_progress"},
+        )
+
+        self._set_status(client, auth_headers, item, "not_applicable")
+        db.refresh(task)
+        assert task.status == TaskStatus.CANCELLED
+
+        response = self._set_status(client, auth_headers, item, "pending")
+        assert response.status_code == 200, response.text
+        db.refresh(task)
+        assert task.status == TaskStatus.IN_PROGRESS
+        assert task.withdrawn_from_status is None
+
+    def test_the_workload_view_stops_counting_it(
+        self, client: TestClient, auth_headers: dict, db: Session, firm_id: str
+    ):
+        """Where the stale task does its damage: this is what a manager reads
+        to decide who is free."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = items_for(db, client_id)[0]
+
+        def open_tasks() -> int:
+            response = client.get(f"{API}/tasks/workload", headers=auth_headers)
+            assert response.status_code == 200, response.text
+            return response.json()["total_open"]
+
+        before = open_tasks()
+        self._set_status(client, auth_headers, item, "not_applicable")
+        assert open_tasks() == before - 1
+
+    def test_a_batch_ruled_out_takes_its_whole_queue(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """``bulk-status`` is the end-of-deadline workflow, so it is where a
+        year of stale work is created in one press."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        items = items_for(db, client_id)[:5]
+        tasks = [self._task_for(db, item) for item in items]
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": [str(i.id) for i in items], "status": "not_applicable"},
+        )
+        assert response.status_code == 200, response.text
+
+        for task in tasks:
+            db.refresh(task)
+            assert task.status == TaskStatus.CANCELLED
+        assert not db.scalars(
+            select(Task).where(
+                Task.compliance_item_id.in_([i.id for i in items]),
+                Task.status.in_(task_service.OPEN_TASK_STATUSES),
+            )
+        ).all()
+
+    def test_reverting_the_batch_brings_the_queue_back(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        items = items_for(db, client_id)[:5]
+        tasks = [self._task_for(db, item) for item in items]
+
+        for status_value in ("not_applicable", "pending"):
+            response = client.post(
+                f"{API}/compliance/items/bulk-status",
+                headers=auth_headers,
+                json={"item_ids": [str(i.id) for i in items], "status": status_value},
+            )
+            assert response.status_code == 200, response.text
+
+        for task in tasks:
+            db.refresh(task)
+            assert task.status == TaskStatus.TODO
+            assert task.withdrawn_from_status is None
+
+    def test_filing_a_return_leaves_its_task_alone(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Only the obligation going away moves the work. A return being
+        lodged is the task being *done*, and whoever holds it says so."""
+        client_id = client_of_long_standing(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        task = self._task_for(db, item)
+
+        response = self._set_status(client, auth_headers, item, "filed")
+        assert response.status_code == 200, response.text
+        db.refresh(task)
+        assert task.status == TaskStatus.TODO
+
+    def test_a_status_that_does_not_move_leaves_the_work_untouched(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A task a manager cancelled themselves carries no withdrawal marker,
+        so re-saving the filing at the status it already holds must not
+        resurrect it."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        task = self._task_for(db, item)
+        client.patch(
+            f"{API}/tasks/{task.id}", headers=auth_headers, json={"status": "cancelled"}
+        )
+
+        self._set_status(client, auth_headers, item, "pending")
+
+        db.refresh(task)
+        assert task.status == TaskStatus.CANCELLED
+        assert task.withdrawn_from_status is None
