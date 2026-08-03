@@ -69,6 +69,21 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
 
     Each compliance type declares ``reminder_offsets_days`` (e.g. [10, 5, 2, 1]);
     an item due in exactly that many days gets one reminder queued, once.
+
+    Walked firm by firm, each firm's row held before its own queue is read.
+    "Once" was a read-decide-write nothing ordered — read what is already
+    queued for this filing, decide there is nothing, add one — and this run
+    does not commit until it has been through every tenant, spending up to
+    ``ai_draft_budget_seconds`` on the wording along the way. Two runs inside
+    that gap both read an empty queue and both add, and beat firing while a
+    previous run is still drafting is the ordinary way to get two: Celery
+    acknowledges this task only once it finishes, so a redelivery overlaps it
+    too. What came out was a client told twice, on the same morning and over
+    their own CA's name, that the same return is due on the 20th.
+
+    The other two sweeps were ordered for exactly this in
+    :func:`~app.services.reminders.hold_while_queueing`; the filing reminder is
+    the one that lives here, and it was left behind.
     """
     run_date = date.fromisoformat(today) if today else clock.today()
     queued = 0
@@ -76,82 +91,83 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
     # DraftingBudget: past the allowance the wording comes from the template so
     # that the run finishes and the reminders exist.
     budget = DraftingBudget()
-    # This sweeps every tenant at once, and each message is signed by the firm
-    # whose client is being written to.
-    firm_names: dict[uuid.UUID, str | None] = {}
 
     with SessionLocal() as db:
-        items = db.scalars(
-            select(ComplianceItem)
-            .join(Firm, Firm.id == ComplianceItem.firm_id)
-            .options(
-                selectinload(ComplianceItem.client),
-                selectinload(ComplianceItem.compliance_type),
-            )
-            .where(
-                # A firm switched off keeps its filings — they are its records,
-                # not ours to delete — so sweeping the items alone chased the
-                # clients of a firm this deployment had stopped serving.
-                Firm.is_active.is_(True),
-                ComplianceItem.status.in_(OPEN_STATUSES),
-                ComplianceItem.due_date >= run_date,
-                ComplianceItem.due_date <= run_date + timedelta(days=60),
-            )
-        ).all()
-
-        for item in items:
-            offsets = item.compliance_type.reminder_offsets_days or []
-            days_left = (item.due_date - run_date).days
-            if days_left not in offsets:
-                continue
-            client = item.client
-            if client is None or not client.is_active:
-                continue
-
-            # One *filing* reminder per (item, offset) — a document chase for
-            # the same filing on the same day is a different message and must
-            # not silence this one. Checked in Python so the JSON predicate
-            # behaves identically on PostgreSQL and SQLite.
-            existing = list(
-                db.scalars(select(Reminder).where(Reminder.compliance_item_id == item.id)).all()
-            )
-            if reminder_service.already_queued(existing, "filing", days_left):
-                continue
-
-            if item.firm_id not in firm_names:
-                firm_names[item.firm_id] = firm_service.name_of(db, item.firm_id)
-
-            body = draft_client_message(
-                purpose="document_request",
-                client_name=client.name,
-                context={
-                    "compliance": item.compliance_type.name,
-                    "period": item.period_label,
-                    "due_date": item.due_date.isoformat(),
-                    "documents": item.compliance_type.required_documents,
-                },
-                firm_name=firm_names[item.firm_id],
-                budget=budget,
-            )
-            db.add(
-                Reminder(
-                    firm_id=item.firm_id,
-                    client_id=client.id,
-                    compliance_item_id=item.id,
-                    reminder_type=ReminderType.FILING,
-                    channel=ReminderChannel.EMAIL,
-                    status=ReminderStatus.SCHEDULED,
-                    subject=(
-                        f"{item.compliance_type.name} for {item.period_label} "
-                        f"is due on {item.due_date:%d %b %Y}"
-                    ),
-                    body=body,
-                    recipient=client.email,
-                    scheduled_for=_ist_morning(run_date),
-                    extra={"kind": "filing", "offset_days": days_left},
+        # A firm switched off keeps its filings — they are its records, not
+        # ours to delete — so sweeping the items alone chased the clients of a
+        # firm this deployment had stopped serving. Sorted, so two runs queue
+        # behind each other on the locks rather than crossing.
+        for firm_id in sorted(firm_service.servable_firm_ids(db)):
+            reminder_service.hold_while_queueing(db, firm_id)
+            # Each message is signed by the firm whose client is being written
+            # to; resolved once per firm now that the walk is per firm.
+            firm_name = firm_service.name_of(db, firm_id)
+            items = db.scalars(
+                select(ComplianceItem)
+                .options(
+                    selectinload(ComplianceItem.client),
+                    selectinload(ComplianceItem.compliance_type),
                 )
-            )
-            queued += 1
+                .where(
+                    ComplianceItem.firm_id == firm_id,
+                    ComplianceItem.status.in_(OPEN_STATUSES),
+                    ComplianceItem.due_date >= run_date,
+                    ComplianceItem.due_date <= run_date + timedelta(days=60),
+                )
+            ).all()
+
+            for item in items:
+                offsets = item.compliance_type.reminder_offsets_days or []
+                days_left = (item.due_date - run_date).days
+                if days_left not in offsets:
+                    continue
+                client = item.client
+                if client is None or not client.is_active:
+                    continue
+
+                # One *filing* reminder per (item, offset) — a document chase
+                # for the same filing on the same day is a different message
+                # and must not silence this one. Checked in Python so the JSON
+                # predicate behaves identically on PostgreSQL and SQLite.
+                existing = list(
+                    db.scalars(
+                        select(Reminder).where(Reminder.compliance_item_id == item.id)
+                    ).all()
+                )
+                if reminder_service.already_queued(existing, "filing", days_left):
+                    continue
+
+                body = draft_client_message(
+                    purpose="document_request",
+                    client_name=client.name,
+                    context={
+                        "compliance": item.compliance_type.name,
+                        "period": item.period_label,
+                        "due_date": item.due_date.isoformat(),
+                        "documents": item.compliance_type.required_documents,
+                    },
+                    firm_name=firm_name,
+                    budget=budget,
+                )
+                db.add(
+                    Reminder(
+                        firm_id=item.firm_id,
+                        client_id=client.id,
+                        compliance_item_id=item.id,
+                        reminder_type=ReminderType.FILING,
+                        channel=ReminderChannel.EMAIL,
+                        status=ReminderStatus.SCHEDULED,
+                        subject=(
+                            f"{item.compliance_type.name} for {item.period_label} "
+                            f"is due on {item.due_date:%d %b %Y}"
+                        ),
+                        body=body,
+                        recipient=client.email,
+                        scheduled_for=_ist_morning(run_date),
+                        extra={"kind": "filing", "offset_days": days_left},
+                    )
+                )
+                queued += 1
         db.commit()
 
     logger.info("Queued %s reminder(s) for %s — %s", queued, run_date, budget.summary())

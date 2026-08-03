@@ -176,13 +176,13 @@ def withdrawn_reason(db: Session, reminder: Reminder) -> str | None:
 # ------------------------------------------------------- one sweep at a time --
 
 
-def _hold_while_queueing(db: Session, firm_id: uuid.UUID) -> None:
+def hold_while_queueing(db: Session, firm_id: uuid.UUID) -> None:
     """Hold this firm's row for the rest of the transaction, before its queue is read.
 
     Queueing a chase is the same read-decide-write the invoice numbering and
     the plan limits both had to be ordered for: read what is already queued for
-    a filing, decide there is nothing, add one. Neither sweep commits until it
-    has been through every firm it was given, and a run spends up to
+    a filing, decide there is nothing, add one. No sweep commits until it has
+    been through every firm it was given, and a run spends up to
     ``ai_draft_budget_seconds`` on the wording — so the gap between the read
     and the commit is a minute or two wide, not an instant.
 
@@ -197,6 +197,12 @@ def _hold_while_queueing(db: Session, firm_id: uuid.UUID) -> None:
     decision orders the writes and nothing else, which is the state this
     replaces. Per firm and in a deterministic order, so two sweeps queue behind
     each other rather than crossing.
+
+    Public because all three sweeps take it, and the third does not live here:
+    the filing reminder is queued by
+    :func:`~app.worker.tasks.schedule_compliance_reminders_task`, which is the
+    one a beat schedule fires on its own and the one whose duplicate says "your
+    GSTR-3B is due on the 20th" twice.
     """
     firms.lock_firm(db, firm_id)
 
@@ -223,7 +229,7 @@ def queue_document_reminders(
     the drafting unbounded by accident.
 
     Each firm's row is held while its own queue is read and added to; see
-    :func:`_hold_while_queueing`.
+    :func:`hold_while_queueing`.
     """
     run_date = today or clock.today()
     offsets = offsets if offsets is not None else settings.document_reminder_offsets
@@ -239,7 +245,7 @@ def queue_document_reminders(
 
     queued: list[Reminder] = []
     for current_firm_id in firm_ids:
-        _hold_while_queueing(db, current_firm_id)
+        hold_while_queueing(db, current_firm_id)
         firm_name = firms.name_of(db, current_firm_id)
         outstanding = documents.items_awaiting_documents(
             db, current_firm_id, from_date=run_date, to_date=horizon
@@ -321,7 +327,7 @@ def queue_payment_reminders(
 
     ``budget`` bounds the model-drafted wording across the sweep, for the same
     reason it does above, and each firm's row is held while its own receivables
-    are read for the reason :func:`_hold_while_queueing` gives.
+    are read for the reason :func:`hold_while_queueing` gives.
 
     Walked firm by firm rather than straight down one cross-tenant list of
     receivables. A switched-off firm's debts are still owed, but chasing them
@@ -339,7 +345,7 @@ def queue_payment_reminders(
 
     queued: list[Reminder] = []
     for current_firm_id in sorted(firms.servable_firm_ids(db, firm_id)):
-        _hold_while_queueing(db, current_firm_id)
+        hold_while_queueing(db, current_firm_id)
         # Every message is signed by the firm that raised the invoice.
         firm_name = firms.name_of(db, current_firm_id)
         for invoice in billing.unpaid_invoices(db, current_firm_id, today=run_date):

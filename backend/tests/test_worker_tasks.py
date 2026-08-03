@@ -342,6 +342,124 @@ class TestScheduleComplianceReminders:
         assert tasks.schedule_compliance_reminders_task() == {"queued": 1}
 
 
+class TestOnlyOneFilingSweepQueuesAtATime:
+    """"Once per (item, offset)" was a read-decide-write nothing ordered.
+
+    Read what is already queued for this filing, decide there is nothing, add
+    one. The run does not commit until it has been through every tenant, and it
+    spends up to ``ai_draft_budget_seconds`` on the wording along the way, so
+    the gap between the read and the commit is a minute or two wide.
+
+    Two runs inside that gap both read an empty queue and both add. Beat firing
+    while a previous run is still drafting is the ordinary way to get two, and
+    Celery acknowledges this task only once it finishes, so a redelivery
+    overlaps it too. What came out was a client told twice, on the same morning
+    and over their own CA's name, that the same return is due on the 20th.
+
+    The document and payment sweeps were ordered for exactly this; the filing
+    reminder lives in the worker and was left behind. Ordering is the whole
+    fix, so ordering is what is asserted: a lock taken after the decision
+    orders the writes and nothing else.
+    """
+
+    def _record_order(self, monkeypatch) -> list[str]:
+        order: list[str] = []
+        monkeypatch.setattr(
+            reminder_service.firms, "lock_firm", lambda session, fid: order.append("lock")
+        )
+        real = reminder_service.already_queued
+        monkeypatch.setattr(
+            tasks.reminder_service,
+            "already_queued",
+            lambda *a, **kw: (order.append("read"), real(*a, **kw))[1],
+        )
+        return order
+
+    def test_the_firm_is_held_before_its_queue_is_read(self, db, monkeypatch):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        ctype = get_type(db, "GSTR3B_MONTHLY")
+        make_item(db, firm, client, ctype, due_date=RUN_DATE + timedelta(days=10))
+        db.commit()
+        order = self._record_order(monkeypatch)
+
+        tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat())
+
+        assert order[:2] == ["lock", "read"]
+
+    def test_a_reminder_queued_while_we_waited_is_not_queued_again(self, db, monkeypatch):
+        """The interleaving itself, in the order it happens.
+
+        The competing run is staged on the lock: it runs and commits on its own
+        session at the moment this one takes the firm's row, which is the
+        instant a real loser resumes at. Everything after that is the ordinary
+        code path deciding what is left to chase.
+        """
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        ctype = get_type(db, "GSTR3B_MONTHLY")
+        item = make_item(db, firm, client, ctype, due_date=RUN_DATE + timedelta(days=10))
+        item_id = item.id
+        db.commit()
+
+        fired: list = []
+
+        def winner_commits_first(session, fid):
+            if fired:
+                return
+            fired.append(fid)
+            tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat())
+
+        monkeypatch.setattr(reminder_service.firms, "lock_firm", winner_commits_first)
+
+        tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat())
+
+        assert fired, "the competing run never happened"
+        db.expire_all()
+        queued = db.scalars(
+            select(Reminder).where(Reminder.compliance_item_id == item_id)
+        ).all()
+        assert len(queued) == 1, "the client was told twice about the same deadline"
+
+    def test_a_firm_that_is_not_served_is_never_held(self, db, monkeypatch):
+        """Nothing is queued for it, so there is nothing to order — and taking
+        its row would block that firm's own requests for a sweep doing no work
+        on it."""
+        firm = make_firm(db, name="Dormant & Co", is_active=False)
+        client = make_client(db, firm, email="ops@dormant.in")
+        ctype = get_type(db, "GSTR3B_MONTHLY")
+        make_item(db, firm, client, ctype, due_date=RUN_DATE + timedelta(days=10))
+        db.commit()
+        held: list = []
+        monkeypatch.setattr(
+            reminder_service.firms, "lock_firm", lambda session, fid: held.append(fid)
+        )
+
+        assert tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat()) == {
+            "queued": 0
+        }
+        assert held == []
+
+    def test_the_sweep_still_spans_every_firm_and_holds_them_in_order(self, db, monkeypatch):
+        """Locking per firm must not have narrowed what a beat run covers."""
+        for name in ("Zephyr Associates", "Anand & Co", "Mehta Partners"):
+            firm = make_firm(db, name=name)
+            client = make_client(db, firm, email=f"{name.split()[0].lower()}@example.in")
+            ctype = get_type(db, "GSTR3B_MONTHLY")
+            make_item(db, firm, client, ctype, due_date=RUN_DATE + timedelta(days=10))
+        db.commit()
+        held: list = []
+        monkeypatch.setattr(
+            reminder_service.firms, "lock_firm", lambda session, fid: held.append(fid)
+        )
+
+        result = tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat())
+
+        assert result == {"queued": 3}
+        assert set(held) == reminder_service.firms.servable_firm_ids(db)
+        assert held == sorted(held), "an undefined lock order lets two sweeps cross"
+
+
 # ------------------------------------------------------------ reminder dispatch --
 
 
