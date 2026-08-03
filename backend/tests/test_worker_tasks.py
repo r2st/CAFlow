@@ -349,7 +349,7 @@ class TestDispatchDueReminders:
         make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 1, "failed": 0, "retrying": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 1, "failed": 0, "retrying": 0, "withdrawn": 0}
 
         db.expire_all()
         reminder = db.scalars(select(Reminder)).one()
@@ -363,7 +363,7 @@ class TestDispatchDueReminders:
         make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) + timedelta(hours=2))
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0, "withdrawn": 0}
 
         db.expire_all()
         assert db.scalars(select(Reminder)).one().status is ReminderStatus.SCHEDULED
@@ -380,7 +380,7 @@ class TestDispatchDueReminders:
         )
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 1, "retrying": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 1, "retrying": 0, "withdrawn": 0}
 
         db.expire_all()
         reminder = db.scalars(select(Reminder)).one()
@@ -400,7 +400,7 @@ class TestDispatchDueReminders:
         )
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0, "withdrawn": 0}
 
     def test_cancelled_reminders_are_not_sent(self, db):
         firm = make_firm(db)
@@ -414,7 +414,7 @@ class TestDispatchDueReminders:
         )
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0, "withdrawn": 0}
 
     def test_batch_limit_is_respected(self, db):
         firm = make_firm(db)
@@ -428,6 +428,7 @@ class TestDispatchDueReminders:
             "sent": 2,
             "failed": 0,
             "retrying": 0,
+            "withdrawn": 0,
         }
 
         db.expire_all()
@@ -523,7 +524,7 @@ class TestDispatchSendsEachReminderOnce:
                 delivered=True, transport="log"
             ),
         )
-        assert tasks.dispatch_due_reminders_task() == {"sent": 2, "failed": 0, "retrying": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 2, "failed": 0, "retrying": 0, "withdrawn": 0}
 
     def test_a_reminder_held_for_the_next_run_is_not_retried_inside_this_one(
         self, db, monkeypatch
@@ -550,7 +551,7 @@ class TestDispatchSendsEachReminderOnce:
 
         result = tasks.dispatch_due_reminders_task(limit=25)
 
-        assert result == {"sent": 0, "failed": 0, "retrying": 1}
+        assert result == {"sent": 0, "failed": 0, "retrying": 1, "withdrawn": 0}
         assert len(attempts) == 1
         db.expire_all()
         reminder = db.scalars(select(Reminder)).one()
@@ -598,6 +599,7 @@ class TestDispatchSendsEachReminderOnce:
                 "sent": 2,
                 "failed": 0,
                 "retrying": 0,
+                "withdrawn": 0,
             }
 
         assert "batch limit" in caplog.text
@@ -637,6 +639,7 @@ class TestDispatchSendsEachReminderOnce:
                 "sent": 0,
                 "failed": 0,
                 "retrying": 1,
+                "withdrawn": 0,
             }
 
         assert "batch limit" not in caplog.text
@@ -734,7 +737,7 @@ class TestASwitchedOffFirmStopsTalkingToItsClients:
         make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0, "withdrawn": 0}
 
     def test_held_mail_is_kept_scheduled_rather_than_failed(self, db):
         """Suspension is a state a firm comes back from.
@@ -765,7 +768,7 @@ class TestASwitchedOffFirmStopsTalkingToItsClients:
         firm.is_active = True
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 1, "failed": 0, "retrying": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 1, "failed": 0, "retrying": 0, "withdrawn": 0}
 
     def test_held_mail_is_not_reported_as_a_backlog(self, db, caplog):
         """A firm on hold is not work the next run is expected to clear.
@@ -785,6 +788,7 @@ class TestASwitchedOffFirmStopsTalkingToItsClients:
                 "sent": 1,
                 "failed": 0,
                 "retrying": 0,
+                "withdrawn": 0,
             }
 
         assert "batch limit" not in caplog.text
@@ -796,7 +800,7 @@ class TestASwitchedOffFirmStopsTalkingToItsClients:
         make_reminder(db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1))
         db.commit()
 
-        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0}
+        assert tasks.dispatch_due_reminders_task() == {"sent": 0, "failed": 0, "retrying": 0, "withdrawn": 0}
 
         db.expire_all()
         assert db.scalars(select(Reminder)).one().status is ReminderStatus.SCHEDULED
@@ -1152,3 +1156,281 @@ class TestIstMorning:
 
     def test_result_is_timezone_aware(self):
         assert tasks._ist_morning(date(2026, 7, 1)).tzinfo is UTC
+
+
+class TestAChaseThatNoLongerStands:
+    """A reminder is queued because something was outstanding *then*, and sent
+    later. The sweeps queue at 07:00 IST for 09:00 IST, and a message held for
+    a greylisting relay waits longer still.
+
+    Nothing re-read the reason in between, so the queue went out on a fact
+    hours to days stale: the client sent the bank statement and the return was
+    filed at half past eight, and at nine they were emailed to ask for it; they
+    paid the invoice and were then chased for a balance they no longer owed.
+    """
+
+    def _document_chase(self, db, *, item_status=ComplianceStatus.PENDING):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        item = make_item(
+            db,
+            firm,
+            client,
+            get_type(db, "GSTR3B_MONTHLY"),
+            due_date=clock.today() + timedelta(days=10),
+            status=item_status,
+        )
+        reminder = make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            compliance_item_id=item.id,
+            reminder_type=ReminderType.DOCUMENT,
+            subject="We still need your bank statement",
+            extra={"kind": "document", "offset_days": 10},
+        )
+        return firm, client, item, reminder
+
+    def _sent_invoice(self, db, firm, client, *, paid=0, status=InvoiceStatus.SENT):
+        invoice = Invoice(
+            firm_id=firm.id,
+            client_id=client.id,
+            invoice_number="INV/FY2026-27/0001",
+            issue_date=clock.today() - timedelta(days=40),
+            due_date=clock.today() - timedelta(days=10),
+            subtotal_paise=200_000,
+            tax_paise=36_000,
+            total_paise=236_000,
+            amount_paid_paise=paid,
+            status=status,
+        )
+        db.add(invoice)
+        db.flush()
+        return invoice
+
+    def _payment_chase(self, db, firm, client, invoice):
+        return make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            invoice_id=invoice.id,
+            reminder_type=ReminderType.PAYMENT,
+            subject=f"Invoice {invoice.invoice_number} — ₹2,360.00 outstanding",
+            extra={"kind": "payment", "offset_days": 10},
+        )
+
+    # ------------------------------------------------------------- filings --
+
+    def test_a_document_chase_for_a_filed_return_is_not_sent(self, db):
+        _, _, item, _ = self._document_chase(db)
+        item.status = ComplianceStatus.FILED
+        item.filed_on = clock.today()
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task() == {
+            "sent": 0,
+            "failed": 0,
+            "retrying": 0,
+            "withdrawn": 1,
+        }
+
+    def test_the_withdrawal_is_recorded_on_the_reminder(self, db):
+        _, _, item, reminder = self._document_chase(db)
+        item.status = ComplianceStatus.FILED
+        item.filed_on = clock.today()
+        db.commit()
+        tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        row = db.get(Reminder, reminder.id)
+        assert row.status is ReminderStatus.CANCELLED
+        assert "filed" in row.extra["withdrawn_because"]
+        # No attempt was made, so none is counted.
+        assert row.attempt_count == 0
+        assert row.sent_at is None
+
+    def test_a_late_filing_counts_as_filed(self, db):
+        _, _, item, _ = self._document_chase(db)
+        item.status = ComplianceStatus.DELAYED_FILED
+        item.filed_on = clock.today()
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["withdrawn"] == 1
+
+    def test_a_filing_the_client_no_longer_owes_is_not_chased(self, db):
+        """Surrendering a registration closes the item and cancels the task
+        raised for it; the queued mail was the one thing left going out."""
+        _, _, item, reminder = self._document_chase(db)
+        item.status = ComplianceStatus.NOT_APPLICABLE
+        db.commit()
+        tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        assert "no longer one this client owes" in db.get(Reminder, reminder.id).extra[
+            "withdrawn_because"
+        ]
+
+    def test_a_filing_reminder_is_held_to_the_same_test(self, db):
+        firm, client, item, _ = self._document_chase(db)
+        reminder = make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            compliance_item_id=item.id,
+            reminder_type=ReminderType.FILING,
+            extra={"kind": "filing", "offset_days": 10},
+        )
+        item.status = ComplianceStatus.FILED
+        db.commit()
+        tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        assert db.get(Reminder, reminder.id).status is ReminderStatus.CANCELLED
+
+    def test_a_row_queued_before_the_kind_was_recorded_is_still_checked(self, db):
+        """Filing reminders predate the key, so a row without one is one."""
+        firm, client, item, _ = self._document_chase(db)
+        reminder = make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            compliance_item_id=item.id,
+            reminder_type=ReminderType.FILING,
+            extra={"offset_days": 10},
+        )
+        item.status = ComplianceStatus.FILED
+        db.commit()
+        tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        assert db.get(Reminder, reminder.id).status is ReminderStatus.CANCELLED
+
+    def test_an_open_filing_is_still_chased(self, db):
+        """The point is not to stop chasing — it is to stop chasing the done."""
+        self._document_chase(db)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task() == {
+            "sent": 1,
+            "failed": 0,
+            "retrying": 0,
+            "withdrawn": 0,
+        }
+
+    def test_work_in_progress_is_still_chased(self, db):
+        self._document_chase(db, item_status=ComplianceStatus.IN_PROGRESS)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    # -------------------------------------------------------------- money --
+
+    def test_a_settled_invoice_is_not_chased(self, db):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(db, firm, client, paid=236_000, status=InvoiceStatus.PAID)
+        reminder = self._payment_chase(db, firm, client, invoice)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["withdrawn"] == 1
+        db.expire_all()
+        assert "settled in full" in db.get(Reminder, reminder.id).extra["withdrawn_because"]
+
+    def test_a_cancelled_invoice_is_not_chased(self, db):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(db, firm, client, status=InvoiceStatus.CANCELLED)
+        reminder = self._payment_chase(db, firm, client, invoice)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["withdrawn"] == 1
+        db.expire_all()
+        assert "cancelled" in db.get(Reminder, reminder.id).extra["withdrawn_because"]
+
+    def test_a_part_payment_does_not_stop_the_chase(self, db):
+        """Something is still outstanding, and the message quotes the balance."""
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(
+            db, firm, client, paid=100_000, status=InvoiceStatus.PARTIALLY_PAID
+        )
+        self._payment_chase(db, firm, client, invoice)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    def test_an_unpaid_invoice_is_still_chased(self, db):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(db, firm, client, status=InvoiceStatus.OVERDUE)
+        self._payment_chase(db, firm, client, invoice)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    # ------------------------------------------------------------- manual --
+
+    def test_a_message_a_practitioner_composed_is_never_second_guessed(self, db):
+        """A filing confirmation is *about* a filed return, and quotes the
+        acknowledgement number back. Withdrawing it would silence the one
+        message the client is waiting for."""
+        firm, client, item, _ = self._document_chase(db)
+        reminder = reminder_service.build_manual_reminder(
+            db,
+            client=client,
+            reminder_type=ReminderType.FILING,
+            subject="Your GSTR-3B has been filed",
+            body="Acknowledgement number AA2707260012345.",
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            compliance_item_id=item.id,
+        )
+        item.status = ComplianceStatus.FILED
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+        db.expire_all()
+        assert db.get(Reminder, reminder.id).status is ReminderStatus.SENT
+
+    def test_a_chase_naming_nothing_goes_out_as_before(self, db):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        make_reminder(
+            db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=1)
+        )
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    # ------------------------------------------------------ the batch loop --
+
+    def test_a_withdrawal_does_not_stop_the_rest_of_the_batch(self, db):
+        firm, client, item, _ = self._document_chase(db)
+        item.status = ComplianceStatus.FILED
+        make_reminder(
+            db, firm, client, scheduled_for=datetime.now(UTC) - timedelta(hours=2)
+        )
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task() == {
+            "sent": 1,
+            "failed": 0,
+            "retrying": 0,
+            "withdrawn": 1,
+        }
+
+    def test_a_withdrawn_reminder_is_not_reconsidered_next_run(self, db):
+        _, _, item, _ = self._document_chase(db)
+        item.status = ComplianceStatus.FILED
+        db.commit()
+        tasks.dispatch_due_reminders_task()
+
+        assert tasks.dispatch_due_reminders_task() == {
+            "sent": 0,
+            "failed": 0,
+            "retrying": 0,
+            "withdrawn": 0,
+        }

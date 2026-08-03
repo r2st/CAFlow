@@ -286,7 +286,7 @@ class TestDispatcherDelivery:
 
         result = tasks.dispatch_due_reminders_task()
 
-        assert result == {"sent": 1, "failed": 0, "retrying": 0}
+        assert result == {"sent": 1, "failed": 0, "retrying": 0, "withdrawn": 0}
         assert len(smtp.instances[0].messages) == 1
         db.expire_all()
         reminder = db.scalars(select(Reminder)).one()
@@ -311,6 +311,7 @@ class TestDispatcherDelivery:
             "sent": 0,
             "failed": 0,
             "retrying": 1,
+            "withdrawn": 0,
         }
 
         db.expire_all()
@@ -356,6 +357,7 @@ class TestDispatcherDelivery:
             "sent": 0,
             "failed": 1,
             "retrying": 0,
+            "withdrawn": 0,
         }
 
         db.expire_all()

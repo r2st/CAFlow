@@ -24,8 +24,15 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core import clock
-from app.models.base import ReminderChannel, ReminderStatus, ReminderType
+from app.models.base import (
+    ComplianceStatus,
+    ReminderChannel,
+    ReminderStatus,
+    ReminderType,
+)
 from app.models.client import Client
+from app.models.compliance import ComplianceItem
+from app.models.invoice import Invoice
 from app.models.reminder import Reminder
 from app.services import billing, documents, firms
 from app.services.ai import DraftingBudget, draft_client_message
@@ -61,7 +68,7 @@ def recipient_for(client: Client, channel: ReminderChannel) -> str | None:
             return client.email
 
 
-def _kind_of(reminder: Reminder) -> str:
+def kind_of(reminder: Reminder) -> str:
     """Which chase a queued reminder was, defaulting to the one that predates the key.
 
     Filing reminders were the first kind and wrote only ``offset_days``, so a
@@ -86,9 +93,65 @@ def already_queued(existing: list[Reminder], kind: str, offset: int) -> bool:
     PostgreSQL; the candidate set here is small enough that it does not matter.
     """
     return any(
-        _kind_of(r) == kind and (r.extra or {}).get("offset_days") == offset
+        kind_of(r) == kind and (r.extra or {}).get("offset_days") == offset
         for r in existing
     )
+
+
+# ---------------------------------------------------- the chase still standing --
+
+# The statuses in which a filing is still something to chase. Anything else —
+# filed, delayed-filed, or ruled not applicable — is a chase that has been
+# answered or withdrawn.
+OPEN_ITEM_STATUSES = (ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS)
+
+
+def withdrawn_reason(db: Session, reminder: Reminder) -> str | None:
+    """Why a queued chase should no longer go out, or ``None`` if it should.
+
+    A reminder is queued because something was outstanding *then*, and sent
+    later — the sweeps queue at 07:00 IST for 09:00 IST, and a message held for
+    a greylisting relay waits longer still. Nothing re-read the reason in
+    between, so the queue went out on a fact two hours to several days stale:
+
+    * the client sent the bank statement and the return was filed at half past
+      eight, and at nine they were emailed to ask for it;
+    * they paid the invoice, and were then chased for the balance — quoting an
+      amount they no longer owe;
+    * they surrendered the GST registration behind the filing, which closes the
+      item and cancels the task raised for it, and were asked for the paperwork
+      anyway.
+
+    Only the automated chases. ``kind`` distinguishes them from a message a
+    practitioner composed, which may perfectly well be *about* a filed return —
+    a filing confirmation is exactly that — and is never second-guessed here.
+    Read in Python rather than as a JSON predicate, for the reason
+    :func:`already_queued` is.
+
+    A missing item or invoice is not a reason: the foreign keys cascade, so
+    there is no such row to find, and being unable to check is not grounds for
+    withholding a message the firm asked for.
+    """
+    kind = kind_of(reminder)
+    if kind in ("filing", "document") and reminder.compliance_item_id is not None:
+        item = db.get(ComplianceItem, reminder.compliance_item_id)
+        if item is None or item.status in OPEN_ITEM_STATUSES:
+            return None
+        if item.status == ComplianceStatus.NOT_APPLICABLE:
+            return "the filing is no longer one this client owes"
+        return f"the return was {item.status.value} before this went out"
+
+    if kind == "payment" and reminder.invoice_id is not None:
+        invoice = db.get(Invoice, reminder.invoice_id)
+        if invoice is None:
+            return None
+        if invoice.status in billing.NOT_OWED_STATUSES:
+            # Neither is a bill the client has been asked to pay.
+            return f"the invoice is {invoice.status.value}"
+        if invoice.balance_paise <= 0:
+            return "the invoice has been settled in full"
+
+    return None
 
 
 # ----------------------------------------------------- document collection --

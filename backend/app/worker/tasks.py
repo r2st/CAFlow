@@ -259,7 +259,7 @@ def dispatch_due_reminders_task(limit: int = 200) -> dict[str, int]:
     orders of magnitude better than the batch it replaces.
     """
     cutoff = datetime.now(UTC)
-    sent = failed = retrying = 0
+    sent = failed = retrying = withdrawn = 0
     # Tried this run and deliberately left SCHEDULED for the next one.
     deferred: set[uuid.UUID] = set()
     firms: dict[uuid.UUID, Firm | None] = {}
@@ -283,6 +283,8 @@ def dispatch_due_reminders_task(limit: int = 200) -> dict[str, int]:
                 sent += 1
             elif outcome == "failed":
                 failed += 1
+            elif outcome == "withdrawn":
+                withdrawn += 1
             else:
                 retrying += 1
                 deferred.add(reminder.id)
@@ -309,15 +311,42 @@ def dispatch_due_reminders_task(limit: int = 200) -> dict[str, int]:
             overflow,
         )
     logger.info(
-        "Dispatched %s reminder(s), %s failed, %s awaiting retry", sent, failed, retrying
+        "Dispatched %s reminder(s), %s failed, %s awaiting retry, %s withdrawn",
+        sent,
+        failed,
+        retrying,
+        withdrawn,
     )
-    return {"sent": sent, "failed": failed, "retrying": retrying}
+    return {
+        "sent": sent,
+        "failed": failed,
+        "retrying": retrying,
+        "withdrawn": withdrawn,
+    }
 
 
 def _attempt_delivery(
     db: Session, reminder: Reminder, firms: dict[uuid.UUID, Firm | None]
 ) -> str:
-    """Try to send one claimed reminder. Returns "sent", "failed" or "retrying"."""
+    """Try to send one claimed reminder.
+
+    Returns "sent", "failed", "retrying" or "withdrawn".
+    """
+    # Before the attempt is counted, because no attempt is made: the reason the
+    # chase was queued has been answered or has gone away since, and sending it
+    # would tell the client something the firm's own records contradict. See
+    # ``reminders.withdrawn_reason``. Cancelled rather than left scheduled —
+    # this is the same conclusion a practitioner reaches by hand, and it is not
+    # a state the reminder comes back from the way a firm on hold does.
+    withdrawn = reminder_service.withdrawn_reason(db, reminder)
+    if withdrawn is not None:
+        reminder.status = ReminderStatus.CANCELLED
+        # Reassigned rather than mutated: ``extra`` is a JSON column, and an
+        # in-place update is not a change the session would notice.
+        reminder.extra = {**(reminder.extra or {}), "withdrawn_because": withdrawn}
+        logger.info("Withdrew reminder %s before sending: %s", reminder.id, withdrawn)
+        return "withdrawn"
+
     reminder.attempt_count += 1
     if not reminder.recipient:
         reminder.status = ReminderStatus.FAILED
