@@ -18,9 +18,11 @@ from app.models.base import (
     EntityType,
     Frequency,
     GSTFilingFrequency,
+    TaskStatus,
 )
 from app.models.client import Client as ClientModel
 from app.models.compliance import ComplianceItem, ComplianceType
+from app.models.task import Task
 from app.services.applicability import applies_to
 from app.services.compliance_generator import (
     applicable_types,
@@ -1642,3 +1644,171 @@ class TestARegistrationTheClientNoLongerHolds:
         ).json()["items"]
         summaries = [entry["summary"] for entry in entries]
         assert any("withdrew" in summary for summary in summaries), summaries
+
+
+class TestOffBoardingAndARegistrationChangeAreDifferentCloses:
+    """``offboarded_from_status`` is written by two mechanisms, not one.
+
+    Off-boarding closes every open filing; a registration change closes the
+    ones the client's registrations no longer call for. Both record what the
+    item was, in the same column, because both have to be reversible — and
+    reading that column alone cannot say which close set it.
+
+    Reactivation reopened everything carrying the marker, so a client who
+    surrendered their GST registration and was later off-boarded came back
+    GST-free and holding a year of GST returns again: pending on the calendar,
+    counted on the dashboard, going overdue one by one, raising tasks, and
+    emailing the client for the paperwork behind a return nobody owes. Marked
+    filed by someone working down the list, each then carries a fee onto an
+    invoice.
+    """
+
+    def _onboard(self, client: TestClient, auth_headers: dict, **overrides) -> str:
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload(**overrides)
+        ).json()
+        assert created["compliance_items_created"] > 0
+        return created["client"]["id"]
+
+    def _of_type(self, db: Session, client_id: str, code: str) -> list[ComplianceItem]:
+        return [
+            item
+            for item in items_of(db, uuid.UUID(client_id))
+            if item.compliance_type.code == code
+        ]
+
+    def _ahead(self, db: Session, client_id: str, code: str) -> list[ComplianceItem]:
+        return [
+            item
+            for item in self._of_type(db, client_id, code)
+            if item.period_start > clock.today()
+        ]
+
+    def _patch(self, client: TestClient, auth_headers: dict, client_id: str, **body):
+        response = client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json=body
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def _surrender_then_offboard(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ) -> tuple[str, list[ComplianceItem]]:
+        client_id = self._onboard(client, auth_headers)
+        self._patch(client, auth_headers, client_id, gst_registered=False)
+        ahead = self._ahead(db, client_id, "GSTR3B_MONTHLY")
+        assert ahead
+        assert all(i.status == ComplianceStatus.NOT_APPLICABLE for i in ahead)
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        return client_id, ahead
+
+    def test_a_surrendered_registration_survives_the_round_trip(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id, ahead = self._surrender_then_offboard(client, auth_headers, db)
+
+        self._patch(client, auth_headers, client_id, is_active=True)
+
+        for item in ahead:
+            db.refresh(item)
+            assert item.status == ComplianceStatus.NOT_APPLICABLE, (
+                f"{item.period_label} came back for a client who is not GST registered"
+            )
+
+    def test_the_filings_they_do_still_owe_come_back(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Withholding the GST returns must not withhold the rest of the calendar."""
+        client_id, _ = self._surrender_then_offboard(client, auth_headers, db)
+
+        self._patch(client, auth_headers, client_id, is_active=True)
+
+        open_itr = [
+            item
+            for item in self._of_type(db, client_id, "ITR_AUDIT")
+            if item.status in (ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS)
+        ]
+        assert open_itr
+
+    def test_registering_again_still_brings_them_back(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The marker is kept, not cleared, on what is held back.
+
+        Clearing it would leave those filings closed for good: generation skips
+        a (type, period) that already exists whatever its status, so nothing
+        else would ever raise them again.
+        """
+        client_id, ahead = self._surrender_then_offboard(client, auth_headers, db)
+        self._patch(client, auth_headers, client_id, is_active=True)
+
+        self._patch(client, auth_headers, client_id, gst_registered=True)
+
+        for item in ahead:
+            db.refresh(item)
+            assert item.status == ComplianceStatus.PENDING
+
+    def test_the_work_raised_for_a_withheld_filing_stays_cancelled(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A task follows its filing. Reinstating one without the other puts a
+        deadline back on a practitioner's queue for a return nobody owes."""
+        client_id = self._onboard(client, auth_headers)
+        ahead = self._ahead(db, client_id, "GSTR3B_MONTHLY")
+        target = min(ahead, key=lambda item: item.due_date)
+        task = Task(
+            firm_id=target.firm_id,
+            client_id=target.client_id,
+            compliance_item_id=target.id,
+            title="File GSTR-3B",
+            status=TaskStatus.TODO,
+            due_date=target.due_date,
+        )
+        db.add(task)
+        db.commit()
+
+        self._patch(client, auth_headers, client_id, gst_registered=False)
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        self._patch(client, auth_headers, client_id, is_active=True)
+
+        db.refresh(task)
+        assert task.status == TaskStatus.CANCELLED
+        assert task.withdrawn_from_status == TaskStatus.TODO
+
+    def test_a_flag_switched_off_while_they_were_away_is_honoured(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Nothing reconciles a registration edit made to an off-boarded client
+        — every filing is already closed — so the reopen is where it lands."""
+        client_id = self._onboard(client, auth_headers)
+        ahead = self._ahead(db, client_id, "GSTR3B_MONTHLY")
+        assert ahead
+
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        self._patch(client, auth_headers, client_id, gst_registered=False)
+        self._patch(client, auth_headers, client_id, is_active=True)
+
+        for item in ahead:
+            db.refresh(item)
+            assert item.status == ComplianceStatus.NOT_APPLICABLE
+
+    def test_an_ordinary_off_boarding_is_unaffected(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """No registration changed, so everything closed comes back."""
+        client_id = self._onboard(client, auth_headers)
+        before = {
+            item.id
+            for item in items_of(db, uuid.UUID(client_id))
+            if item.status == ComplianceStatus.PENDING
+        }
+
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        self._patch(client, auth_headers, client_id, is_active=True)
+
+        after = {
+            item.id
+            for item in items_of(db, uuid.UUID(client_id))
+            if item.status == ComplianceStatus.PENDING
+        }
+        assert after == before

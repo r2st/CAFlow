@@ -6,7 +6,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentFirm, CurrentPractitioner, DbSession, Manager
 from app.core import clock
@@ -27,6 +27,7 @@ from app.schemas.compliance import ComplianceGenerateRequest, ComplianceGenerate
 from app.services import audit, firms
 from app.services import tasks as task_service
 from app.services.compliance_generator import (
+    applicable_types,
     generate_compliance_items,
     reconcile_applicability,
 )
@@ -102,23 +103,43 @@ def restore_shelved_items(db: Session, client: Client) -> int:
     """
     shelved = list(
         db.scalars(
-            select(ComplianceItem).where(
+            select(ComplianceItem)
+            .options(selectinload(ComplianceItem.compliance_type))
+            .where(
                 ComplianceItem.client_id == client.id,
                 ComplianceItem.offboarded_from_status.is_not(None),
             )
         ).all()
     )
+    # Only the filings this client's registrations still call for. The marker
+    # is written by two different closes — off-boarding, and a registration
+    # change withdrawing what it no longer covers — and reading it alone
+    # cannot tell them apart. A client who surrendered their GST registration
+    # and was later off-boarded came back GST-free and holding a year of GST
+    # returns again: pending on the calendar, going overdue one by one,
+    # raising tasks, and chasing the client for the paperwork behind a return
+    # nobody owes. The same happens to a flag switched off while the client
+    # was away, which nothing reconciles on the way back in.
+    #
+    # What is left out keeps its marker rather than losing it, so registering
+    # again still brings those filings back through
+    # ``reconcile_applicability`` — the mechanism that closed them.
+    applicable = {ct.id for ct in applicable_types(db, client)}
+    reinstated: list[ComplianceItem] = []
     restored = 0
     for item in shelved:
+        if item.compliance_type_id not in applicable:
+            continue
         if item.status == ComplianceStatus.NOT_APPLICABLE:
             item.status = item.offboarded_from_status
             restored += 1
         item.offboarded_from_status = None
+        reinstated.append(item)
     # The tasks too, for the reason above applied to work rather than to
     # filings: task generation skips a compliance item that already carries
     # one, so the reopened calendar would otherwise come back with nothing
     # raised against it and no sweep would ever notice.
-    task_service.reinstate_tasks_for_items(db, [item.id for item in shelved])
+    task_service.reinstate_tasks_for_items(db, [item.id for item in reinstated])
     return restored
 
 
