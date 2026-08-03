@@ -1944,3 +1944,157 @@ class TestOffBoardingAndARegistrationChangeAreDifferentCloses:
             if item.status == ComplianceStatus.PENDING
         }
         assert after == before
+
+
+class TestCountingAClientsFilingsInTheDatabase:
+    """The five counters on a client's detail page are aggregates, and they
+    were computed by reading every filing the client has ever had.
+
+    A filing is a permanent record and the nightly generator materialises a
+    year of them ahead of time, so a client a firm has acted for a few years
+    carries several hundred rows — every one hydrated into a mapped object on
+    each visit, to be reduced to five integers. It is the curve the dashboard
+    and the workload view were already taken off, on the page a practitioner
+    opens before every call with a client.
+
+    The counters have not moved; only where they are computed has.
+    """
+
+    @staticmethod
+    def _summary(client: TestClient, auth_headers: dict, client_id: str) -> dict:
+        response = client.get(f"{API}/clients/{client_id}", headers=auth_headers)
+        assert response.status_code == 200, response.text
+        return response.json()["compliance_summary"]
+
+    def test_the_filings_are_counted_rather_than_read(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The point of the change, asserted directly. Anything the detail page
+        asks of ``compliance_items`` must come back as an aggregate."""
+        from sqlalchemy import event
+
+        from app.database import engine
+
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()["client"]
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()).lower())
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            self._summary(client, auth_headers, created["id"])
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        touched = [sql for sql in statements if "compliance_items" in sql]
+        assert touched, "the client detail page never looked at the filings"
+        unaggregated = [
+            sql for sql in touched if "count(" not in sql and "sum(" not in sql
+        ]
+        assert not unaggregated, f"rows read instead of counted: {unaggregated}"
+
+    def test_every_bucket_lands_where_it_did(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()["client"]
+        items = list(
+            db.scalars(
+                select(ComplianceItem)
+                .where(ComplianceItem.client_id == uuid.UUID(created["id"]))
+                .order_by(ComplianceItem.due_date)
+            ).all()
+        )
+        assert len(items) >= 5, "not enough generated filings to bucket"
+        today = clock.today()
+
+        items[0].status = ComplianceStatus.FILED
+        items[0].filed_on = today
+        items[1].status = ComplianceStatus.DELAYED_FILED
+        items[1].filed_on = today
+        items[2].status = ComplianceStatus.NOT_APPLICABLE
+        items[3].due_date = today - timedelta(days=1)
+        items[4].due_date = today + timedelta(days=3)
+        for spare in items[5:]:
+            spare.due_date = today + timedelta(days=90)
+        db.commit()
+
+        summary = self._summary(client, auth_headers, created["id"])
+
+        assert summary["total"] == len(items)
+        assert summary["filed"] == 2
+        assert summary["overdue"] == 1
+        assert summary["due_soon"] == 1
+        # Everything open, whichever of the three states it is in — and a
+        # not-applicable filing is neither owed nor filed, so it appears only
+        # in the total.
+        assert summary["pending"] == len(items) - 3
+
+    def test_a_filing_due_today_is_due_soon_rather_than_overdue(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The boundary the two date comparisons share."""
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()["client"]
+        items = list(
+            db.scalars(
+                select(ComplianceItem).where(
+                    ComplianceItem.client_id == uuid.UUID(created["id"])
+                )
+            ).all()
+        )
+        today = clock.today()
+        for item in items:
+            item.due_date = today + timedelta(days=365)
+        items[0].due_date = today
+        db.commit()
+
+        summary = self._summary(client, auth_headers, created["id"])
+
+        assert summary["overdue"] == 0
+        assert summary["due_soon"] == 1
+
+    def test_another_clients_filings_are_not_counted(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The aggregate runs in SQL now, so the client predicate is the only
+        thing keeping one client's calendar out of another's."""
+        first = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()["client"]
+        before = self._summary(client, auth_headers, first["id"])
+
+        second = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                name="Second Co", pan="AABCS4321Q", gstin="27AABCS4321Q1Z9"
+            ),
+        )
+        assert second.status_code == 201, second.text
+
+        assert self._summary(client, auth_headers, first["id"]) == before
+
+    def test_a_client_with_no_calendar_reports_zeroes(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """An empty group produces no row at all, so every counter has to come
+        back as 0 rather than as a missing key."""
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(generate_compliance_items=False),
+        ).json()["client"]
+
+        assert self._summary(client, auth_headers, created["id"]) == {
+            "total": 0,
+            "pending": 0,
+            "overdue": 0,
+            "due_soon": 0,
+            "filed": 0,
+        }

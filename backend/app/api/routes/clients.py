@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentFirm, CurrentPractitioner, DbSession, Manager
@@ -174,25 +175,60 @@ def _validate_assignee(db: Session, firm_id: uuid.UUID, practitioner_id: uuid.UU
         ) from exc
 
 
+# The two statuses that report themselves. Everything else is resolved into
+# overdue / due_soon / upcoming from the due date, which is what
+# ``ComplianceItem.derive_display_status`` does in Python and what the ``case``
+# below does in SQL.
+FILED_STATUSES = (ComplianceStatus.FILED, ComplianceStatus.DELAYED_FILED)
+
+# The open states, which are what "pending" adds up.
+PENDING_STATES = ("overdue", "due_soon", "upcoming")
+
+
 def _compliance_summary(db: Session, client_id: uuid.UUID) -> ClientComplianceSummary:
+    """The five counters on a client's detail page, counted by the database.
+
+    They are aggregates, and they were computed by reading every filing the
+    client has ever had into memory. A filing is a permanent record and the
+    nightly generator materialises a year of them ahead of time, so a client a
+    firm has acted for a few years carries several hundred rows — every one of
+    them hydrated into a mapped object on each visit to the client screen, to
+    be reduced to five integers. It is the same curve the dashboard and the
+    workload view were taken off, on the page a practitioner opens before
+    every call with a client.
+
+    The bucketing is exactly what ``derive_display_status`` produces, written
+    as the date comparison it already is.
+    """
     today = clock.today()
-    rows = db.scalars(
-        select(ComplianceItem).where(ComplianceItem.client_id == client_id)
-    ).all()
-    summary = ClientComplianceSummary(total=len(rows), pending=0, overdue=0, due_soon=0, filed=0)
-    for item in rows:
-        state = item.derive_display_status(today)
-        if state == "filed":
-            summary.filed += 1
-        elif state == "overdue":
-            summary.overdue += 1
-            summary.pending += 1
-        elif state == "due_soon":
-            summary.due_soon += 1
-            summary.pending += 1
-        elif state == "upcoming":
-            summary.pending += 1
-    return summary
+    due_soon_until = today + timedelta(days=ComplianceItem.DUE_SOON_WINDOW_DAYS)
+
+    # ``case`` rather than an aggregate FILTER clause: FILTER wants SQLite 3.30
+    # and this has to render the same on both backends.
+    display_state = case(
+        (ComplianceItem.status.in_(FILED_STATUSES), "filed"),
+        (ComplianceItem.status == ComplianceStatus.NOT_APPLICABLE, "not_applicable"),
+        (ComplianceItem.due_date < today, "overdue"),
+        (ComplianceItem.due_date <= due_soon_until, "due_soon"),
+        else_="upcoming",
+    )
+    counts = dict(
+        db.execute(
+            select(display_state, func.count(ComplianceItem.id))
+            .where(ComplianceItem.client_id == client_id)
+            .group_by(display_state)
+        ).all()
+    )
+
+    return ClientComplianceSummary(
+        # Not-applicable filings are in the total and in no other counter,
+        # which is what the Python did — they are neither owed nor filed.
+        total=sum(counts.values()),
+        pending=sum(counts.get(state, 0) for state in PENDING_STATES),
+        overdue=counts.get("overdue", 0),
+        due_soon=counts.get("due_soon", 0),
+        filed=counts.get("filed", 0),
+    )
 
 
 @router.post(
