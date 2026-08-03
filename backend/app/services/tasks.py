@@ -21,6 +21,7 @@ from app.models.base import ComplianceStatus, TaskPriority, TaskStatus
 from app.models.compliance import ComplianceItem
 from app.models.firm import Practitioner
 from app.models.task import Task
+from app.services import firms
 
 OPEN_COMPLIANCE_STATUSES = (ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS)
 OPEN_TASK_STATUSES = (
@@ -65,9 +66,34 @@ def create_tasks_for_due_items(
     Idempotent: a compliance item that already has any task — open or closed —
     is skipped, so a task a manager deliberately cancelled does not reappear
     the next night.
+
+    Idempotent against a *second run*, that is, not against a concurrent one.
+    Read which filings already carry a task, decide that these do not, insert
+    one each — the same read-decide-write the invoice numbering and the plan
+    limits both had to be ordered for, and this one had nothing ordering it.
+
+    Compliance generation survives the same race because the database refuses
+    the duplicate: ``uq_compliance_item_period`` covers (client, type, period).
+    A task has no such constraint, and cannot — a practitioner may legitimately
+    raise more than one against a filing by hand — so the ordering has to be
+    taken here.
+
+    Two runs inside the gap both read the same empty set and both insert.
+    *Generate from filings* on the tasks screen is one, reachable by any
+    manager at any moment, including twice from one double-clicked button; the
+    02:00 beat sweeping every firm in a single transaction is the other, and it
+    is inside that transaction for as long as the whole sweep takes. What comes
+    out is the same filing twice on somebody's queue, counted twice in the
+    workload view, counting down twice to one deadline — and one of the pair
+    surviving every withdrawal and reinstatement that assumes there is one.
     """
     today = today or clock.today()
     horizon = today + timedelta(days=horizon_days)
+
+    # Held before the work is read, not merely before the rows are inserted: by
+    # the time of the insert the decision has already been taken, from a plain
+    # SELECT that nothing ordered.
+    firms.lock_firm(db, firm_id)
 
     items = list(
         db.scalars(

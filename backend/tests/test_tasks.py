@@ -6,10 +6,14 @@ import uuid
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import func, select
 
 from app.core import clock
 from app.models.base import TaskPriority, TaskStatus
+from app.models.firm import Firm
+from app.models.task import Task
 from app.services import tasks as task_service
+from app.worker import tasks as worker_tasks
 from tests.conftest import first_item_of_type, make_client_payload
 
 
@@ -899,3 +903,162 @@ class TestWorkForAFilingNobodyOwesAnyMore:
         client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
 
         assert len(self._open_tasks_for(client, auth_headers, other_id)) == before
+
+
+class TestOneRunAtATime:
+    """Task generation is a read-decide-write, and it was not ordered.
+
+    Read which filings already carry a task, decide that these do not, insert
+    one each. Idempotent against a second run, that is — not against a
+    concurrent one.
+
+    Compliance generation survives the same race because the database refuses
+    the duplicate: ``uq_compliance_item_period`` covers (client, type, period).
+    A task has no such constraint, and cannot — a practitioner may legitimately
+    raise more than one against a filing by hand — so the ordering has to be
+    taken in the service.
+
+    *Generate from filings* on the tasks screen is one runner, reachable by any
+    manager at any moment, including twice from one double-clicked button; the
+    02:00 beat sweeping every firm in a single transaction is the other, and it
+    is inside that transaction for as long as the whole sweep takes. What came
+    out was the same filing twice on somebody's queue, counted twice in the
+    workload view, counting down twice to one deadline — and one of the pair
+    surviving every withdrawal and reinstatement that assumes there is one.
+    """
+
+    def _doubled_filings(self, db, firm_uuid: uuid.UUID) -> list[str]:
+        return [
+            str(item_id)
+            for item_id, count in db.execute(
+                select(Task.compliance_item_id, func.count(Task.id))
+                .where(Task.firm_id == firm_uuid, Task.compliance_item_id.is_not(None))
+                .group_by(Task.compliance_item_id)
+            ).all()
+            if count > 1
+        ]
+
+    def test_the_firm_is_held_before_its_queue_is_read(
+        self, db, firm_id, client_id, monkeypatch
+    ):
+        """Ordering is the whole fix, so ordering is what is asserted: a lock
+        taken after the decision orders the writes and nothing else, which is
+        exactly the state this replaced."""
+        order: list[str] = []
+        monkeypatch.setattr(
+            task_service.firms, "lock_firm", lambda session, fid: order.append("lock")
+        )
+        reading = db.scalars
+        monkeypatch.setattr(
+            db, "scalars", lambda *a, **kw: (order.append("read"), reading(*a, **kw))[1]
+        )
+
+        task_service.create_tasks_for_due_items(db, uuid.UUID(firm_id), horizon_days=60)
+
+        assert order[:2] == ["lock", "read"]
+
+    def test_work_raised_while_we_waited_is_not_raised_again(
+        self, db, firm_id, client_id, monkeypatch
+    ):
+        """The interleaving itself, in the order it happens.
+
+        The competing run is staged on the lock: it commits from a second
+        connection at the moment this one takes the firm's row, which is the
+        instant a real loser resumes at. Everything after that is the ordinary
+        code path deciding what is left to raise.
+        """
+        db.rollback()  # SQLite will not let another connection write past a held read
+
+        from app.database import SessionLocal
+
+        fired: list[uuid.UUID] = []
+
+        def winner_commits_first(session, fid):
+            if fired:
+                return
+            fired.append(fid)
+            other = SessionLocal()
+            try:
+                task_service.create_tasks_for_due_items(
+                    other, uuid.UUID(firm_id), horizon_days=60
+                )
+                other.commit()
+            finally:
+                other.close()
+
+        monkeypatch.setattr(task_service.firms, "lock_firm", winner_commits_first)
+
+        task_service.create_tasks_for_due_items(db, uuid.UUID(firm_id), horizon_days=60)
+        db.commit()
+
+        assert fired, "the competing run never happened"
+        doubled = self._doubled_filings(db, uuid.UUID(firm_id))
+        assert not doubled, f"filings raised twice: {doubled}"
+
+    def test_the_workload_view_is_not_told_the_work_twice(
+        self, db, firm_id, client_id, monkeypatch
+    ):
+        """Where the duplicate does its damage: this is what a manager reads to
+        decide who is drowning and who is free."""
+        db.rollback()
+        from app.database import SessionLocal
+
+        fired: list[uuid.UUID] = []
+
+        def winner_commits_first(session, fid):
+            if fired:
+                return
+            fired.append(fid)
+            other = SessionLocal()
+            try:
+                task_service.create_tasks_for_due_items(
+                    other, uuid.UUID(firm_id), horizon_days=60
+                )
+                other.commit()
+            finally:
+                other.close()
+
+        monkeypatch.setattr(task_service.firms, "lock_firm", winner_commits_first)
+        task_service.create_tasks_for_due_items(db, uuid.UUID(firm_id), horizon_days=60)
+        db.commit()
+
+        monkeypatch.undo()
+        open_tasks = sum(row.open_tasks for row in task_service.workload(db, uuid.UUID(firm_id)))
+        filings = db.scalar(
+            select(func.count(func.distinct(Task.compliance_item_id))).where(
+                Task.firm_id == uuid.UUID(firm_id), Task.compliance_item_id.is_not(None)
+            )
+        )
+        assert open_tasks == filings
+
+    def test_a_double_clicked_button_raises_one_set_of_work(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        """The ordinary path, unmocked: pressing it twice is still one queue."""
+        first = client.post(
+            "/api/v1/tasks/generate", json={"horizon_days": 60}, headers=auth_headers
+        ).json()["created"]
+        second = client.post(
+            "/api/v1/tasks/generate", json={"horizon_days": 60}, headers=auth_headers
+        ).json()["created"]
+
+        assert first > 0
+        assert second == 0
+        assert not self._doubled_filings(db, uuid.UUID(firm_id))
+
+    def test_the_beat_sweep_holds_the_firms_in_a_fixed_order(
+        self, db, client_id, monkeypatch
+    ):
+        """Two runs walking an unordered list can each hold what the other
+        wants next, and the sweep's transaction spans every firm at once."""
+        held: list[uuid.UUID] = []
+        monkeypatch.setattr(
+            task_service.firms, "lock_firm", lambda session, fid: held.append(fid)
+        )
+
+        worker_tasks.generate_tasks_task()
+
+        assert held == sorted(held), "an undefined lock order lets two sweeps cross"
+        assert set(held) == set(
+            db.scalars(select(Firm.id).where(Firm.is_active.is_(True))).all()
+        )

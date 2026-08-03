@@ -432,10 +432,18 @@ def queue_payment_reminders_task(today: str | None = None) -> dict[str, int]:
 
 @celery_app.task(name="caflow.generate_tasks")
 def generate_tasks_task(today: str | None = None, horizon_days: int = 21) -> dict[str, int]:
-    """Materialise tasks for filings coming due inside the planning horizon."""
+    """Materialise tasks for filings coming due inside the planning horizon.
+
+    Ordered by id, because ``create_tasks_for_due_items`` now holds each firm's
+    row and this sweep holds all of them at once — the transaction spans every
+    firm. Two runs walking an unordered list can each hold what the other wants
+    next; walking the same order means one queues behind the other instead.
+    """
     run_date = date.fromisoformat(today) if today else clock.today()
     with SessionLocal() as db:
-        firms = db.scalars(select(Firm).where(Firm.is_active.is_(True))).all()
+        firms = db.scalars(
+            select(Firm).where(Firm.is_active.is_(True)).order_by(Firm.id)
+        ).all()
         total = 0
         for firm in firms:
             total += len(
