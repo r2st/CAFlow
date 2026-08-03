@@ -116,6 +116,30 @@ def _reject_due_before_issue(issue_date: date, due_date: date | None) -> None:
         )
 
 
+# Fields of a draft a caller may empty, and fields where an explicit null can
+# only be "I did not send this".
+#
+# ``exclude_unset`` already separates a field the caller named from one they
+# left out, so ``key in updates`` is the whole of that question. Requiring the
+# value to be non-null on top of it threw away the other half: a caller who
+# named a nullable field *in order to clear it* was answered 200, with the old
+# value still on the record and nothing saying so.
+#
+# The due date is the half that costs something. It is what starts the payment
+# clock on send, what turns the invoice overdue, what the payment sweep counts
+# its offsets from, and what the client is shown in the portal — and clearing
+# it is the one way back to the firm's standard terms, since ``send_invoice``
+# fills in a missing one from ``invoice_payment_terms_days``. A practitioner
+# who mistyped a date onto a draft could replace it with another wrong date but
+# could not take it off, so the invoice went out demanding payment by whatever
+# they had typed. The notes are the same silence in a smaller place.
+#
+# The other two are columns that cannot be null, so a null there is not an
+# instruction and is ignored rather than written.
+CLEARABLE_FIELDS = ("due_date", "notes")
+REQUIRED_FIELDS = ("issue_date", "gst_rate_bps")
+
+
 def _apply_lines(db: Session, invoice: Invoice, lines, firm_id: uuid.UUID) -> None:
     """Set an invoice's lines, translating billing refusals into HTTP.
 
@@ -354,13 +378,18 @@ def update_invoice(
     updates = payload.model_dump(exclude_unset=True)
     # Checked against the pair this patch leaves behind, not against what the
     # caller happened to name: moving either date alone can put the two out of
-    # order, and only one of them is ever in the request.
+    # order, and only one of them is ever in the request. A due date being
+    # cleared leaves no pair to check, which ``_reject_due_before_issue``
+    # already reads as nothing to say.
     _reject_due_before_issue(
         updates.get("issue_date") or invoice.issue_date,
-        updates.get("due_date") or invoice.due_date,
+        updates["due_date"] if "due_date" in updates else invoice.due_date,
     )
-    for key in ("issue_date", "due_date", "gst_rate_bps", "notes"):
-        if key in updates and updates[key] is not None:
+    for key in CLEARABLE_FIELDS:
+        if key in updates:
+            setattr(invoice, key, updates[key])
+    for key in REQUIRED_FIELDS:
+        if updates.get(key) is not None:
             setattr(invoice, key, updates[key])
     if payload.lines is not None:
         _apply_lines(db, invoice, payload.lines, practitioner.firm_id)

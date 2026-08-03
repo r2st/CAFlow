@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from app.config import settings
 from app.core import clock
 from app.models.base import InvoiceStatus
 from app.models.compliance import ComplianceItem
@@ -1964,3 +1965,157 @@ class TestAPaymentTermThatRunsBackwards:
 
         queued = reminder_service.queue_payment_reminders(db, today=today)
         assert queued == []
+
+
+class TestClearingAFieldOnADraft:
+    """A field a caller emptied was answered 200 and left as it was.
+
+    ``exclude_unset`` already separates a field the caller named from one they
+    left out, so "is it in the patch?" is the whole of that question. Requiring
+    the value to be non-null on top of it threw away the other half: naming a
+    nullable field *in order to clear it* looked exactly like not sending it.
+
+    The due date is the half that costs something. It is what starts the
+    payment clock on send, what turns the invoice overdue, what the payment
+    sweep counts its offsets from, and what the client is shown in the portal —
+    and clearing it is the one way back to the firm's standard terms, since
+    sending an invoice with none fills one in from the payment terms. A
+    practitioner who mistyped a date onto a draft could replace it with another
+    wrong date but could not take it off, so the bill went out demanding
+    payment by whatever they had typed. The editor closed on a success message
+    either way.
+    """
+
+    @pytest.fixture
+    def draft(self, client, auth_headers, client_id: str) -> dict:
+        today = clock.today()
+        response = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=today.isoformat(),
+            due_date=(today + timedelta(days=3)).isoformat(),
+            notes="Payment by NEFT to the Kotak account.",
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    def _patch(self, client, auth_headers, draft, body):
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}", json=body, headers=auth_headers
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_the_due_date_can_be_taken_off(self, client, auth_headers, draft):
+        after = self._patch(client, auth_headers, draft, {"due_date": None})
+
+        assert after["due_date"] is None
+
+    def test_it_stays_off_when_the_invoice_is_read_back(
+        self, client, auth_headers, draft
+    ):
+        """The silence was the bug: the save reported success and the editor
+        closed, so nothing said the old date was still on the record."""
+        self._patch(client, auth_headers, draft, {"due_date": None})
+
+        again = client.get(f"/api/v1/invoices/{draft['id']}", headers=auth_headers).json()
+        assert again["due_date"] is None
+
+    def test_sending_it_then_falls_back_to_the_firms_terms(
+        self, client, auth_headers, draft
+    ):
+        """Which is the point of clearing it — a mistyped date replaced by the
+        standard payment terms rather than by another guess."""
+        self._patch(client, auth_headers, draft, {"due_date": None})
+
+        sent = client.post(
+            f"/api/v1/invoices/{draft['id']}/send", headers=auth_headers
+        ).json()
+        assert sent["due_date"] == (
+            clock.today() + timedelta(days=settings.invoice_payment_terms_days)
+        ).isoformat()
+        assert sent["status"] == "sent"
+        assert sent["days_overdue"] is None
+
+    def test_a_mistyped_date_is_no_longer_what_the_client_is_held_to(
+        self, client, auth_headers, client_id: str
+    ):
+        """What it cost. A due date typed one day after the issue date puts the
+        client twenty-nine days late on a draft raised a month ago — chased at
+        whichever offset that gap matches, and shown that date in the portal.
+        Taking it off hands the bill back to the firm's own terms.
+
+        Still late, and correctly so: a bill raised a month ago on fifteen-day
+        terms is a fortnight overdue. The point is that the lateness is the
+        firm's terms rather than a typo.
+        """
+        today = clock.today()
+        issued = today - timedelta(days=30)
+        draft = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=issued.isoformat(),
+            due_date=(issued + timedelta(days=1)).isoformat(),
+        ).json()
+
+        self._patch(client, auth_headers, draft, {"due_date": None})
+        sent = client.post(
+            f"/api/v1/invoices/{draft['id']}/send", headers=auth_headers
+        ).json()
+
+        assert sent["due_date"] == (
+            issued + timedelta(days=settings.invoice_payment_terms_days)
+        ).isoformat()
+        assert sent["days_overdue"] == 30 - settings.invoice_payment_terms_days
+
+    def test_the_notes_can_be_cleared_too(self, client, auth_headers, draft):
+        after = self._patch(client, auth_headers, draft, {"notes": None})
+
+        assert after["notes"] is None
+
+    def test_an_empty_note_is_a_cleared_note(self, client, auth_headers, draft):
+        """A textarea a practitioner emptied arrives as "" rather than null,
+        and sanitising trims it to the same nothing."""
+        after = self._patch(client, auth_headers, draft, {"notes": "   "})
+
+        assert after["notes"] == ""
+
+    def test_leaving_a_field_out_still_leaves_it_alone(
+        self, client, auth_headers, draft
+    ):
+        """The other half of the distinction. A patch touching only the notes
+        must not disturb the due date."""
+        after = self._patch(client, auth_headers, draft, {"notes": "Revised terms."})
+
+        assert after["due_date"] == draft["due_date"]
+
+    def test_a_column_that_cannot_be_null_is_not_cleared(
+        self, client, auth_headers, draft
+    ):
+        """An issue date is not a field an invoice can be without, so a null
+        there is the caller not sending it rather than an instruction."""
+        after = self._patch(
+            client, auth_headers, draft, {"issue_date": None, "gst_rate_bps": None}
+        )
+
+        assert after["issue_date"] == draft["issue_date"]
+        assert after["gst_rate_bps"] == draft["gst_rate_bps"]
+
+    def test_clearing_the_due_date_is_never_refused_as_backwards(
+        self, client, auth_headers, draft
+    ):
+        """There is no pair left to be out of order, and the order check reads
+        the patch's own value rather than falling back to the old one."""
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={
+                "due_date": None,
+                "issue_date": (clock.today() + timedelta(days=60)).isoformat(),
+            },
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["due_date"] is None
