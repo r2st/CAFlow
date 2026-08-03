@@ -154,6 +154,34 @@ def withdrawn_reason(db: Session, reminder: Reminder) -> str | None:
     return None
 
 
+# ------------------------------------------------------- one sweep at a time --
+
+
+def _hold_while_queueing(db: Session, firm_id: uuid.UUID) -> None:
+    """Hold this firm's row for the rest of the transaction, before its queue is read.
+
+    Queueing a chase is the same read-decide-write the invoice numbering and
+    the plan limits both had to be ordered for: read what is already queued for
+    a filing, decide there is nothing, add one. Neither sweep commits until it
+    has been through every firm it was given, and a run spends up to
+    ``ai_draft_budget_seconds`` on the wording — so the gap between the read
+    and the commit is a minute or two wide, not an instant.
+
+    Two runs inside that gap both read an empty queue and both add. The nightly
+    beat is one; *Queue reminders now* on the reminders screen is the other,
+    and it is the same code reachable by any manager at any moment — including
+    twice, from one double-clicked button, landing on two workers. What comes
+    out is a client emailed the identical document chase or fee reminder twice
+    on the same morning, over the firm's own name.
+
+    Held before the read rather than around the insert: a lock taken after the
+    decision orders the writes and nothing else, which is the state this
+    replaces. Per firm and in a deterministic order, so two sweeps queue behind
+    each other rather than crossing.
+    """
+    firms.lock_firm(db, firm_id)
+
+
 # ----------------------------------------------------- document collection --
 
 
@@ -174,6 +202,9 @@ def queue_document_reminders(
     wording; see :class:`~app.services.ai.DraftingBudget`. One is made here
     when the caller supplies none, so that reaching this directly cannot leave
     the drafting unbounded by accident.
+
+    Each firm's row is held while its own queue is read and added to; see
+    :func:`_hold_while_queueing`.
     """
     run_date = today or clock.today()
     offsets = offsets if offsets is not None else settings.document_reminder_offsets
@@ -189,6 +220,7 @@ def queue_document_reminders(
 
     queued: list[Reminder] = []
     for current_firm_id in firm_ids:
+        _hold_while_queueing(db, current_firm_id)
         firm_name = firms.name_of(db, current_firm_id)
         outstanding = documents.items_awaiting_documents(
             db, current_firm_id, from_date=run_date, to_date=horizon
@@ -269,7 +301,16 @@ def queue_payment_reminders(
     """Chase unpaid invoices at 0/7/15/30 days past the due date.
 
     ``budget`` bounds the model-drafted wording across the sweep, for the same
-    reason it does above.
+    reason it does above, and each firm's row is held while its own receivables
+    are read for the reason :func:`_hold_while_queueing` gives.
+
+    Walked firm by firm rather than straight down one cross-tenant list of
+    receivables. A switched-off firm's debts are still owed, but chasing them
+    in its name is not ours to do while it is not being served — which
+    ``servable_firm_ids`` already decided — and taking each firm's lock before
+    reading only that firm's invoices is what keeps the hold to the firm being
+    worked on. Sorted, so two sweeps queue behind each other in the same order
+    rather than crossing.
     """
     run_date = today or clock.today()
     offsets = offsets if offsets is not None else settings.payment_reminder_offsets
@@ -277,66 +318,59 @@ def queue_payment_reminders(
     if not offsets:
         return []
 
-    servable = firms.servable_firm_ids(db, firm_id)
-    # One list can span firms, and every message is signed by the one that
-    # raised the invoice.
-    firm_names: dict[uuid.UUID, str | None] = {}
     queued: list[Reminder] = []
-    for invoice in billing.unpaid_invoices(db, firm_id, today=run_date):
-        # A switched-off firm's debts are still owed; chasing them in its name
-        # is not ours to do while it is not being served.
-        if invoice.firm_id not in servable:
-            continue
-        if invoice.due_date is None:
-            continue
-        days_overdue = (run_date - invoice.due_date).days
-        if days_overdue not in offsets:
-            continue
-        client = invoice.client
-        if client is None or not client.is_active:
-            continue
+    for current_firm_id in sorted(firms.servable_firm_ids(db, firm_id)):
+        _hold_while_queueing(db, current_firm_id)
+        # Every message is signed by the firm that raised the invoice.
+        firm_name = firms.name_of(db, current_firm_id)
+        for invoice in billing.unpaid_invoices(db, current_firm_id, today=run_date):
+            if invoice.due_date is None:
+                continue
+            days_overdue = (run_date - invoice.due_date).days
+            if days_overdue not in offsets:
+                continue
+            client = invoice.client
+            if client is None or not client.is_active:
+                continue
 
-        existing = list(
-            db.scalars(select(Reminder).where(Reminder.invoice_id == invoice.id)).all()
-        )
-        if already_queued(existing, "payment", days_overdue):
-            continue
+            existing = list(
+                db.scalars(select(Reminder).where(Reminder.invoice_id == invoice.id)).all()
+            )
+            if already_queued(existing, "payment", days_overdue):
+                continue
 
-        if invoice.firm_id not in firm_names:
-            firm_names[invoice.firm_id] = firms.name_of(db, invoice.firm_id)
-
-        channel = preferred_channel(client)
-        body = draft_client_message(
-            purpose="fee_reminder",
-            client_name=client.name,
-            context={
-                "invoice_number": invoice.invoice_number,
-                "amount_inr": f"{invoice.balance_paise / 100:,.2f}",
-                "due_date": invoice.due_date.isoformat(),
-                "days_overdue": days_overdue,
-            },
-            channel=channel.value,
-            firm_name=firm_names[invoice.firm_id],
-            budget=budget,
-        )
-        reminder = Reminder(
-            firm_id=invoice.firm_id,
-            client_id=client.id,
-            invoice_id=invoice.id,
-            reminder_type=ReminderType.PAYMENT,
-            channel=channel,
-            status=ReminderStatus.SCHEDULED,
-            subject=(
-                f"Invoice {invoice.invoice_number} — "
-                f"₹{invoice.balance_paise / 100:,.2f} outstanding"
-            ),
-            body=body,
-            recipient=recipient_for(client, channel),
-            scheduled_for=ist_morning(run_date),
-            extra={"kind": "payment", "offset_days": days_overdue},
-        )
-        db.add(reminder)
-        queued.append(reminder)
+            channel = preferred_channel(client)
+            body = draft_client_message(
+                purpose="fee_reminder",
+                client_name=client.name,
+                context={
+                    "invoice_number": invoice.invoice_number,
+                    "amount_inr": f"{invoice.balance_paise / 100:,.2f}",
+                    "due_date": invoice.due_date.isoformat(),
+                    "days_overdue": days_overdue,
+                },
+                channel=channel.value,
+                firm_name=firm_name,
+                budget=budget,
+            )
+            reminder = Reminder(
+                firm_id=invoice.firm_id,
+                client_id=client.id,
+                invoice_id=invoice.id,
+                reminder_type=ReminderType.PAYMENT,
+                channel=channel,
+                status=ReminderStatus.SCHEDULED,
+                subject=(
+                    f"Invoice {invoice.invoice_number} — "
+                    f"₹{invoice.balance_paise / 100:,.2f} outstanding"
+                ),
+                body=body,
+                recipient=recipient_for(client, channel),
+                scheduled_for=ist_morning(run_date),
+                extra={"kind": "payment", "offset_days": days_overdue},
+            )
+            db.add(reminder)
+            queued.append(reminder)
 
     if queued:
         db.flush()

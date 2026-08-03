@@ -751,3 +751,198 @@ class TestWhatAMessageMayCite:
             headers=auth_headers,
         )
         assert response.status_code == 400, response.text
+
+
+class TestOneSweepAtATime:
+    """Queueing a chase is a read-decide-write, and it was not ordered.
+
+    Read what is already queued for a filing, decide there is nothing, add one.
+    Neither sweep commits until it has been through every firm it was given,
+    and a run spends up to ``ai_draft_budget_seconds`` on the wording — so the
+    gap between the read and the commit is a minute or two wide, not an
+    instant.
+
+    Two runs inside that gap both read an empty queue and both add. The nightly
+    beat is one; *Queue reminders now* on the reminders screen is the other,
+    and it is the same code reachable by any manager at any moment — including
+    twice, from one double-clicked button, landing on two workers. What comes
+    out is a client emailed the identical document chase or fee reminder twice
+    on the same morning, over the firm's own name.
+
+    Ordering is the whole fix, so ordering is what is asserted: a lock taken
+    after the decision orders the writes and nothing else, which is exactly the
+    state this replaced.
+    """
+
+    @pytest.fixture
+    def overdue_invoice(self, client, auth_headers, client_id) -> dict:
+        invoice = client.post(
+            "/api/v1/invoices",
+            json={
+                "client_id": client_id,
+                "issue_date": (clock.today() - timedelta(days=37)).isoformat(),
+                "due_date": (clock.today() - timedelta(days=7)).isoformat(),
+                "lines": [
+                    {"description": "GSTR-3B", "quantity": 1, "unit_price_paise": 200_000}
+                ],
+            },
+            headers=auth_headers,
+        ).json()
+        return client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+
+    def _record_order(self, monkeypatch) -> list[str]:
+        order: list[str] = []
+        monkeypatch.setattr(
+            reminder_service.firms, "lock_firm", lambda session, fid: order.append("lock")
+        )
+        return order
+
+    def test_the_firm_is_held_before_its_document_queue_is_read(
+        self, client, auth_headers, client_id, db, firm_id, monkeypatch
+    ):
+        order = self._record_order(monkeypatch)
+        real = reminder_service.documents.items_awaiting_documents
+        monkeypatch.setattr(
+            reminder_service.documents,
+            "items_awaiting_documents",
+            lambda *a, **kw: (order.append("read"), real(*a, **kw))[1],
+        )
+
+        reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[10]
+        )
+
+        assert order[:2] == ["lock", "read"]
+
+    def test_the_firm_is_held_before_its_receivables_are_read(
+        self, db, firm_id, overdue_invoice, monkeypatch
+    ):
+        order = self._record_order(monkeypatch)
+        real = reminder_service.billing.unpaid_invoices
+        monkeypatch.setattr(
+            reminder_service.billing,
+            "unpaid_invoices",
+            lambda *a, **kw: (order.append("read"), real(*a, **kw))[1],
+        )
+
+        reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+
+        assert order[:2] == ["lock", "read"]
+
+    def test_a_chase_queued_while_we_waited_is_not_queued_again(
+        self, client, auth_headers, client_id, db, firm_id, monkeypatch
+    ):
+        """The interleaving itself, in the order it happens.
+
+        The competing run is staged on the lock: it commits from a second
+        connection at the moment this one takes the firm's row, which is the
+        instant a real loser resumes at. Everything after that is the ordinary
+        code path deciding what is left to chase.
+        """
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+        db.rollback()  # SQLite will not let another connection write past a held read
+
+        from app.database import SessionLocal
+
+        fired = []
+
+        def winner_commits_first(session, fid):
+            if fired:
+                return
+            fired.append(fid)
+            other = SessionLocal()
+            try:
+                reminder_service.queue_document_reminders(
+                    other, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+                )
+                other.commit()
+            finally:
+                other.close()
+
+        monkeypatch.setattr(reminder_service.firms, "lock_firm", winner_commits_first)
+
+        reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        db.commit()
+
+        assert fired, "the competing run never happened"
+        doubled = [
+            str(item_id)
+            for item_id, count in db.execute(
+                select(Reminder.compliance_item_id, func.count(Reminder.id))
+                .where(Reminder.firm_id == uuid.UUID(firm_id))
+                .group_by(Reminder.compliance_item_id)
+            ).all()
+            if count > 1
+        ]
+        assert not doubled, f"clients chased twice about filings: {doubled}"
+
+    def test_a_fee_chase_queued_while_we_waited_is_not_queued_again(
+        self, db, firm_id, overdue_invoice, monkeypatch
+    ):
+        db.rollback()
+        from app.database import SessionLocal
+
+        fired = []
+
+        def winner_commits_first(session, fid):
+            if fired:
+                return
+            fired.append(fid)
+            other = SessionLocal()
+            try:
+                reminder_service.queue_payment_reminders(
+                    other, firm_id=uuid.UUID(firm_id), offsets=[7]
+                )
+                other.commit()
+            finally:
+                other.close()
+
+        monkeypatch.setattr(reminder_service.firms, "lock_firm", winner_commits_first)
+
+        reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        db.commit()
+
+        assert fired, "the competing run never happened"
+        assert (
+            db.scalar(
+                select(func.count(Reminder.id)).where(
+                    Reminder.invoice_id == uuid.UUID(overdue_invoice["id"])
+                )
+            )
+            == 1
+        )
+
+    def test_a_firm_that_is_not_served_is_never_held(self, db, firm_id, monkeypatch):
+        """Nothing is queued for it, so there is nothing to order — and taking
+        its row would block the firm's own requests for a sweep that does no
+        work on it."""
+        order = self._record_order(monkeypatch)
+
+        reminder_service.queue_payment_reminders(db, firm_id=uuid.uuid4(), offsets=[7])
+        reminder_service.queue_document_reminders(db, firm_id=uuid.uuid4(), offsets=[10])
+
+        assert order == []
+
+    def test_the_sweeps_still_span_every_firm_they_are_given(
+        self, client, auth_headers, db, monkeypatch
+    ):
+        """Locking per firm must not have narrowed what a beat run covers."""
+        held = []
+        monkeypatch.setattr(
+            reminder_service.firms, "lock_firm", lambda session, fid: held.append(fid)
+        )
+
+        reminder_service.queue_payment_reminders(db, offsets=[7])
+
+        servable = reminder_service.firms.servable_firm_ids(db)
+        assert set(held) == servable
+        assert held == sorted(held), "an undefined lock order lets two sweeps cross"
