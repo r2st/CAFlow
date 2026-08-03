@@ -272,6 +272,7 @@ def update_compliance_item(
     watched = set(updates) | {"status", "filed_on", "acknowledgement_number"}
     before = audit.snapshot(item, watched)
     was_status = item.status
+    was_due = item.due_date
     for key, value in updates.items():
         setattr(item, key, value)
 
@@ -300,6 +301,10 @@ def update_compliance_item(
     # After the normalisation, so the transition is read off the status the
     # item actually ends on rather than the one the caller named.
     _follow_with_tasks(db, item, was_status)
+    # And after that, so a task the line above reinstated is open in time to be
+    # moved. A deadline that has shifted takes the work raised for it along;
+    # see :func:`task_service.retarget_tasks_for_item`.
+    moved = task_service.retarget_tasks_for_item(db, item, was_due=was_due)
 
     audit.record(
         db,
@@ -307,7 +312,8 @@ def update_compliance_item(
         entity_type="compliance_item",
         entity_id=item.id,
         actor=practitioner,
-        summary=f"{item.compliance_type.code} {item.period_label} → {item.status.value}",
+        summary=f"{item.compliance_type.code} {item.period_label} → {item.status.value}"
+        + (f"; moved {moved} task(s) to the new deadline" if moved else ""),
         changes=audit.diff(before, audit.snapshot(item, watched)),
     )
     db.commit()

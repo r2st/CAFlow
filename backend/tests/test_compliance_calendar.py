@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core import clock
-from app.models.base import TaskStatus
+from app.models.base import TaskPriority, TaskStatus
 from app.models.compliance import ComplianceItem
 from app.models.task import Task
 from app.services import tasks as task_service
@@ -1222,3 +1222,309 @@ class TestWorkForAFilingRuledOutByHand:
         db.refresh(task)
         assert task.status == TaskStatus.CANCELLED
         assert task.withdrawn_from_status is None
+
+
+class TestWorkFollowingADeadlineThatMoves:
+    """A task carries its own copy of the deadline, and nothing moved it.
+
+    ``due_date`` is copied onto the task once, when it is raised, and it is
+    what the board sorts on, what the workload view counts as overdue, and what
+    ``overdue_only`` filters by. The filing's own due date, meanwhile, is a
+    field a practitioner is expected to edit — CBIC and CBDT extend deadlines
+    routinely, and the seeded calendar carries the ordinary dates precisely so
+    a firm can correct them.
+
+    So the two drifted apart, in both directions:
+
+    * an extension left the task counting down to the old date, going overdue
+      in red on a day the deadline no longer falls, sorted to the top of
+      somebody's board and counted against them in the workload view;
+    * a deadline corrected *earlier* is the direction that costs a client. The
+      task went on showing weeks of margin against a return now due next week,
+      so the one signal the board gives that something needs doing now was the
+      signal it withheld.
+    """
+
+    def _generate_tasks(self, client: TestClient, auth_headers: dict) -> int:
+        response = client.post(
+            f"{API}/tasks/generate", json={"horizon_days": 365}, headers=auth_headers
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["created"]
+
+    def _task_for(self, db: Session, item: ComplianceItem) -> Task:
+        task = db.scalars(select(Task).where(Task.compliance_item_id == item.id)).first()
+        assert task is not None, "no task was raised for that filing"
+        return task
+
+    def _distant_item(self, db: Session, client_id: str, days: int = 30) -> ComplianceItem:
+        """A filing whose deadline is comfortably ahead — priority ``low``."""
+        horizon = clock.today() + timedelta(days=days)
+        items = [item for item in items_for(db, client_id) if item.due_date >= horizon]
+        assert items, f"no filing falls due more than {days} days out"
+        return items[0]
+
+    def _move_deadline(self, client: TestClient, auth_headers: dict, item, to):
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"due_date": to.isoformat()},
+        )
+        assert response.status_code == 200, response.text
+        return response
+
+    def _overdue_total(self, client: TestClient, auth_headers: dict) -> int:
+        rows = client.get(f"{API}/tasks/workload", headers=auth_headers).json()["rows"]
+        return sum(row["overdue"] for row in rows)
+
+    # ------------------------------------------------------------ extension --
+
+    def test_an_extension_takes_the_task_with_it(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = client_of_long_standing(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        task = self._task_for(db, item)
+        assert task.due_date == item.due_date
+        extended = clock.today() + timedelta(days=20)
+
+        self._move_deadline(client, auth_headers, item, extended)
+
+        db.refresh(task)
+        assert task.due_date == extended
+
+    def test_the_task_stops_reading_overdue(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """What the board showed: red, on a day the deadline no longer falls."""
+        client_id = client_of_long_standing(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        task = self._task_for(db, item)
+        assert client.get(f"{API}/tasks/{task.id}", headers=auth_headers).json()["is_overdue"]
+
+        self._move_deadline(client, auth_headers, item, clock.today() + timedelta(days=20))
+
+        after = client.get(f"{API}/tasks/{task.id}", headers=auth_headers).json()
+        assert after["is_overdue"] is False
+        assert after["days_remaining"] == 20
+
+    def test_the_workload_view_stops_counting_it_overdue(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The manager reading it is deciding who is drowning."""
+        client_id = client_of_long_standing(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        before = self._overdue_total(client, auth_headers)
+
+        self._move_deadline(client, auth_headers, item, clock.today() + timedelta(days=20))
+
+        assert self._overdue_total(client, auth_headers) == before - 1
+
+    def test_an_extension_relaxes_a_priority_the_deadline_derived(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = client_of_long_standing(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        task = self._task_for(db, item)
+        assert task.priority == TaskPriority.URGENT
+
+        self._move_deadline(client, auth_headers, item, clock.today() + timedelta(days=20))
+
+        db.refresh(task)
+        assert task.priority == TaskPriority.LOW
+
+    # ----------------------------------------------------- the other direction --
+
+    def test_a_deadline_pulled_in_moves_the_task_forward(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The direction that costs a client: weeks of margin that is not there."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+        task = self._task_for(db, item)
+        corrected = clock.today() + timedelta(days=2)
+
+        self._move_deadline(client, auth_headers, item, corrected)
+
+        db.refresh(task)
+        assert task.due_date == corrected
+
+    def test_a_deadline_pulled_in_raises_the_priority(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The board's one signal that something needs doing now."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+        task = self._task_for(db, item)
+        assert task.priority == TaskPriority.LOW
+
+        self._move_deadline(client, auth_headers, item, clock.today() + timedelta(days=2))
+
+        db.refresh(task)
+        assert task.priority == TaskPriority.HIGH
+
+    def test_work_already_under_way_moves_too(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Open is open — a task somebody has started is still owed by the
+        deadline, and the deadline is what moved."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+        task = self._task_for(db, item)
+        client.patch(
+            f"{API}/tasks/{task.id}", headers=auth_headers, json={"status": "in_progress"}
+        )
+        corrected = clock.today() + timedelta(days=2)
+
+        self._move_deadline(client, auth_headers, item, corrected)
+
+        db.refresh(task)
+        assert task.status == TaskStatus.IN_PROGRESS
+        assert task.due_date == corrected
+
+    # ------------------------------------------------ what is left untouched --
+
+    def test_an_internal_target_a_practitioner_set_is_left_alone(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A date somebody chose is their plan for the work, not a copy of the
+        deadline — "get this done by the 15th" survives the 20th becoming the
+        30th."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+        task = self._task_for(db, item)
+        internal = item.due_date - timedelta(days=5)
+        client.patch(
+            f"{API}/tasks/{task.id}",
+            headers=auth_headers,
+            json={"due_date": internal.isoformat()},
+        )
+
+        self._move_deadline(client, auth_headers, item, item.due_date + timedelta(days=10))
+
+        db.refresh(task)
+        assert task.due_date == internal
+
+    def test_a_priority_a_manager_set_by_hand_survives(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The date is a copy of the deadline; the priority may be a judgement."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+        task = self._task_for(db, item)
+        client.patch(
+            f"{API}/tasks/{task.id}", headers=auth_headers, json={"priority": "urgent"}
+        )
+        corrected = clock.today() + timedelta(days=2)
+
+        self._move_deadline(client, auth_headers, item, corrected)
+
+        db.refresh(task)
+        assert task.due_date == corrected
+        assert task.priority == TaskPriority.URGENT
+
+    def test_a_task_already_finished_keeps_the_date_it_was_done_against(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+        task = self._task_for(db, item)
+        was = task.due_date
+        client.patch(f"{API}/tasks/{task.id}", headers=auth_headers, json={"status": "done"})
+
+        self._move_deadline(client, auth_headers, item, clock.today() + timedelta(days=2))
+
+        db.refresh(task)
+        assert task.status == TaskStatus.DONE
+        assert task.due_date == was
+
+    def test_a_task_a_manager_cancelled_is_not_dragged_along(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+        task = self._task_for(db, item)
+        was = task.due_date
+        client.patch(
+            f"{API}/tasks/{task.id}", headers=auth_headers, json={"status": "cancelled"}
+        )
+
+        self._move_deadline(client, auth_headers, item, clock.today() + timedelta(days=2))
+
+        db.refresh(task)
+        assert task.due_date == was
+
+    def test_a_patch_that_leaves_the_deadline_alone_moves_nothing(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+        task = self._task_for(db, item)
+        was_priority = task.priority
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"due_date": item.due_date.isoformat(), "notes": "Extension expected"},
+        )
+        assert response.status_code == 200, response.text
+
+        db.refresh(task)
+        assert task.due_date == item.due_date
+        assert task.priority == was_priority
+
+    # ------------------------------------------------------------- the trail --
+
+    def test_the_move_is_recorded_in_the_trail(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A task changing date under its owner is a thing the firm should be
+        able to account for."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+
+        self._move_deadline(client, auth_headers, item, clock.today() + timedelta(days=2))
+
+        entries = client.get(
+            f"{API}/audit",
+            headers=auth_headers,
+            params={"action": "compliance_item.update", "entity_id": str(item.id)},
+        ).json()["items"]
+        assert "moved 1 task(s) to the new deadline" in entries[0]["summary"]
+
+    def test_a_filing_ruled_out_in_the_same_patch_is_withdrawn_not_moved(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Withdrawal wins: there is no deadline left for the work to follow."""
+        client_id = create_client_record(client, auth_headers)
+        self._generate_tasks(client, auth_headers)
+        item = self._distant_item(db, client_id)
+        task = self._task_for(db, item)
+        was = task.due_date
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={
+                "status": "not_applicable",
+                "due_date": (clock.today() + timedelta(days=2)).isoformat(),
+            },
+        )
+        assert response.status_code == 200, response.text
+
+        db.refresh(task)
+        assert task.status == TaskStatus.CANCELLED
+        assert task.due_date == was

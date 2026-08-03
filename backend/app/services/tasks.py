@@ -249,6 +249,66 @@ def reinstate_tasks_for_items(db: Session, item_ids: Collection[uuid.UUID]) -> i
     return reinstated
 
 
+def retarget_tasks_for_item(
+    db: Session,
+    item: ComplianceItem,
+    *,
+    was_due: date,
+    today: date | None = None,
+) -> int:
+    """Move the work raised for a filing whose deadline has just moved.
+
+    A task carries its own copy of the statutory deadline — it is what the
+    board sorts on, what the workload view counts as overdue, and what
+    ``overdue_only`` filters by — and that copy was taken once, when the task
+    was raised. Nothing moved it afterwards, while the filing's own due date is
+    a field a practitioner is expected to edit: CBIC and CBDT extend deadlines
+    routinely, and the seeded calendar carries the ordinary dates precisely so
+    a firm can correct them.
+
+    So the two drifted apart, in both directions and neither of them harmless:
+
+    * an extension left the task counting down to the old date, going *overdue*
+      in red on a day the deadline no longer falls, sorted to the top of
+      somebody's board and counted against them in the workload view — the
+      firm's own record of its work disagreeing with its record of the
+      obligation;
+    * a deadline corrected *earlier* is the direction that costs a client. The
+      task went on showing weeks of margin against a return now due next week,
+      at whatever priority that comfortable date first derived, so the one
+      signal the board gives that something needs doing now was the signal it
+      withheld.
+
+    Only tasks still carrying the old statutory date, and only open ones. A
+    task a practitioner dated themselves — an internal target ahead of the
+    deadline, or none at all — is their plan for the work rather than a copy of
+    the deadline, and is left alone; a task already done or cancelled is a
+    record of what happened. Priority moves on the same terms: re-derived only
+    where it is still the one the old date produced, so a manager who bumped a
+    task to urgent keeps that.
+    """
+    if was_due == item.due_date:
+        return 0
+
+    today = today or clock.today()
+    tasks = db.scalars(
+        select(Task).where(
+            Task.compliance_item_id == item.id,
+            Task.status.in_(OPEN_TASK_STATUSES),
+            Task.due_date == was_due,
+        )
+    ).all()
+    derived_before = derive_priority((was_due - today).days)
+    derived_after = derive_priority((item.due_date - today).days)
+    for task in tasks:
+        if task.priority == derived_before:
+            task.priority = derived_after
+        task.due_date = item.due_date
+    if tasks:
+        db.flush()
+    return len(tasks)
+
+
 def release_open_tasks(db: Session, practitioner: Practitioner) -> int:
     """Hand a departing member's unfinished work back to the firm.
 
