@@ -24,6 +24,7 @@ from app.core.periods import add_months, compute_due_date, periods_for_frequency
 from app.models.base import ComplianceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem, ComplianceType
+from app.services import firms
 from app.services import tasks as task_service
 from app.services.applicability import applies_to
 
@@ -107,6 +108,16 @@ def generate_compliance_items(
     created: list[ComplianceItem] = []
     skipped = 0
 
+    # A new filing inherits the client's owner, and that owner may since have
+    # been switched off. Nothing here has a caller to refuse, so the name is
+    # simply dropped: an unassigned filing is one a manager can find, while one
+    # raised onto a deactivated account shows up on no active member's queue
+    # and under no filter — and this runs monthly, so it wrote that state
+    # afresh every time. Resolved once per run rather than per item.
+    assignee_id = client.assigned_practitioner_id
+    if not firms.is_assignable(db, client.firm_id, assignee_id):
+        assignee_id = None
+
     for compliance_type in applicable_types(db, client):
         # Search back far enough to catch periods that ended before the window
         # but fall due inside it; the due-date filter below trims the excess.
@@ -138,7 +149,7 @@ def generate_compliance_items(
                 firm_id=client.firm_id,
                 client_id=client.id,
                 compliance_type_id=compliance_type.id,
-                assigned_practitioner_id=client.assigned_practitioner_id,
+                assigned_practitioner_id=assignee_id,
                 period_label=period.label,
                 period_start=period.start,
                 period_end=period.end,

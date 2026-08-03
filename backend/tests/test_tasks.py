@@ -10,6 +10,8 @@ from sqlalchemy import func, select
 
 from app.core import clock
 from app.models.base import TaskPriority, TaskStatus
+from app.models.client import Client
+from app.models.compliance import ComplianceItem
 from app.models.firm import Firm
 from app.models.task import Task
 from app.services import tasks as task_service
@@ -1218,3 +1220,219 @@ class TestATaskThatNamesTwoClientsAtOnce:
             )
         ).all()
         assert not cancelled, "a surrender reached past the client the task named"
+
+
+class TestWhatADepartingMemberIsStillNamedOn:
+    """Three things name a practitioner; only the tasks were handed back.
+
+    ``assert_assignable`` refuses to put a client, a filing or a task on
+    someone switched off, and says why: work on a name nobody can sign in as
+    shows up on no active member's queue and in no unassigned pile, so the
+    deadline sits where nobody is watching it. Deactivation itself left exactly
+    that state on two of the three.
+
+    The clients are the half that does not stay still. Generation stamps a new
+    compliance item with ``client.assigned_practitioner_id``, so every filing
+    materialised for that client afterwards — monthly, by the unattended
+    nightly top-up — was raised onto the departed member afresh. The problem
+    did not merely persist; it regenerated.
+    """
+
+    @staticmethod
+    def _deactivate(client, auth_headers, practitioner_id) -> None:
+        response = client.patch(
+            f"/api/v1/auth/practitioners/{practitioner_id}",
+            json={"is_active": False},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+    @staticmethod
+    def _own_the_client(client, auth_headers, client_id, practitioner_id) -> None:
+        response = client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"assigned_practitioner_id": practitioner_id},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+    @staticmethod
+    def _own_the_filing(client, auth_headers, item_id, practitioner_id) -> None:
+        response = client.patch(
+            f"/api/v1/compliance/items/{item_id}",
+            json={"assigned_practitioner_id": practitioner_id},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+    @staticmethod
+    def _items_of(client, auth_headers, **params) -> list[dict]:
+        body = client.get(
+            "/api/v1/compliance/calendar",
+            params={"from_date": "2020-01-01", "to_date": "2035-12-31", "limit": 1000, **params},
+            headers=auth_headers,
+        ).json()
+        return body["items"]
+
+    # -------------------------------------------------- what comes back --
+
+    def test_a_client_they_owned_comes_back_unassigned(
+        self, client, auth_headers, client_id, junior
+    ):
+        self._own_the_client(client, auth_headers, client_id, junior["id"])
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        after = client.get(f"/api/v1/clients/{client_id}", headers=auth_headers).json()
+        assert after["assigned_practitioner_id"] is None
+        assert after["assigned_practitioner_name"] is None
+
+    def test_their_open_filings_come_back_unassigned(
+        self, client, auth_headers, client_id, junior
+    ):
+        """The calendar filters by assignee and has no unassigned bucket, so a
+        filing left under a dead account is one nothing surfaces."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        self._own_the_filing(client, auth_headers, item["id"], junior["id"])
+        assert self._items_of(client, auth_headers, assigned_to=junior["id"])
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        assert self._items_of(client, auth_headers, assigned_to=junior["id"]) == []
+
+    def test_a_return_they_lodged_keeps_their_name(
+        self, client, auth_headers, client_id, junior
+    ):
+        """A filed return records who filed it — rewriting that loses it."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        self._own_the_filing(client, auth_headers, item["id"], junior["id"])
+        client.patch(
+            f"/api/v1/compliance/items/{item['id']}",
+            json={"status": "filed"},
+            headers=auth_headers,
+        )
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        after = client.get(
+            f"/api/v1/compliance/items/{item['id']}", headers=auth_headers
+        ).json()
+        assert after["assigned_practitioner_id"] == junior["id"]
+
+    def test_nobody_elses_work_moves(
+        self, client, auth_headers, client_id, junior, registered_firm
+    ):
+        owner_id = registered_firm["practitioner"]["id"]
+        self._own_the_client(client, auth_headers, client_id, owner_id)
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        self._own_the_filing(client, auth_headers, item["id"], owner_id)
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        assert client.get(f"/api/v1/clients/{client_id}", headers=auth_headers).json()[
+            "assigned_practitioner_id"
+        ] == owner_id
+        assert client.get(
+            f"/api/v1/compliance/items/{item['id']}", headers=auth_headers
+        ).json()["assigned_practitioner_id"] == owner_id
+
+    def test_an_ordinary_edit_moves_nothing(
+        self, client, auth_headers, client_id, junior
+    ):
+        """Only the switch-off transition releases; a name change must not."""
+        self._own_the_client(client, auth_headers, client_id, junior["id"])
+
+        client.patch(
+            f"/api/v1/auth/practitioners/{junior['id']}",
+            json={"full_name": "Junior Jain-Mehta"},
+            headers=auth_headers,
+        )
+
+        assert client.get(f"/api/v1/clients/{client_id}", headers=auth_headers).json()[
+            "assigned_practitioner_id"
+        ] == junior["id"]
+
+    def test_the_audit_trail_says_what_moved(
+        self, client, auth_headers, client_id, junior
+    ):
+        """A client losing its owner overnight needs a recorded reason."""
+        self._own_the_client(client, auth_headers, client_id, junior["id"])
+
+        self._deactivate(client, auth_headers, junior["id"])
+
+        entries = client.get(
+            "/api/v1/audit",
+            params={"action": "practitioner.update"},
+            headers=auth_headers,
+        ).json()["items"]
+        assert (
+            "1 client(s) and 0 open filing(s) returned to unassigned"
+            in entries[0]["summary"]
+        )
+
+    # ------------------------------------------- and stops coming back --
+
+    def test_a_top_up_stops_raising_filings_onto_them(
+        self, client, auth_headers, client_id, junior, db
+    ):
+        """The half that regenerated. Generation reads the client's owner, so
+        every month's new filings were stamped with the departed member again —
+        by the nightly sweep, unattended, for as long as the client was on the
+        books.
+
+        The client is pointed back at them directly, which is the state any
+        deployment already carrying this is in.
+        """
+        self._deactivate(client, auth_headers, junior["id"])
+        record = db.get(Client, uuid.UUID(client_id))
+        record.assigned_practitioner_id = uuid.UUID(junior["id"])
+        db.commit()
+
+        response = client.post(
+            f"/api/v1/clients/{client_id}/compliance-items",
+            json={
+                "window_start": (clock.today() + timedelta(days=400)).isoformat(),
+                "window_end": (clock.today() + timedelta(days=700)).isoformat(),
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["created"] > 0
+
+        assert self._items_of(client, auth_headers, assigned_to=junior["id"]) == []
+
+    def test_the_nightly_sweep_does_not_either(
+        self, client, auth_headers, client_id, junior, db
+    ):
+        self._deactivate(client, auth_headers, junior["id"])
+        record = db.get(Client, uuid.UUID(client_id))
+        record.assigned_practitioner_id = uuid.UUID(junior["id"])
+        db.commit()
+        # Push the horizon out so the sweep has something left to materialise.
+        db.query(ComplianceItem).filter(
+            ComplianceItem.client_id == uuid.UUID(client_id)
+        ).delete()
+        db.commit()
+
+        worker_tasks.generate_compliance_items_task()
+
+        assert self._items_of(client, auth_headers, assigned_to=junior["id"]) == []
+        assert self._items_of(client, auth_headers), "the sweep created nothing at all"
+
+    def test_an_active_owner_is_still_inherited(
+        self, client, auth_headers, client_id, junior
+    ):
+        """The guard drops a dead name, not every name."""
+        self._own_the_client(client, auth_headers, client_id, junior["id"])
+
+        response = client.post(
+            f"/api/v1/clients/{client_id}/compliance-items",
+            json={
+                "window_start": (clock.today() + timedelta(days=400)).isoformat(),
+                "window_end": (clock.today() + timedelta(days=700)).isoformat(),
+            },
+            headers=auth_headers,
+        )
+        assert response.json()["created"] > 0
+
+        assert self._items_of(client, auth_headers, assigned_to=junior["id"])

@@ -314,8 +314,15 @@ def update_practitioner(
     # watching. The open work goes back to unassigned; the finished work keeps
     # its assignee, being the record of who did it.
     released = 0
+    handed_back = firms.ReleasedWork(clients=0, items=0)
     if updates.get("is_active") is False and target.is_active:
         released = task_service.release_open_tasks(db, target)
+        # The other two things that name a practitioner. The filings went on
+        # reading as theirs under a filter nobody can match, and the clients
+        # are worse: generation stamps a new compliance item with the client's
+        # owner, so every filing raised from then on was put back onto the
+        # deactivated account. See ``firms.release_assignments``.
+        handed_back = firms.release_assignments(db, target)
 
     before = audit.snapshot(target, updates)
     for key, value in updates.items():
@@ -328,7 +335,13 @@ def update_practitioner(
         entity_id=target.id,
         actor=admin,
         summary=f"Updated {target.email}"
-        + (f"; {released} open task(s) returned to unassigned" if released else ""),
+        + (f"; {released} open task(s) returned to unassigned" if released else "")
+        + (
+            f"; {handed_back.clients} client(s) and {handed_back.items} open "
+            "filing(s) returned to unassigned"
+            if handed_back
+            else ""
+        ),
         changes=audit.diff(before, audit.snapshot(target, updates)),
     )
     db.commit()

@@ -8,11 +8,14 @@ request, which is what a plan limit and an invoice number both got wrong.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.models.base import ComplianceStatus
 from app.models.client import Client
+from app.models.compliance import ComplianceItem
 from app.models.firm import Firm, Practitioner
 
 
@@ -48,6 +51,84 @@ def assert_assignable(db: Session, firm_id: uuid.UUID, practitioner_id: uuid.UUI
         raise NotAssignable(
             f"{assignee.full_name} has been deactivated and cannot be assigned work"
         )
+
+
+def is_assignable(db: Session, firm_id: uuid.UUID, practitioner_id: uuid.UUID | None) -> bool:
+    """:func:`assert_assignable` as a question rather than a refusal.
+
+    For the places that have to *decide* rather than reject — generation
+    inheriting a client's owner onto a new filing, which has no caller to tell.
+    """
+    try:
+        assert_assignable(db, firm_id, practitioner_id)
+    except NotAssignable:
+        return False
+    return True
+
+
+# The filings a departing member can still be holding. A filed return names
+# whoever lodged it, and that is a record rather than an assignment.
+OPEN_ITEM_STATUSES = (ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS)
+
+
+@dataclass(frozen=True)
+class ReleasedWork:
+    """What a departing member was still named on."""
+
+    clients: int
+    items: int
+
+    def __bool__(self) -> bool:
+        return bool(self.clients or self.items)
+
+
+def release_assignments(db: Session, practitioner: Practitioner) -> ReleasedWork:
+    """Take a deactivated member's name off the clients and filings they owned.
+
+    Three things name a practitioner — clients, filings and tasks — and
+    :func:`assert_assignable` refuses to put any of them on someone switched
+    off, for a reason it states plainly: work on a name nobody can sign in as
+    is work that shows up on no active member's queue and in no unassigned
+    pile, so the deadline sits where nobody is watching it.
+
+    Deactivation itself left exactly that state on two of the three. Only the
+    tasks were handed back. A departing member's filings went on naming them,
+    so ``/compliance/calendar?assigned_to=…`` surfaced them under an account
+    that cannot be signed in to and under nobody else — and there is no
+    "unassigned" bucket on that filter to find them in either.
+
+    The clients are the half that does not stay still. Generation stamps a new
+    compliance item with ``client.assigned_practitioner_id``, so every filing
+    materialised for that client from then on — monthly, by the nightly
+    top-up — was raised onto the departed member afresh. The problem did not
+    merely persist; it regenerated, silently, for as long as the client was on
+    the books.
+
+    Both go back to unassigned, which is where a manager already looks for work
+    needing an owner. Reactivation does not undo it, on the same terms as
+    :func:`~app.services.tasks.release_open_tasks`: nothing knows what they
+    were meant to still be holding, and a manager has since redistributed it.
+    """
+    clients = db.scalars(
+        select(Client).where(
+            Client.firm_id == practitioner.firm_id,
+            Client.assigned_practitioner_id == practitioner.id,
+        )
+    ).all()
+    for client in clients:
+        client.assigned_practitioner_id = None
+
+    items = db.scalars(
+        select(ComplianceItem).where(
+            ComplianceItem.firm_id == practitioner.firm_id,
+            ComplianceItem.assigned_practitioner_id == practitioner.id,
+            ComplianceItem.status.in_(OPEN_ITEM_STATUSES),
+        )
+    ).all()
+    for item in items:
+        item.assigned_practitioner_id = None
+
+    return ReleasedWork(clients=len(clients), items=len(items))
 
 
 def lock_firm(db: Session, firm_id: uuid.UUID) -> None:
