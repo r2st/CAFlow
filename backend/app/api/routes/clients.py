@@ -25,6 +25,7 @@ from app.schemas.client import (
 from app.schemas.common import Page
 from app.schemas.compliance import ComplianceGenerateRequest, ComplianceGenerateResponse
 from app.services import audit, firms
+from app.services import tasks as task_service
 from app.services.compliance_generator import (
     generate_compliance_items,
     reconcile_applicability,
@@ -79,6 +80,10 @@ def shelve_open_items(db: Session, client: Client) -> int:
     for item in items:
         item.offboarded_from_status = item.status
         item.status = ComplianceStatus.NOT_APPLICABLE
+    # The work raised against them goes with them. A closed filing whose task
+    # stays open is a deadline still on someone's queue for a client the firm
+    # has stopped acting for.
+    task_service.withdraw_tasks_for_items(db, [item.id for item in items])
     return len(items)
 
 
@@ -109,6 +114,11 @@ def restore_shelved_items(db: Session, client: Client) -> int:
             item.status = item.offboarded_from_status
             restored += 1
         item.offboarded_from_status = None
+    # The tasks too, for the reason above applied to work rather than to
+    # filings: task generation skips a compliance item that already carries
+    # one, so the reopened calendar would otherwise come back with nothing
+    # raised against it and no sweep would ever notice.
+    task_service.reinstate_tasks_for_items(db, [item.id for item in shelved])
     return restored
 
 

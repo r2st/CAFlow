@@ -9,6 +9,7 @@ back to whoever owns the client).
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
@@ -152,6 +153,74 @@ def create_tasks_for_due_items(
     if created:
         db.flush()
     return created
+
+
+def withdraw_tasks_for_items(db: Session, item_ids: Collection[uuid.UUID]) -> int:
+    """Cancel the open work raised for filings that are no longer owed.
+
+    A task is the human job of discharging one compliance item, so closing the
+    item and leaving the task is asking someone to file a return the firm has
+    decided nobody owes. Off-boarding a client closed a year of filings and
+    left every task standing: on a practitioner's queue, counted in the
+    workload view, and going overdue one by one against deadlines belonging to
+    a client the firm no longer acts for. Dropping a GST registration does the
+    same on a smaller scale, and does it while the client is still on the books
+    — so the stale work sits among real work rather than under a name someone
+    might think to look at.
+
+    ``withdrawn_from_status`` records what the task was, which is what makes
+    this reversible; see :func:`reinstate_tasks_for_items`. Only open work is
+    touched: a task already done is the record that it *was* done, and one a
+    manager cancelled is their decision, not this one's to overwrite.
+    """
+    if not item_ids:
+        return 0
+
+    tasks = db.scalars(
+        select(Task).where(
+            Task.compliance_item_id.in_(item_ids),
+            Task.status.in_(OPEN_TASK_STATUSES),
+        )
+    ).all()
+    for task in tasks:
+        task.withdrawn_from_status = task.status
+        task.status = TaskStatus.CANCELLED
+    if tasks:
+        db.flush()
+    return len(tasks)
+
+
+def reinstate_tasks_for_items(db: Session, item_ids: Collection[uuid.UUID]) -> int:
+    """Put back the work that :func:`withdraw_tasks_for_items` cancelled.
+
+    Needed for the same reason reopening the filings is: generation skips a
+    compliance item that already carries a task whatever its status, so nothing
+    else would ever raise work for these again. A client taken back on would
+    have their whole calendar returned and not one task against it.
+
+    Only tasks still sitting where the withdrawal left them, and only at the
+    status they held — a manager who has since cancelled or completed one keeps
+    that, and merely loses the marker.
+    """
+    if not item_ids:
+        return 0
+
+    tasks = db.scalars(
+        select(Task).where(
+            Task.compliance_item_id.in_(item_ids),
+            Task.withdrawn_from_status.is_not(None),
+        )
+    ).all()
+    reinstated = 0
+    for task in tasks:
+        if task.status == TaskStatus.CANCELLED:
+            task.status = task.withdrawn_from_status
+            task.completed_at = None
+            reinstated += 1
+        task.withdrawn_from_status = None
+    if tasks:
+        db.flush()
+    return reinstated
 
 
 def release_open_tasks(db: Session, practitioner: Practitioner) -> int:

@@ -669,3 +669,233 @@ class TestWorkAimedAtAnAccountThatIsSwitchedOff:
         for_item = [t for t in created["tasks"] if t["compliance_item_id"] == item["id"]]
         assert for_item, "the filing under test produced no task"
         assert for_item[0]["assignee_id"] == owner_id
+
+
+class TestWorkForAFilingNobodyOwesAnyMore:
+    """A task is the job of discharging one filing, and outlived it.
+
+    Off-boarding a client closes every open filing they had; so does dropping
+    a registration the client no longer holds. Neither touched the tasks. They
+    stayed on a practitioner's queue, counted in the workload view, and counted
+    down to a deadline nobody owes — eight of them for a single client, right
+    beside the real work.
+    """
+
+    HORIZON = {"horizon_days": 60}
+
+    def _generate(self, client, headers, horizon_days: int | None = None) -> int:
+        response = client.post(
+            "/api/v1/tasks/generate",
+            json={"horizon_days": horizon_days or self.HORIZON["horizon_days"]},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["created"]
+
+    def _tasks_for(self, client, headers, client_id: str) -> list[dict]:
+        return client.get(
+            "/api/v1/tasks",
+            params={"client_id": client_id, "limit": 200},
+            headers=headers,
+        ).json()["items"]
+
+    def _open_tasks_for(self, client, headers, client_id: str) -> list[dict]:
+        return [
+            task
+            for task in self._tasks_for(client, headers, client_id)
+            if task["status"] in {s.value for s in task_service.OPEN_TASK_STATUSES}
+        ]
+
+    def test_off_boarding_a_client_closes_the_work_raised_for_them(
+        self, client, auth_headers, client_id
+    ):
+        assert self._generate(client, auth_headers) > 0
+        assert self._open_tasks_for(client, auth_headers, client_id)
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        assert not self._open_tasks_for(client, auth_headers, client_id)
+
+    def test_the_workload_view_stops_counting_it(self, client, auth_headers, client_id):
+        """Which is where a manager decides who is drowning and who is free."""
+        self._generate(client, auth_headers)
+        before = client.get("/api/v1/tasks/workload", headers=auth_headers).json()
+        assert before["total_open"] > 0
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        after = client.get("/api/v1/tasks/workload", headers=auth_headers).json()
+        assert after["total_open"] == 0
+
+    def test_taking_the_client_back_on_brings_the_work_back(
+        self, client, auth_headers, client_id
+    ):
+        """Generation skips a filing that already carries a task, whatever its
+        status, so without this the reopened calendar would come back with
+        nothing raised against it and no sweep would ever notice."""
+        self._generate(client, auth_headers)
+        before = {
+            task["id"] for task in self._open_tasks_for(client, auth_headers, client_id)
+        }
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+        client.patch(
+            f"/api/v1/clients/{client_id}", json={"is_active": True}, headers=auth_headers
+        )
+
+        after = {
+            task["id"] for task in self._open_tasks_for(client, auth_headers, client_id)
+        }
+        assert after == before
+
+    def test_work_already_under_way_comes_back_as_it_was(
+        self, client, auth_headers, client_id
+    ):
+        self._generate(client, auth_headers)
+        task = self._open_tasks_for(client, auth_headers, client_id)[0]
+        client.patch(
+            f"/api/v1/tasks/{task['id']}",
+            json={"status": "in_progress"},
+            headers=auth_headers,
+        )
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+        assert (
+            client.get(f"/api/v1/tasks/{task['id']}", headers=auth_headers).json()["status"]
+            == "cancelled"
+        )
+
+        client.patch(
+            f"/api/v1/clients/{client_id}", json={"is_active": True}, headers=auth_headers
+        )
+        assert (
+            client.get(f"/api/v1/tasks/{task['id']}", headers=auth_headers).json()["status"]
+            == "in_progress"
+        )
+
+    def test_a_task_a_manager_cancelled_stays_cancelled(
+        self, client, auth_headers, client_id
+    ):
+        """Their decision about the work is not this mechanism's to undo."""
+        self._generate(client, auth_headers)
+        task = self._open_tasks_for(client, auth_headers, client_id)[0]
+        client.patch(
+            f"/api/v1/tasks/{task['id']}",
+            json={"status": "cancelled"},
+            headers=auth_headers,
+        )
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+        client.patch(
+            f"/api/v1/clients/{client_id}", json={"is_active": True}, headers=auth_headers
+        )
+
+        assert (
+            client.get(f"/api/v1/tasks/{task['id']}", headers=auth_headers).json()["status"]
+            == "cancelled"
+        )
+
+    def test_finished_work_keeps_its_record(self, client, auth_headers, client_id):
+        """A filing done before the client left was still done."""
+        self._generate(client, auth_headers)
+        task = self._open_tasks_for(client, auth_headers, client_id)[0]
+        client.patch(
+            f"/api/v1/tasks/{task['id']}", json={"status": "done"}, headers=auth_headers
+        )
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        after = client.get(f"/api/v1/tasks/{task['id']}", headers=auth_headers).json()
+        assert after["status"] == "done"
+        assert after["completed_at"] is not None
+
+    def test_dropping_a_registration_closes_only_its_own_work(
+        self, client, auth_headers, client_id
+    ):
+        """The client is still on the books, so this stale work would sit
+        among real work rather than under a name someone might think to check."""
+        # Far enough out to reach a GST period that has not begun: only
+        # those can be withdrawn, since a registration surrendered mid-month
+        # still owes that month's return.
+        self._generate(client, auth_headers, horizon_days=180)
+        gst_items = {
+            item["id"]: item
+            for item in client.get(
+                "/api/v1/compliance/calendar",
+                params={"limit": 1000, "to_date": (clock.today() + timedelta(days=400)).isoformat()},
+                headers=auth_headers,
+            ).json()["items"]
+            if item["compliance_type_code"].startswith("GSTR")
+        }
+        ahead = {
+            task["id"]
+            for task in self._open_tasks_for(client, auth_headers, client_id)
+            if (item := gst_items.get(task["compliance_item_id"]))
+            and item["period_start"] > clock.today().isoformat()
+        }
+        assert ahead, "no GST work for a period still to begin — nothing under test"
+
+        client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"gst_registered": False},
+            headers=auth_headers,
+        )
+
+        open_now = self._open_tasks_for(client, auth_headers, client_id)
+        assert not ({task["id"] for task in open_now} & ahead)
+        # Income tax is untouched: that registration did not change.
+        assert open_now, "dropping GST must not clear the client's whole queue"
+
+    def test_registering_again_brings_that_work_back(
+        self, client, auth_headers, client_id
+    ):
+        self._generate(client, auth_headers, horizon_days=180)
+        before = {
+            task["id"] for task in self._open_tasks_for(client, auth_headers, client_id)
+        }
+
+        client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"gst_registered": False},
+            headers=auth_headers,
+        )
+        client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"gst_registered": True},
+            headers=auth_headers,
+        )
+
+        after = {
+            task["id"] for task in self._open_tasks_for(client, auth_headers, client_id)
+        }
+        assert after == before
+
+    def test_a_standalone_task_is_never_touched(self, client, auth_headers, client_id):
+        """It names no filing, so no filing closing decides anything about it."""
+        standalone = create_task(
+            client, auth_headers, client_id=client_id, title="Chase the bank for a NOC"
+        ).json()
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        assert (
+            client.get(f"/api/v1/tasks/{standalone['id']}", headers=auth_headers).json()[
+                "status"
+            ]
+            == "todo"
+        )
+
+    def test_another_firm_client_keeps_its_queue(self, client, auth_headers, client_id):
+        """The withdrawal is scoped by the filings it was handed, nothing wider."""
+        other_id = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(name="Second Client", pan="BBBPC1234D"),
+            headers=auth_headers,
+        ).json()["client"]["id"]
+        self._generate(client, auth_headers)
+        before = len(self._open_tasks_for(client, auth_headers, other_id))
+        assert before > 0
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        assert len(self._open_tasks_for(client, auth_headers, other_id)) == before

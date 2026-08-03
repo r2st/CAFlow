@@ -59,6 +59,17 @@ class Task(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     due_date: Mapped[date | None] = mapped_column(Date)
     estimated_minutes: Mapped[int | None] = mapped_column(Integer)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # What ``status`` was when the filing behind this task stopped being owed,
+    # if that is why the task is now cancelled. Null on everything else —
+    # including a task a manager cancelled themselves, which is a decision
+    # about the work and must survive the filing coming back.
+    #
+    # Generation skips a compliance item that already carries any task, open or
+    # closed, so a cancelled task is never replaced by the nightly sweep. This
+    # is what lets the filing coming back bring its work with it.
+    withdrawn_from_status: Mapped[TaskStatus | None] = mapped_column(
+        EnumString(TaskStatus, 32)
+    )
 
     compliance_item: Mapped[ComplianceItem | None] = relationship()
     assignee: Mapped[Practitioner | None] = relationship(foreign_keys=[assignee_id])

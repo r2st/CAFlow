@@ -24,6 +24,7 @@ from app.core.periods import add_months, compute_due_date, periods_for_frequency
 from app.models.base import ComplianceStatus
 from app.models.client import Client
 from app.models.compliance import ComplianceItem, ComplianceType
+from app.services import tasks as task_service
 from app.services.applicability import applies_to
 
 
@@ -203,13 +204,14 @@ def reconcile_applicability(
         ).all()
     )
 
-    withdrawn = reinstated = 0
+    closed: list[uuid.UUID] = []
+    reopened: list[uuid.UUID] = []
     for item in items:
         applies = item.compliance_type_id in applicable
         if not applies and item.status in OPEN_STATUSES and item.period_start > today:
             item.offboarded_from_status = item.status
             item.status = ComplianceStatus.NOT_APPLICABLE
-            withdrawn += 1
+            closed.append(item.id)
         elif (
             applies
             and item.status == ComplianceStatus.NOT_APPLICABLE
@@ -217,11 +219,17 @@ def reconcile_applicability(
         ):
             item.status = item.offboarded_from_status
             item.offboarded_from_status = None
-            reinstated += 1
+            reopened.append(item.id)
 
-    if withdrawn or reinstated:
+    if closed or reopened:
         db.flush()
-    return ReconcileResult(withdrawn=withdrawn, reinstated=reinstated)
+    # The work raised for these filings follows them. A task outlives the
+    # obligation it exists to discharge otherwise: still on a queue, still
+    # counted, still counting down to a deadline the client stopped owing when
+    # they surrendered the registration behind it.
+    task_service.withdraw_tasks_for_items(db, closed)
+    task_service.reinstate_tasks_for_items(db, reopened)
+    return ReconcileResult(withdrawn=len(closed), reinstated=len(reopened))
 
 
 def regenerate_for_firm(db: Session, firm_id: uuid.UUID, today: date | None = None) -> int:
