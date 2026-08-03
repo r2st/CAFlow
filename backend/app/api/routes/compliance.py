@@ -197,17 +197,31 @@ def update_compliance_item(
     # against is the one this patch leaves behind — the incoming one when the
     # caller named it, otherwise what the item already is, which is what makes
     # correcting the date of an already-filed item still work.
-    if updates.get("filed_on") is not None:
-        resulting_status = updates.get("status") or item.status
-        if resulting_status not in FILED_STATUSES:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"filed_on cannot be set alongside status "
-                    f"'{resulting_status.value}' — a filing date belongs to a "
-                    "filed or delayed_filed item"
-                ),
-            )
+    resulting_status = updates.get("status") or item.status
+    if updates.get("filed_on") is not None and resulting_status not in FILED_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"filed_on cannot be set alongside status "
+                f"'{resulting_status.value}' — a filing date belongs to a "
+                "filed or delayed_filed item"
+            ),
+        )
+    # And on the same terms, for a stronger version of the same reason: a
+    # filing date is at least a date, whereas an acknowledgement number is
+    # issued by the statutory portal at the moment it accepts a return. One
+    # cannot exist for a return that was not lodged.
+    if updates.get("acknowledgement_number") is not None and (
+        resulting_status not in FILED_STATUSES
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"acknowledgement_number cannot be set alongside status "
+                f"'{resulting_status.value}' — the portal issues one when it "
+                "accepts a return"
+            ),
+        )
 
     if updates.get("assigned_practitioner_id"):
         try:
@@ -219,11 +233,11 @@ def update_compliance_item(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
-    # ``_normalise_filing`` derives both of these below, so both are watched
-    # whether or not the caller named them: a bare date correction that moves a
-    # filing past its deadline changes the status too, and that is the half of
-    # the change the record most needs to carry.
-    watched = set(updates) | {"status", "filed_on"}
+    # ``_normalise_filing`` derives all three of these below, so all three are
+    # watched whether or not the caller named them: a bare date correction that
+    # moves a filing past its deadline changes the status too, and that is the
+    # half of the change the record most needs to carry.
+    watched = set(updates) | {"status", "filed_on", "acknowledgement_number"}
     before = audit.snapshot(item, watched)
     for key, value in updates.items():
         setattr(item, key, value)
@@ -284,6 +298,30 @@ def bulk_update_status(
             detail=(
                 f"filed_on cannot be set alongside status '{payload.status.value}' — "
                 "a filing date belongs to a filed or delayed_filed item"
+            ),
+        )
+    # An acknowledgement number is not a fact about a batch. The portal issues
+    # one per return it accepts, so writing the same one across a selection
+    # puts a number belonging to one return onto every other return in it —
+    # in the register the firm would show an assessing officer, against
+    # periods that number was never issued for. Filed or not: even a batch of
+    # genuinely filed returns has as many numbers as it has returns, and this
+    # endpoint can only carry one.
+    if payload.acknowledgement_number is not None and len(set(payload.item_ids)) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "acknowledgement_number identifies one return — set it on that "
+                "filing rather than across a batch"
+            ),
+        )
+    if payload.acknowledgement_number is not None and payload.status not in FILED_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"acknowledgement_number cannot be set alongside status "
+                f"'{payload.status.value}' — the portal issues one when it "
+                "accepts a return"
             ),
         )
 
@@ -413,5 +451,20 @@ def _normalise_filing(
             if item.filed_on > item.due_date
             else ComplianceStatus.FILED
         )
-    elif not filed_on_given:
+        return
+
+    if not filed_on_given:
         item.filed_on = None
+    # The acknowledgement number goes with it, and is the more dangerous half
+    # to leave behind. The portal issues one when it accepts a return, so a
+    # pending item carrying one is a record that a return was accepted — and
+    # something reads it: the filing-confirmation draft quotes the number back
+    # to the client, so reverting a filing left the firm able to send "your
+    # return has been filed successfully, acknowledgement number …" for a
+    # return that is sitting on the chase list. Marked filed again later, the
+    # item keeps that stale number for good, against a period it was never
+    # issued for.
+    #
+    # Unconditional: setting one alongside a status that is not filed is
+    # refused above, so there is no caller intent here to override.
+    item.acknowledgement_number = None

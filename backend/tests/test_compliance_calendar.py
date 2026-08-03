@@ -834,3 +834,204 @@ class TestAuditTrail:
         ).first()
         assert entry.changes["before"]["status"] == "pending"
         assert entry.changes["after"]["status"] == "in_progress"
+
+
+class TestTheNumberThePortalIssues:
+    """An acknowledgement number is issued by the statutory portal at the
+    moment it accepts a return, so it cannot exist for a return nobody lodged.
+
+    Nothing enforced that. Reverting a filing cleared the date and left the
+    number, and something reads it: the filing-confirmation draft quotes it
+    back, so a firm could send "your return has been filed successfully,
+    acknowledgement number …" for a return sitting on its own chase list.
+    Marked filed again later, the item kept that number for good — against a
+    period it was never issued for, in the register the firm would show an
+    assessing officer.
+    """
+
+    ACK = "AA2707260012345"
+
+    def _filed_item(self, client: TestClient, auth_headers: dict, db: Session):
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={
+                "status": "filed",
+                "filed_on": (item.due_date - timedelta(days=1)).isoformat(),
+                "acknowledgement_number": self.ACK,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["acknowledgement_number"] == self.ACK
+        return client_id, item
+
+    def test_reverting_a_filing_takes_the_number_with_it(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        _, item = self._filed_item(client, auth_headers, db)
+
+        reverted = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "pending"},
+        ).json()
+
+        assert reverted["filed_on"] is None
+        assert reverted["acknowledgement_number"] is None
+
+    def test_the_confirmation_draft_stops_quoting_it(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The consumer that turns a stale number into something a client reads."""
+        client_id, item = self._filed_item(client, auth_headers, db)
+        client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "pending"},
+        )
+
+        draft = client.post(
+            f"{API}/reminders/draft",
+            headers=auth_headers,
+            json={
+                "client_id": client_id,
+                "purpose": "filing_confirmation",
+                "compliance_item_id": str(item.id),
+            },
+        ).json()
+        assert self.ACK not in draft["body"]
+
+    def test_ruling_a_filing_out_clears_it_too(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        _, item = self._filed_item(client, auth_headers, db)
+
+        ruled_out = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "not_applicable"},
+        ).json()
+        assert ruled_out["acknowledgement_number"] is None
+
+    def test_a_correction_to_a_filed_item_keeps_it(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Nothing about the return changed — only which day it was lodged."""
+        _, item = self._filed_item(client, auth_headers, db)
+
+        corrected = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"filed_on": (item.due_date - timedelta(days=2)).isoformat()},
+        ).json()
+        assert corrected["acknowledgement_number"] == self.ACK
+
+    def test_setting_one_on_something_unfiled_is_refused(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"acknowledgement_number": self.ACK},
+        )
+        assert response.status_code == 422, response.text
+        assert "accepts a return" in response.json()["detail"]
+
+    def test_the_change_is_recorded_in_the_trail(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The number is dropped without the caller naming it, so nothing else
+        in the record would say it had been there."""
+        from app.models.audit import AuditLog
+
+        _, item = self._filed_item(client, auth_headers, db)
+        client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "pending"},
+        )
+
+        entries = list(
+            db.scalars(
+                select(AuditLog).where(AuditLog.action == "compliance_item.update")
+            ).all()
+        )
+        dropped = [
+            entry
+            for entry in entries
+            if entry.changes["before"].get("acknowledgement_number") == self.ACK
+            and entry.changes["after"].get("acknowledgement_number") is None
+        ]
+        assert dropped, [entry.changes for entry in entries]
+
+    def test_a_batch_cannot_share_one_number(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The portal issues one per return, and this endpoint carries one."""
+        client_id = client_of_long_standing(client, auth_headers)
+        item_ids = [str(item.id) for item in lapsed_items(db, client_id)[:3]]
+        assert len(item_ids) == 3
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": item_ids,
+                "status": "filed",
+                "acknowledgement_number": self.ACK,
+            },
+        )
+        assert response.status_code == 422, response.text
+        assert "identifies one return" in response.json()["detail"]
+
+    def test_a_batch_of_one_still_may(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """It names exactly the return the number belongs to."""
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(item.id)],
+                "status": "filed",
+                "acknowledgement_number": self.ACK,
+            },
+        )
+        assert response.status_code == 200, response.text
+        db.refresh(item)
+        assert item.acknowledgement_number == self.ACK
+
+    def test_reverting_a_batch_clears_every_number(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = client_of_long_standing(client, auth_headers)
+        items = lapsed_items(db, client_id)[:3]
+        for item in items:
+            client.post(
+                f"{API}/compliance/items/bulk-status",
+                headers=auth_headers,
+                json={
+                    "item_ids": [str(item.id)],
+                    "status": "filed",
+                    "acknowledgement_number": f"{self.ACK}{item.period_label}",
+                },
+            )
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": [str(i.id) for i in items], "status": "pending"},
+        )
+        assert response.status_code == 200, response.text
+        for item in items:
+            db.refresh(item)
+            assert item.acknowledgement_number is None
+            assert item.filed_on is None
