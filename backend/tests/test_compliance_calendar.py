@@ -6,15 +6,16 @@ import uuid
 from datetime import timedelta
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from app.core import clock
-from app.models.base import TaskPriority, TaskStatus
+from app.database import engine
+from app.models.base import ComplianceStatus, TaskPriority, TaskStatus
 from app.models.compliance import ComplianceItem
 from app.models.task import Task
 from app.services import tasks as task_service
-from tests.conftest import make_client_payload
+from tests.conftest import FIRM_REGISTRATION, make_client_payload
 
 API = "/api/v1"
 
@@ -805,6 +806,154 @@ class TestDashboard:
         assert stats["total_clients"] == 0
         assert stats["total_items"] == 0
         assert stats["by_category"] == {}
+
+
+class TestTheDashboardIsCountedByTheDatabase:
+    """Every counter on the landing page is an aggregate.
+
+    They used to be computed by reading the firm's whole compliance history
+    into memory and tallying it in Python: a filing is a permanent record and
+    the nightly generator adds a year of them per client ahead of time, so the
+    set only grows, and it was materialised in full on every visit — by every
+    practitioner, all of whom open the app in the same half hour.
+
+    The numbers themselves must not have moved, so the numbers are what these
+    pin: against what ``derive_display_status`` says row by row, which is the
+    definition the calendar screen beside it is rendered from.
+    """
+
+    def _stats(self, client, auth_headers) -> dict:
+        response = client.get(f"{API}/compliance/dashboard", headers=auth_headers)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_the_buckets_agree_with_the_calendar_row_by_row(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """A spread across every display state, tallied both ways."""
+        client_id = client_of_long_standing(client, auth_headers)
+        items = items_for(db, client_id)
+        assert len(items) > 6, "expected a calendar worth spreading across states"
+        today = clock.today()
+        items[0].due_date = today - timedelta(days=30)  # overdue
+        items[1].due_date = today                       # due today, so due_soon
+        items[2].due_date = today + timedelta(days=7)   # the edge of due_soon
+        items[3].due_date = today + timedelta(days=8)   # one day past it
+        items[4].status = ComplianceStatus.NOT_APPLICABLE
+        items[5].status = ComplianceStatus.FILED
+        items[5].filed_on = today
+        db.commit()
+
+        stats = self._stats(client, auth_headers)
+
+        expected = {"overdue": 0, "due_soon": 0, "upcoming": 0}
+        by_category: dict[str, int] = {}
+        for item in items_for(db, client_id):
+            state = item.derive_display_status(today)
+            if state not in expected:
+                continue
+            expected[state] += 1
+            category = item.compliance_type.category.value
+            by_category[category] = by_category.get(category, 0) + 1
+
+        assert {key: stats[key] for key in expected} == expected
+        assert stats["by_category"] == by_category
+        assert stats["total_items"] == len(items)
+
+    def test_a_withdrawn_filing_is_counted_nowhere_but_the_total(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Not-applicable is a filing the client does not owe. It stays on the
+        record — hence the total — and belongs in no bucket and no category."""
+        client_id = create_client_record(client, auth_headers)
+        items = items_for(db, client_id)
+        for item in items:
+            item.status = ComplianceStatus.NOT_APPLICABLE
+        db.commit()
+
+        stats = self._stats(client, auth_headers)
+
+        assert stats["total_items"] == len(items)
+        assert (stats["overdue"], stats["due_soon"], stats["upcoming"]) == (0, 0, 0)
+        assert stats["by_category"] == {}
+
+    def test_a_return_lodged_last_month_is_not_this_months_work(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        item.status = ComplianceStatus.FILED
+        item.filed_on = clock.today().replace(day=1) - timedelta(days=1)
+        db.commit()
+
+        assert self._stats(client, auth_headers)["filed_this_month"] == 0
+
+    def test_work_already_on_an_invoice_is_not_still_unbilled(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = client_of_long_standing(client, auth_headers)
+        first, second = lapsed_items(db, client_id)[:2]
+        for item in (first, second):
+            item.status = ComplianceStatus.FILED
+            item.filed_on = clock.today()
+        first.is_billed = True
+        db.commit()
+
+        stats = self._stats(client, auth_headers)
+        assert stats["filed_this_month"] == 2
+        assert stats["unbilled_fee_paise"] == second.fee_paise
+
+    def test_another_firms_filings_are_not_counted(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The aggregates run in SQL now, so the tenancy predicate is the only
+        thing keeping one firm's numbers out of another's."""
+        create_client_record(client, auth_headers)
+        mine = self._stats(client, auth_headers)
+
+        neighbour = client.post(
+            f"{API}/auth/register",
+            json={
+                **FIRM_REGISTRATION,
+                "firm_name": "Neighbouring Associates",
+                "firm_email": "hello@neighbour.in",
+                "owner_email": "owner@neighbour.in",
+            },
+        )
+        assert neighbour.status_code == 201, neighbour.text
+        their_headers = {"Authorization": f"Bearer {neighbour.json()['access_token']}"}
+        create_client_record(
+            client, their_headers, name="Their Client", pan="AABCT9999Z", gstin=None
+        )
+
+        assert self._stats(client, auth_headers) == mine
+
+    def test_the_filings_are_counted_rather_than_read(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The point of the change, asserted directly.
+
+        Anything this endpoint asks of ``compliance_items`` must come back as
+        an aggregate. A statement selecting the rows themselves is one whose
+        cost grows with the firm's whole filing history, which is what put the
+        landing page on that curve in the first place.
+        """
+        create_client_record(client, auth_headers)
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()).lower())
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            self._stats(client, auth_headers)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        touched = [sql for sql in statements if "compliance_items" in sql]
+        assert touched, "the dashboard never looked at the compliance items"
+        unaggregated = [sql for sql in touched if "count(" not in sql and "sum(" not in sql]
+        assert not unaggregated, f"rows read instead of counted: {unaggregated}"
 
 
 class TestAuditTrail:

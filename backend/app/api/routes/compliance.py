@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession
@@ -34,6 +34,13 @@ router = APIRouter(prefix="/compliance", tags=["compliance"])
 DISPLAY_STATES = ("upcoming", "due_soon", "overdue", "filed", "not_applicable")
 
 FILED_STATUSES = (ComplianceStatus.FILED, ComplianceStatus.DELAYED_FILED)
+
+# The statuses that report themselves rather than being read off the due date.
+# Its complement is what ``ComplianceItem.derive_display_status`` resolves into
+# overdue / due_soon / upcoming, and the dashboard groups by the same split —
+# written as "everything but these" so a status added later buckets the same
+# way in both places.
+SETTLED_STATUSES = (*FILED_STATUSES, ComplianceStatus.NOT_APPLICABLE)
 
 
 def _serialise(item: ComplianceItem, today: date) -> ComplianceItemOut:
@@ -411,50 +418,105 @@ def bulk_update_status(
 
 @router.get("/dashboard", response_model=DashboardStats, summary="Firm dashboard counters")
 def dashboard(practitioner: CurrentPractitioner, db: DbSession):
-    """Practice-wide compliance status at a glance."""
+    """Practice-wide compliance status at a glance.
+
+    Counted by the database rather than by loading the firm's filings and
+    tallying them here. Every counter on this screen is an aggregate, and this
+    is the landing page — so what used to happen on each visit was that every
+    compliance item the firm has ever had was read off disk, hydrated into a
+    mapped object, joined to its compliance type, and then reduced to eight
+    integers and a small dict.
+
+    That set only grows. A filing is a permanent record, and the nightly
+    generator adds a year of them per client ahead of time, so a practice with
+    a few hundred clients on the books for a few years is materialising six
+    figures of rows to render a handful of numbers — and does it again for
+    every practitioner who opens the app in the morning, which is all of them
+    at once. The counters themselves have not moved; only where they are
+    computed has.
+
+    The derived states are the same three ``derive_display_status`` produces
+    for an open filing, expressed as the date comparison it already is. Filed,
+    delayed-filed and not-applicable items never fell into those buckets, so
+    only the two open statuses are grouped.
+    """
     today = clock.today()
     firm_id = practitioner.firm_id
+    month_start = date(today.year, today.month, 1)
+    due_soon_until = today + timedelta(days=ComplianceItem.DUE_SOON_WINDOW_DAYS)
 
-    total_clients = db.scalar(select(func.count(Client.id)).where(Client.firm_id == firm_id)) or 0
-    active_clients = (
+    client_counts = db.execute(
+        select(
+            func.count(Client.id),
+            func.coalesce(func.sum(case((Client.is_active.is_(True), 1), else_=0)), 0),
+        ).where(Client.firm_id == firm_id)
+    ).one()
+
+    total_items = (
         db.scalar(
-            select(func.count(Client.id)).where(
-                Client.firm_id == firm_id, Client.is_active.is_(True)
-            )
+            select(func.count(ComplianceItem.id)).where(ComplianceItem.firm_id == firm_id)
         )
         or 0
     )
 
-    rows = list(
-        db.scalars(
-            select(ComplianceItem)
-            .options(selectinload(ComplianceItem.compliance_type))
-            .where(ComplianceItem.firm_id == firm_id)
-        ).all()
+    # ``case`` rather than an aggregate FILTER clause: FILTER wants SQLite 3.30
+    # and this has to render the same on both backends the suite and the deploy
+    # use.
+    display_state = case(
+        (ComplianceItem.due_date < today, "overdue"),
+        (ComplianceItem.due_date <= due_soon_until, "due_soon"),
+        else_="upcoming",
     )
+    open_rows = db.execute(
+        select(ComplianceType.category, display_state, func.count(ComplianceItem.id))
+        .join(ComplianceType, ComplianceType.id == ComplianceItem.compliance_type_id)
+        .where(
+            ComplianceItem.firm_id == firm_id,
+            ComplianceItem.status.not_in(SETTLED_STATUSES),
+        )
+        # Ordered so the category breakdown the UI renders is stable between
+        # requests rather than however the rows happened to come back.
+        .group_by(ComplianceType.category, display_state)
+        .order_by(ComplianceType.category)
+    ).all()
+
+    # One pass over the filed work for both of its counters: how much was
+    # lodged this month, and what of it is still waiting on an invoice.
+    filed_this_month, unbilled_fee_paise = db.execute(
+        select(
+            func.coalesce(
+                func.sum(case((ComplianceItem.filed_on >= month_start, 1), else_=0)), 0
+            ),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (ComplianceItem.is_billed.is_(False), ComplianceItem.fee_paise),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+        ).where(
+            ComplianceItem.firm_id == firm_id,
+            ComplianceItem.status.in_(FILED_STATUSES),
+        )
+    ).one()
 
     stats = DashboardStats(
-        total_clients=total_clients,
-        active_clients=active_clients,
-        total_items=len(rows),
+        total_clients=client_counts[0] or 0,
+        active_clients=client_counts[1] or 0,
+        total_items=total_items,
         overdue=0,
         due_soon=0,
         upcoming=0,
-        filed_this_month=0,
-        unbilled_fee_paise=0,
+        filed_this_month=filed_this_month or 0,
+        unbilled_fee_paise=unbilled_fee_paise or 0,
         by_category={},
     )
-    month_start = date(today.year, today.month, 1)
-    for item in rows:
-        state = item.derive_display_status(today)
-        if state in ("overdue", "due_soon", "upcoming"):
-            setattr(stats, state, getattr(stats, state) + 1)
-            category = item.compliance_type.category.value
-            stats.by_category[category] = stats.by_category.get(category, 0) + 1
-        if item.status in FILED_STATUSES and item.filed_on and item.filed_on >= month_start:
-            stats.filed_this_month += 1
-        if item.status in FILED_STATUSES and not item.is_billed:
-            stats.unbilled_fee_paise += item.fee_paise
+    for category, state, count in open_rows:
+        setattr(stats, state, getattr(stats, state) + count)
+        key = category.value
+        stats.by_category[key] = stats.by_category.get(key, 0) + count
     return stats
 
 
