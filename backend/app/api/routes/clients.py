@@ -28,6 +28,7 @@ from app.schemas.compliance import ComplianceGenerateRequest, ComplianceGenerate
 from app.services import audit, firms
 from app.services import tasks as task_service
 from app.services.compliance_generator import (
+    InvalidWindow,
     applicable_types,
     generate_compliance_items,
     reconcile_applicability,
@@ -425,9 +426,17 @@ def generate_items(
 ):
     """Explicitly (re)generate compliance items for a client over a window."""
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
-    result = generate_compliance_items(
-        db, client, window_start=payload.window_start, window_end=payload.window_end
-    )
+    try:
+        result = generate_compliance_items(
+            db, client, window_start=payload.window_start, window_end=payload.window_end
+        )
+    except InvalidWindow as exc:
+        # A 422 naming the two dates, which is what every other date-window
+        # endpoint answers with — see :func:`compliance_generator.check_window`
+        # for what the two silences cost.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     audit.record(
         db,
         action="client.generate_compliance",

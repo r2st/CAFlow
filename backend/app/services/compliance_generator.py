@@ -41,6 +41,56 @@ class GenerationResult:
         return len(self.created)
 
 
+class InvalidWindow(ValueError):
+    """A caller-supplied generation window that runs backwards or too wide."""
+
+
+# How much calendar one request may materialise. Five years covers the backfill
+# a firm actually asks for — taking on a client whose returns they are picking
+# up partway through, or reconstructing a calendar after a migration — while
+# putting a ceiling on the work a single call can do.
+MAX_GENERATION_WINDOW_MONTHS = 60
+
+
+def check_window(start: date, end: date) -> None:
+    """Refuse a window no caller meant to ask for.
+
+    Two failures, both silent before this.
+
+    A window running backwards produced nothing and reported success:
+    ``{"created": 0, "skipped_existing": 0}``, which is exactly what a client
+    whose calendar is already complete returns. A practitioner topping up a
+    client after a registration change reads that as "already done" and moves
+    on, and the filings they came to create are still missing. Every other
+    date-window endpoint in the API answers a reversed pair with a 422 that
+    names the two dates; this one did not.
+
+    A window running too far forwards is the expensive direction. The row count
+    is periods × applicable types, and a period is a month for five of the
+    seeded types — so a mistyped year, which is the digit that gets mistyped in
+    a date field, turns one request into tens of thousands of ``ComplianceItem``
+    rows. They are not merely wasted storage: every one of them lands on the
+    calendar, is counted on the dashboard, goes overdue on its own due date,
+    raises a task, and queues a reminder that emails the client about a return
+    for a period decades away. Undoing it means deleting rows through an API
+    that deliberately has no delete for a filing.
+
+    Only the window a caller named is checked. The default is ours and is
+    already bounded by ``compliance_generation_months``.
+    """
+    if end < start:
+        raise InvalidWindow(
+            f"window_end {end:%d %b %Y} falls before window_start {start:%d %b %Y}"
+        )
+    if end > add_months(start, MAX_GENERATION_WINDOW_MONTHS):
+        years = MAX_GENERATION_WINDOW_MONTHS // 12
+        raise InvalidWindow(
+            f"A generation window covers at most {years} years, and "
+            f"{start:%d %b %Y} to {end:%d %b %Y} is longer. Generate the "
+            "earlier years in a separate run."
+        )
+
+
 def default_window(client: Client, today: date | None = None) -> tuple[date, date]:
     """The date range to generate for: from onboarding (or today) forward."""
     today = today or clock.today()
@@ -98,11 +148,16 @@ def generate_compliance_items(
     ``autoflush=False``, so an unflushed row is one the next call's
     already-generated lookup cannot see — and a second run inside the same
     transaction would then create every filing a second time.
+
+    A window the caller named is checked before anything is built; see
+    :func:`check_window`.
     """
     today = today or clock.today()
     default_start, default_end = default_window(client, today)
     start = window_start or default_start
     end = window_end or default_end
+    if window_start is not None or window_end is not None:
+        check_window(start, end)
 
     existing = _existing_keys(db, client.id)
     created: list[ComplianceItem] = []

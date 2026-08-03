@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -23,6 +24,7 @@ from app.models.base import (
 from app.models.client import Client as ClientModel
 from app.models.compliance import ComplianceItem, ComplianceType
 from app.models.task import Task
+from app.services import compliance_generator
 from app.services.applicability import applies_to
 from app.services.compliance_generator import (
     applicable_types,
@@ -709,6 +711,136 @@ class TestTheEdgesOfTheGenerationWindow:
         ]
         assert zeroed, "expected the zero-rated GSTR-3B in this window"
         assert all(item.fee_paise == 0 for item in zeroed)
+
+
+class TestAGenerationWindowNobodyMeantToAskFor:
+    """Two silences on the one endpoint that takes a window from a caller.
+
+    ``POST /clients/{id}/compliance-items`` is where a practitioner backfills a
+    calendar, and it accepted any pair of dates at all.
+
+    Backwards, it created nothing and reported success — ``created: 0``, which
+    is exactly what a client whose calendar is already complete returns. The
+    practitioner reads "already done" and the filings they came for are still
+    missing. Every other date-window endpoint answers a reversed pair with a
+    422 naming both dates.
+
+    Too wide, it is the expensive direction: the row count is periods ×
+    applicable types, five of the seeded types are monthly, and a mistyped
+    year — the digit that gets mistyped in a date field — turns one request
+    into tens of thousands of filings. Each one lands on the calendar, is
+    counted on the dashboard, goes overdue on its own due date, raises a task
+    and queues mail to the client about a period decades away. There is no
+    delete for a filing to undo it with.
+    """
+
+    @pytest.fixture
+    def a_client(self, client: TestClient, auth_headers: dict) -> str:
+        response = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["client"]["id"]
+
+    def _generate(self, client, auth_headers, client_id, **window):
+        return client.post(
+            f"{API}/clients/{client_id}/compliance-items",
+            headers=auth_headers,
+            json=window,
+        )
+
+    def test_a_backwards_window_is_refused_rather_than_reported_as_done(
+        self, client: TestClient, auth_headers: dict, a_client: str
+    ):
+        response = self._generate(
+            client,
+            auth_headers,
+            a_client,
+            window_start="2026-12-31",
+            window_end="2026-01-01",
+        )
+        assert response.status_code == 422, response.text
+        detail = response.json()["detail"]
+        assert "31 Dec 2026" in detail and "01 Jan 2026" in detail
+
+    def test_a_window_wider_than_the_cap_is_refused(
+        self, client: TestClient, auth_headers: dict, a_client: str, db: Session
+    ):
+        before = db.scalar(select(func.count(ComplianceItem.id)))
+
+        response = self._generate(
+            client,
+            auth_headers,
+            a_client,
+            window_start="1990-01-01",
+            window_end="2190-01-01",
+        )
+
+        assert response.status_code == 422, response.text
+        assert "5 years" in response.json()["detail"]
+        assert db.scalar(select(func.count(ComplianceItem.id))) == before
+
+    def test_a_half_given_window_is_measured_against_the_default_other_half(
+        self, client: TestClient, auth_headers: dict, a_client: str
+    ):
+        """Naming only the start still names a span — the end fills in from
+        the firm's forward default, and a start in 1990 is just as wide."""
+        response = self._generate(
+            client, auth_headers, a_client, window_start="1990-01-01"
+        )
+        assert response.status_code == 422, response.text
+
+    def test_a_backfill_inside_the_cap_still_works(
+        self, client: TestClient, auth_headers: dict, a_client: str
+    ):
+        """The case the cap must not break: picking up a client whose returns
+        the firm is taking over partway through."""
+        start = clock.today() - timedelta(days=730)
+        response = self._generate(
+            client,
+            auth_headers,
+            a_client,
+            window_start=start.isoformat(),
+            window_end=clock.today().isoformat(),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["created"] > 0
+
+    def test_a_window_exactly_at_the_cap_is_allowed(
+        self, db: Session, registered_firm: dict
+    ):
+        """The boundary is inclusive, so the documented five years is five
+        years rather than a day less."""
+        start = date(2026, 1, 1)
+        compliance_generator.check_window(
+            start, add_months(start, compliance_generator.MAX_GENERATION_WINDOW_MONTHS)
+        )
+        with pytest.raises(compliance_generator.InvalidWindow):
+            compliance_generator.check_window(
+                start,
+                add_months(start, compliance_generator.MAX_GENERATION_WINDOW_MONTHS)
+                + timedelta(days=1),
+            )
+
+    def test_the_default_window_is_never_second_guessed(
+        self, db: Session, registered_firm: dict
+    ):
+        """Only a window a caller named is checked. The default is ours and is
+        already bounded — and a client onboarded with a future date produces a
+        backwards default, which has always quietly generated nothing and is
+        not this endpoint's business to start refusing client creation over.
+        """
+        model_client = make_model_client(
+            firm_id=uuid.UUID(registered_firm["firm"]["id"]),
+            gst_registered=True,
+            onboarded_on=date(2099, 1, 1),
+        )
+        db.add(model_client)
+        db.flush()
+
+        result = generate_compliance_items(db, model_client, today=date(2026, 7, 1))
+
+        assert result.created == []
 
 
 class TestAFirmsOwnComplianceTypes:
