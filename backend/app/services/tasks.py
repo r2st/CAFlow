@@ -11,9 +11,9 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core import clock
@@ -354,10 +354,50 @@ class WorkloadRow:
     by_status: dict[str, int] = field(default_factory=dict)
 
 
+def _tally(count) -> int:
+    """A ``SUM(CASE …)`` that answers 0 rather than NULL for an empty group."""
+    return func.coalesce(func.sum(count), 0)
+
+
+def _month_start_instant(month_start: date) -> datetime:
+    """Midnight IST on the first of the month, as the instant to compare against.
+
+    ``completed_at`` is a UTC instant and the month boundary is an Indian date,
+    so the two only line up once one is expressed in the other's terms. Read in
+    Python this was ``clock.date_of(completed_at) >= month_start``; the same
+    question asked of the database is ``completed_at >= this``, because an
+    instant falls on or after an Indian date exactly when it is at or after
+    midnight IST on it. Everything finished between midnight and 05:30 IST on
+    the 1st belongs to the month that has just begun, and UTC still calls it
+    the old one.
+    """
+    return datetime.combine(month_start, time.min, tzinfo=clock.IST).astimezone(UTC)
+
+
 def workload(
     db: Session, firm_id: uuid.UUID, *, today: date | None = None
 ) -> list[WorkloadRow]:
-    """Per-practitioner load, including an "Unassigned" row when work is loose."""
+    """Per-practitioner load, including an "Unassigned" row when work is loose.
+
+    Counted by the database rather than by loading the firm's tasks and
+    tallying them here, for the reason the dashboard was: every figure on this
+    screen is an aggregate, and what used to happen on each visit was that
+    every task the firm has ever had was read off disk and hydrated into a
+    mapped object, to be reduced to eight integers per team member.
+
+    That set only grows, and it grows faster than the calendar it comes from.
+    A task is raised for each filing inside the planning horizon and then kept
+    for good — done and cancelled tasks are the record of what was done, and
+    nothing deletes them — so a practice a few years in is materialising the
+    whole history of its work to answer "who is drowning this week". The
+    workload view is what a manager opens to redistribute a deadline, which
+    means it is opened most on exactly the mornings the database is busiest.
+
+    Grouped by (assignee, status) because both halves of the split are read off
+    the status: the closed statuses contribute only ``completed_this_month``,
+    and the open ones contribute everything else. Only the two date comparisons
+    need a ``CASE``, and both are the ones already being made in Python.
+    """
     today = today or clock.today()
     week_end = today + timedelta(days=7)
     month_start = date(today.year, today.month, 1)
@@ -377,38 +417,54 @@ def workload(
     }
     rows[None] = WorkloadRow(practitioner_id=None, practitioner_name="Unassigned")
 
-    tasks = db.scalars(select(Task).where(Task.firm_id == firm_id)).all()
-    for task in tasks:
-        row = rows.get(task.assignee_id)
-        if row is None:  # assignee left the firm / was deactivated
-            row = rows[None]
+    # ``case`` rather than an aggregate FILTER clause, for the reason the
+    # dashboard gives: FILTER wants SQLite 3.30 and this has to render the same
+    # on both backends the suite and the deploy use. A NULL date fails the
+    # comparison and falls to the ``else_``, which is what the Python did.
+    grouped = db.execute(
+        select(
+            Task.assignee_id,
+            Task.status,
+            func.count(Task.id),
+            _tally(func.coalesce(Task.estimated_minutes, 0)),
+            _tally(case((Task.due_date < today, 1), else_=0)),
+            _tally(
+                case(
+                    ((Task.due_date >= today) & (Task.due_date <= week_end), 1),
+                    else_=0,
+                )
+            ),
+            _tally(
+                case(
+                    (Task.completed_at >= _month_start_instant(month_start), 1),
+                    else_=0,
+                )
+            ),
+        )
+        .where(Task.firm_id == firm_id)
+        .group_by(Task.assignee_id, Task.status)
+    ).all()
 
-        row.by_status[task.status.value] = row.by_status.get(task.status.value, 0) + 1
+    for assignee_id, status, count, minutes, overdue, this_week, finished in grouped:
+        # An assignee who has left the firm — or was switched off — is not in
+        # the map, and their work belongs in the unassigned pile, which is
+        # where a manager looks for work needing an owner.
+        row = rows.get(assignee_id) or rows[None]
+        row.by_status[status.value] = row.by_status.get(status.value, 0) + count
 
-        if task.status in CLOSED_TASK_STATUSES:
-            # ``completed_at`` is a UTC instant and ``month_start`` an Indian
-            # date, so the two only line up once the instant is read in IST.
-            # Everything finished between midnight and 05:30 IST on the 1st
-            # belonged to the month that had just ended.
-            if (
-                task.status == TaskStatus.DONE
-                and task.completed_at is not None
-                and clock.date_of(task.completed_at) >= month_start
-            ):
-                row.completed_this_month += 1
+        if status in CLOSED_TASK_STATUSES:
+            if status == TaskStatus.DONE:
+                row.completed_this_month += finished
             continue
 
-        row.open_tasks += 1
-        row.estimated_minutes += task.estimated_minutes or 0
-        if task.status == TaskStatus.IN_PROGRESS:
-            row.in_progress += 1
-        if task.status == TaskStatus.BLOCKED:
-            row.blocked += 1
-        if task.due_date is not None:
-            if task.due_date < today:
-                row.overdue += 1
-            elif task.due_date <= week_end:
-                row.due_this_week += 1
+        row.open_tasks += count
+        row.estimated_minutes += minutes
+        if status == TaskStatus.IN_PROGRESS:
+            row.in_progress += count
+        if status == TaskStatus.BLOCKED:
+            row.blocked += count
+        row.overdue += overdue
+        row.due_this_week += this_week
 
     ordered = [rows[p.id] for p in practitioners]
     unassigned = rows[None]

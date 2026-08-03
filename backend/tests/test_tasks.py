@@ -1485,3 +1485,234 @@ class TestASelectionThatNamesOneTaskTwice:
         )
 
         assert response.json() == {"updated": 1, "skipped": 1}
+
+
+class TestCountingTheWorkloadInTheDatabase:
+    """Every figure on the workload screen is an aggregate, and it used to be
+    computed by reading every task the firm has ever had into memory.
+
+    That set only grows, and faster than the calendar it comes from: a task is
+    raised for each filing inside the planning horizon and then kept for good,
+    because done and cancelled tasks are the record of what was done. A
+    practice a few years in was materialising the whole history of its work to
+    answer "who is drowning this week" — on the screen a manager opens to
+    redistribute a deadline, which is to say on exactly the mornings the
+    database is busiest.
+
+    The counters have not moved; only where they are computed has, so the
+    tests below are as much about the answers being unchanged as about the
+    reading being gone.
+    """
+
+    @staticmethod
+    def _rows(client, auth_headers) -> dict:
+        response = client.get("/api/v1/tasks/workload", headers=auth_headers)
+        assert response.status_code == 200, response.text
+        return {row["practitioner_name"]: row for row in response.json()["rows"]}
+
+    def test_the_tasks_are_counted_rather_than_read(
+        self, client, auth_headers, client_id
+    ):
+        """The point of the change, asserted directly. Anything this endpoint
+        asks of ``tasks`` must come back as an aggregate; a statement selecting
+        the rows themselves is one whose cost grows with the firm's whole
+        history of work."""
+        from sqlalchemy import event
+
+        from app.database import engine
+
+        client.post(
+            "/api/v1/tasks/generate", json={"horizon_days": 365}, headers=auth_headers
+        )
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()).lower())
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            self._rows(client, auth_headers)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        touched = [sql for sql in statements if " tasks" in sql or "from tasks" in sql]
+        assert touched, "the workload view never looked at the tasks"
+        unaggregated = [
+            sql for sql in touched if "count(" not in sql and "sum(" not in sql
+        ]
+        assert not unaggregated, f"rows read instead of counted: {unaggregated}"
+
+    def test_open_and_closed_work_land_in_the_right_columns(
+        self, client, auth_headers, registered_firm
+    ):
+        owner_id = registered_firm["practitioner"]["id"]
+        today = clock.today()
+        for status, due in (
+            ("todo", today - timedelta(days=3)),
+            ("in_progress", today + timedelta(days=2)),
+            ("blocked", today + timedelta(days=30)),
+            ("review", None),
+        ):
+            created = create_task(
+                client,
+                auth_headers,
+                assignee_id=owner_id,
+                due_date=due.isoformat() if due else None,
+                estimated_minutes=10,
+            ).json()
+            client.patch(
+                f"/api/v1/tasks/{created['id']}",
+                json={"status": status},
+                headers=auth_headers,
+            )
+        done = create_task(client, auth_headers, assignee_id=owner_id).json()
+        client.patch(
+            f"/api/v1/tasks/{done['id']}", json={"status": "done"}, headers=auth_headers
+        )
+        cancelled = create_task(client, auth_headers, assignee_id=owner_id).json()
+        client.patch(
+            f"/api/v1/tasks/{cancelled['id']}",
+            json={"status": "cancelled"},
+            headers=auth_headers,
+        )
+
+        row = self._rows(client, auth_headers)["Anita Sharma"]
+
+        assert row["open_tasks"] == 4
+        assert row["overdue"] == 1
+        assert row["due_this_week"] == 1
+        assert row["in_progress"] == 1
+        assert row["blocked"] == 1
+        assert row["completed_this_month"] == 1
+        # Estimated effort is open work only — a finished task is not load.
+        assert row["estimated_minutes"] == 40
+        assert row["by_status"] == {
+            "todo": 1,
+            "in_progress": 1,
+            "blocked": 1,
+            "review": 1,
+            "done": 1,
+            "cancelled": 1,
+        }
+
+    def test_a_cancelled_task_is_not_counted_as_completed(
+        self, client, auth_headers, registered_firm
+    ):
+        """Both are closed, but only one is work that was done."""
+        owner_id = registered_firm["practitioner"]["id"]
+        task = create_task(client, auth_headers, assignee_id=owner_id).json()
+        client.patch(
+            f"/api/v1/tasks/{task['id']}",
+            json={"status": "cancelled"},
+            headers=auth_headers,
+        )
+
+        row = self._rows(client, auth_headers)["Anita Sharma"]
+
+        assert row["completed_this_month"] == 0
+        assert row["open_tasks"] == 0
+        assert row["by_status"] == {"cancelled": 1}
+
+    def test_a_task_due_today_is_this_week_rather_than_overdue(
+        self, client, auth_headers, registered_firm
+    ):
+        """The boundary the two date comparisons share."""
+        owner_id = registered_firm["practitioner"]["id"]
+        create_task(
+            client,
+            auth_headers,
+            assignee_id=owner_id,
+            due_date=clock.today().isoformat(),
+        )
+
+        row = self._rows(client, auth_headers)["Anita Sharma"]
+
+        assert row["overdue"] == 0
+        assert row["due_this_week"] == 1
+
+    def test_work_finished_last_month_is_not_counted_as_this_month(
+        self, client, auth_headers, registered_firm, db
+    ):
+        """``completed_at`` is a UTC instant and the month boundary an Indian
+        date, so the comparison the database makes has to be against midnight
+        IST on the first — not midnight UTC, which is 05:30 IST on the same
+        day and would swallow the small hours of the 1st."""
+        from datetime import datetime, time
+
+        owner_id = registered_firm["practitioner"]["id"]
+        task = create_task(client, auth_headers, assignee_id=owner_id).json()
+        client.patch(
+            f"/api/v1/tasks/{task['id']}", json={"status": "done"}, headers=auth_headers
+        )
+        month_start = clock.today().replace(day=1)
+        row = db.get(Task, uuid.UUID(task["id"]))
+        # 23:00 IST on the last day of the previous month — which is still the
+        # previous month in UTC too, so both readings agree it does not count.
+        row.completed_at = datetime.combine(
+            month_start - timedelta(days=1), time(hour=23), tzinfo=clock.IST
+        ).astimezone(clock.UTC)
+        db.commit()
+
+        assert self._rows(client, auth_headers)["Anita Sharma"]["completed_this_month"] == 0
+
+        # 00:30 IST on the 1st is 19:00 UTC on the last day of the old month:
+        # the reading that has to win is the Indian one.
+        row.completed_at = datetime.combine(
+            month_start, time(minute=30), tzinfo=clock.IST
+        ).astimezone(clock.UTC)
+        db.commit()
+
+        assert self._rows(client, auth_headers)["Anita Sharma"]["completed_this_month"] == 1
+
+    def test_work_left_by_a_departed_member_shows_as_unassigned(
+        self, client, auth_headers, junior, db
+    ):
+        """A task whose assignee is no longer an active member of the firm
+        belongs in the unassigned pile, which is where a manager looks for work
+        needing an owner. Deactivation hands the open work back on its own, so
+        this is the harder case: a row still naming them."""
+        task = create_task(client, auth_headers, assignee_id=junior["id"]).json()
+        client.patch(
+            f"/api/v1/auth/practitioners/{junior['id']}",
+            json={"is_active": False},
+            headers=auth_headers,
+        )
+        # Put the name back on, which is the state release cannot reach.
+        db.get(Task, uuid.UUID(task["id"])).assignee_id = uuid.UUID(junior["id"])
+        db.commit()
+
+        rows = self._rows(client, auth_headers)
+
+        assert "Junior Jain" not in rows
+        assert rows["Unassigned"]["open_tasks"] == 1
+
+    def test_another_firms_tasks_are_not_counted(self, client, auth_headers):
+        """The aggregate runs in SQL now, so the tenancy predicate is the only
+        thing keeping one firm's numbers out of another's."""
+        from tests.conftest import FIRM_REGISTRATION
+
+        create_task(client, auth_headers)
+        mine = self._rows(client, auth_headers)
+
+        neighbour = client.post(
+            "/api/v1/auth/register",
+            json={
+                **FIRM_REGISTRATION,
+                "firm_name": "Neighbouring Associates",
+                "firm_email": "hello@neighbour.in",
+                "owner_email": "owner@neighbour.in",
+            },
+        )
+        assert neighbour.status_code == 201, neighbour.text
+        their_headers = {"Authorization": f"Bearer {neighbour.json()['access_token']}"}
+        create_task(client, their_headers, title="Their work")
+
+        assert self._rows(client, auth_headers) == mine
+
+    def test_a_firm_with_no_tasks_reports_its_team_and_no_unassigned_row(
+        self, client, auth_headers, junior
+    ):
+        rows = self._rows(client, auth_headers)
+
+        assert set(rows) == {"Anita Sharma", "Junior Jain"}
+        assert all(row["open_tasks"] == 0 for row in rows.values())
