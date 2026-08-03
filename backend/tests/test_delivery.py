@@ -377,3 +377,177 @@ class TestDispatcherDelivery:
         reminder = db.scalars(select(Reminder)).one()
         assert reminder.status is ReminderStatus.SENT
         assert reminder.error_message is None
+
+
+class TestAHeaderIsOneLine:
+    """A subject or a display name that arrived with a line break in it.
+
+    Inbound sanitising keeps newlines on purpose — a note and an address are
+    genuinely multiline — so one reaches here whenever a practitioner pastes a
+    subject out of their mail client, or a firm's own name was entered across
+    two lines. The standard library refuses to encode a header containing one,
+    correctly, and raised a bare ``ValueError`` well outside the two exceptions
+    the dispatcher knows how to answer.
+
+    What that cost: the dispatcher reads an unexpected exception as "we do not
+    know whether that went out", rolls back and re-raises, so the run stops.
+    The offending reminder is still ``SCHEDULED`` holding the oldest time, so
+    it is the first row the next run claims, and the one after that. One
+    pasted line break stopped every reminder for every firm on the deployment,
+    for good, and left nothing behind saying why.
+    """
+
+    def test_a_pasted_subject_still_goes_out(self, smtp):
+        mailer.send(
+            to="accounts@nimbus.in",
+            subject="Your GSTR-3B for June\nis due on the 20th",
+            body="Please send the bank statement.",
+        )
+
+        message = smtp.instances[0].messages[0]
+        assert message["Subject"] == "Your GSTR-3B for June is due on the 20th"
+
+    @pytest.mark.parametrize("break_char", ["\n", "\r\n", "\r", "\t", "\x0b", " "])
+    def test_every_way_a_line_can_break(self, break_char, smtp):
+        mailer.send(to="accounts@nimbus.in", subject=f"One{break_char}Two", body="b")
+
+        assert smtp.instances[0].messages[0]["Subject"] == "One Two"
+
+    def test_a_firm_name_entered_across_two_lines_still_signs_the_mail(self, smtp):
+        mailer.send(
+            to="accounts@nimbus.in",
+            subject="Hi",
+            body="There",
+            from_name="Sharma & Associates\nChartered Accountants",
+        )
+
+        assert (
+            "Sharma & Associates Chartered Accountants"
+            in smtp.instances[0].messages[0]["From"]
+        )
+
+    def test_a_reply_to_is_held_to_the_same_rule(self, smtp):
+        mailer.send(
+            to="accounts@nimbus.in", subject="Hi", body="There", reply_to="office@sharma.in\n"
+        )
+
+        assert smtp.instances[0].messages[0]["Reply-To"] == "office@sharma.in"
+
+    def test_the_body_keeps_its_line_breaks(self, smtp):
+        """It is content, not a header. A reminder that reads as one paragraph
+        instead of five would be the worse bug."""
+        mailer.send(
+            to="accounts@nimbus.in",
+            subject="Hi",
+            body="Dear Nimbus,\n\nPlease send:\n- bank statement\n- sales register",
+        )
+
+        assert "\n- bank statement" in smtp.instances[0].messages[0].get_content()
+
+    @pytest.mark.parametrize(
+        "address", ["a@b.in\nBcc: someone.else", "a\n@b.in", "a@b .in", "a@b\r.in"]
+    )
+    def test_a_broken_line_in_an_address_is_refused_not_folded(self, address, smtp):
+        """Not the same mistake. An address with a line break in the middle is
+        not one a firm mistyped, it is someone writing a second header."""
+        with pytest.raises(mailer.DeliveryError) as exc:
+            mailer.send(to=address, subject="Hi", body="There")
+
+        assert exc.value.permanent is True
+        assert not smtp.instances
+
+    def test_a_message_that_cannot_be_assembled_fails_permanently(self, monkeypatch, smtp):
+        """The backstop, for whatever the folding above does not reach.
+
+        Reported as a delivery failure because that is what it is: the message
+        certainly did not go out, and nothing about a later attempt would
+        assemble it either.
+        """
+        monkeypatch.setattr(
+            mailer,
+            "build_message",
+            lambda **kwargs: (_ for _ in ()).throw(ValueError("nope")),
+        )
+
+        with pytest.raises(mailer.DeliveryError) as exc:
+            mailer.send(to="accounts@nimbus.in", subject="Hi", body="There")
+
+        assert exc.value.permanent is True
+        assert "could not be assembled" in str(exc.value)
+
+
+class TestOneBadMessageDoesNotStopTheQueue:
+    """The consequence the fix above exists for, checked where it bit."""
+
+    def _due(self, db, firm, client, minutes, **kwargs):
+        return make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(minutes=minutes),
+            **kwargs,
+        )
+
+    def test_a_pasted_subject_no_longer_holds_up_the_batch(self, db, smtp):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        self._due(db, firm, client, 120, subject="Due\non the 20th", body="One")
+        self._due(db, firm, client, 60, subject="Ordinary", body="Two")
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task() == {
+            "sent": 2,
+            "failed": 0,
+            "retrying": 0,
+            "withdrawn": 0,
+        }
+        # One connection per send, so count across them.
+        assert sum(len(i.messages) for i in smtp.instances) == 2
+
+    def test_an_unsendable_message_fails_alone(self, db, smtp, monkeypatch):
+        """Failed, not left scheduled: the run has to be able to move past it.
+
+        Left scheduled it is claimed first again next run — it holds the oldest
+        time — and the queue behind it never moves.
+        """
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        doomed = self._due(db, firm, client, 120, subject="Hi", body="One")
+        healthy = self._due(db, firm, client, 60, subject="Ordinary", body="Two")
+        db.commit()
+
+        real_build = mailer.build_message
+
+        def refuse_one(**kwargs):
+            if kwargs.get("body") == "One":
+                raise ValueError("cannot be assembled")
+            return real_build(**kwargs)
+
+        monkeypatch.setattr(mailer, "build_message", refuse_one)
+
+        assert tasks.dispatch_due_reminders_task() == {
+            "sent": 1,
+            "failed": 1,
+            "retrying": 0,
+            "withdrawn": 0,
+        }
+
+        db.expire_all()
+        assert db.get(Reminder, doomed.id).status is ReminderStatus.FAILED
+        assert db.get(Reminder, healthy.id).status is ReminderStatus.SENT
+
+    def test_the_reason_is_left_on_the_row(self, db, smtp, monkeypatch):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        reminder = self._due(db, firm, client, 60, subject="Hi", body="One")
+        db.commit()
+        monkeypatch.setattr(
+            mailer,
+            "build_message",
+            lambda **kwargs: (_ for _ in ()).throw(ValueError("a bad header")),
+        )
+
+        tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        assert "a bad header" in db.get(Reminder, reminder.id).error_message

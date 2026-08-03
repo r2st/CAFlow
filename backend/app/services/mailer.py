@@ -13,6 +13,7 @@ which transport ran.
 from __future__ import annotations
 
 import logging
+import re
 import smtplib
 from dataclasses import dataclass
 from email.headerregistry import Address
@@ -42,11 +43,41 @@ def is_configured() -> bool:
 
 
 def _looks_like_an_address(value: str) -> bool:
-    """Cheap sanity check — the SMTP server is the real authority."""
+    """Cheap sanity check — the SMTP server is the real authority.
+
+    Internal whitespace is refused outright rather than folded the way a
+    subject is: an address with a line break in the middle of it is not an
+    address a firm mistyped, it is someone writing a second header.
+    """
+    if any(char.isspace() for char in value):
+        return False
     if value.count("@") != 1:
         return False
     local, _, domain = value.partition("@")
     return bool(local) and "." in domain and not domain.startswith(".")
+
+
+# The line-breaking whitespace a header cannot carry. Tab is in here too: it is
+# legal inside a folded header but arrives from the same paste, and a subject
+# line is not the place to preserve indentation.
+_HEADER_BREAKS = re.compile(r"[\r\n\t\v\f\x1c-\x1f  ]+")
+
+
+def header_safe(value: str) -> str:
+    """``value`` as something that can be one header line.
+
+    A header *is* one line, so a line break in a subject or a display name has
+    no meaning to express — and the standard library refuses to encode one
+    rather than silently truncating, which is right of it. Inbound sanitising
+    keeps newlines on purpose (a note or an address is genuinely multiline), so
+    they reach here whenever a practitioner pastes a subject out of their mail
+    client and whenever a firm's own name was entered across two lines.
+
+    Folded to a space rather than refused. The alternative is to fail the
+    message permanently, which costs the client the reminder and the firm a
+    row nobody looks at, over a line break the sender did not know was there.
+    """
+    return _HEADER_BREAKS.sub(" ", value).strip()
 
 
 def build_message(
@@ -57,15 +88,20 @@ def build_message(
     reply_to: str | None = None,
     from_name: str | None = None,
 ) -> EmailMessage:
-    """A plain-text message. ``reply_to`` is the firm, so replies reach the CA."""
+    """A plain-text message. ``reply_to`` is the firm, so replies reach the CA.
+
+    Every header value goes through :func:`header_safe` first; the body does
+    not, because it is content rather than a header and a reminder that reads
+    as one paragraph instead of five would be the worse bug.
+    """
     message = EmailMessage()
-    display_name = from_name or settings.email_from_name
+    display_name = header_safe(from_name or settings.email_from_name)
     local, _, domain = settings.email_from_address.partition("@")
     message["From"] = str(Address(display_name, local, domain))
     message["To"] = to
-    message["Subject"] = subject
+    message["Subject"] = header_safe(subject)
     if reply_to:
-        message["Reply-To"] = reply_to
+        message["Reply-To"] = header_safe(reply_to)
     message.set_content(body)
     return message
 
@@ -85,13 +121,29 @@ def send(
     if not _looks_like_an_address(recipient):
         raise DeliveryError(f"{recipient!r} is not a usable email address", permanent=True)
 
-    message = build_message(
-        to=recipient,
-        subject=subject,
-        body=body,
-        reply_to=reply_to,
-        from_name=from_name,
-    )
+    # A message that cannot be assembled is a message that certainly did not
+    # go out, which is a delivery failure and a permanent one — nothing about
+    # a later attempt would assemble it either.
+    #
+    # It has to be *reported* as one. The dispatcher treats an unexpected
+    # exception as "we do not know whether that went out", rolls back and
+    # re-raises, which stops the run — and the offending reminder is still
+    # SCHEDULED with the oldest time, so it is the first row the next run
+    # claims, and the one after that. A single subject with a line break in it
+    # therefore stopped every reminder for every firm on the deployment, for
+    # good, and left nothing behind saying why. ``header_safe`` above is what
+    # keeps the ordinary version of that from arising at all; this is the
+    # backstop for the rest.
+    try:
+        message = build_message(
+            to=recipient,
+            subject=subject,
+            body=body,
+            reply_to=reply_to,
+            from_name=from_name,
+        )
+    except ValueError as exc:
+        raise DeliveryError(f"This message could not be assembled: {exc}", permanent=True) from exc
 
     if not is_configured():
         logger.info(
