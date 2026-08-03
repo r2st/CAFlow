@@ -223,17 +223,42 @@ def create_task(payload: TaskCreate, practitioner: CurrentPractitioner, db: DbSe
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="Client not found"
             )
+    fields = payload.model_dump(exclude={"status"})
     if payload.compliance_item_id is not None:
         item = db.get(ComplianceItem, payload.compliance_item_id)
         if item is None or item.firm_id != practitioner.firm_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="Compliance item not found"
             )
+        # A task names a client and, optionally, the filing it is the job of
+        # discharging — and the two were checked against the firm but never
+        # against each other. A compliance item is addressable by id alone, so
+        # a stale id from the wrong screen put one client's return onto another
+        # client's task, which is not merely untidy:
+        #
+        # * the board renders the client name from ``client_id`` and the period
+        #   from the filing, so the row reads as one client's work while being
+        #   another's — and whoever picks it up files against the wrong client;
+        # * withdrawal follows the *filing*, so off-boarding the named client
+        #   leaves this task standing on the queue while surrendering the other
+        #   client's registration cancels it out from under them, in both cases
+        #   for reasons nothing on the task explains.
+        #
+        # Generation always takes the client from the filing, so a task created
+        # by hand that names only the filing does the same rather than landing
+        # clientless on the board.
+        if payload.client_id is None:
+            fields["client_id"] = item.client_id
+        elif item.client_id != payload.client_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="That filing belongs to a different client",
+            )
 
     task = Task(
         firm_id=practitioner.firm_id,
         created_by_id=practitioner.id,
-        **payload.model_dump(exclude={"status"}),
+        **fields,
     )
     _apply_status(task, payload.status)
     db.add(task)

@@ -1062,3 +1062,159 @@ class TestOneRunAtATime:
         assert set(held) == set(
             db.scalars(select(Firm.id).where(Firm.is_active.is_(True))).all()
         )
+
+
+class TestATaskThatNamesTwoClientsAtOnce:
+    """A task names a client and, optionally, the filing it discharges.
+
+    Both were checked against the firm; neither was checked against the other.
+    A compliance item is addressable by id alone, so a stale id from the wrong
+    screen put one client's return onto another client's task — the everyday
+    version of the mistake, and the one a reminder is already refused for.
+
+    It does not stay cosmetic. The board renders the client name from
+    ``client_id`` and the period from the filing, so the row reads as one
+    client's work while being another's, and whoever picks it up files against
+    the wrong client. Withdrawal follows the *filing*, so off-boarding the
+    named client leaves the task standing while surrendering the other
+    client's registration cancels it out from under them — in both cases for
+    reasons nothing on the task explains.
+    """
+
+    @pytest.fixture
+    def other_client_id(self, client, auth_headers) -> str:
+        response = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(
+                name="Ravi Traders", pan="AAFCR7788K", gstin="27AAFCR7788K1Z9"
+            ),
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["client"]["id"]
+
+    def _their_filing(self, client, auth_headers, owner_id: str) -> dict:
+        body = client.get(
+            "/api/v1/compliance/calendar",
+            params={"client_id": owner_id, "limit": 1000},
+            headers=auth_headers,
+        ).json()
+        assert body["items"], "that client has no filings"
+        return body["items"][0]
+
+    def _a_future_gst_filing(self, client, auth_headers, owner_id: str) -> dict:
+        """One of their GST returns for a period that has not begun — the only
+        kind a surrender closes, since a registration dropped mid-month still
+        owes that month's return."""
+        today = clock.today().isoformat()
+        body = client.get(
+            "/api/v1/compliance/calendar",
+            params={"client_id": owner_id, "limit": 1000},
+            headers=auth_headers,
+        ).json()
+        item = next(
+            (
+                candidate
+                for candidate in body["items"]
+                if candidate["compliance_type_code"].startswith("GSTR")
+                and candidate["period_start"] > today
+            ),
+            None,
+        )
+        assert item is not None, "that client has no GST filing for a future period"
+        return item
+
+    def test_a_filing_belonging_to_another_client_is_refused(
+        self, client, auth_headers, client_id, other_client_id
+    ):
+        theirs = self._their_filing(client, auth_headers, other_client_id)
+
+        response = create_task(
+            client,
+            auth_headers,
+            client_id=client_id,
+            compliance_item_id=theirs["id"],
+        )
+
+        assert response.status_code == 400, response.text
+        assert "different client" in response.json()["detail"]
+
+    def test_nothing_is_created_when_the_pair_is_refused(
+        self, client, auth_headers, client_id, other_client_id, db, firm_id
+    ):
+        theirs = self._their_filing(client, auth_headers, other_client_id)
+        before = db.scalar(
+            select(func.count(Task.id)).where(Task.firm_id == uuid.UUID(firm_id))
+        )
+
+        create_task(
+            client, auth_headers, client_id=client_id, compliance_item_id=theirs["id"]
+        )
+
+        assert (
+            db.scalar(select(func.count(Task.id)).where(Task.firm_id == uuid.UUID(firm_id)))
+            == before
+        )
+
+    def test_the_filing_supplies_the_client_when_none_is_named(
+        self, client, auth_headers, client_id
+    ):
+        """Generation always takes the client from the filing, so a task
+        created by hand against one does the same rather than landing
+        clientless on the board."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+
+        response = create_task(
+            client, auth_headers, compliance_item_id=item["id"]
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["client_id"] == client_id
+        assert response.json()["client_name"] == "Nimbus Textiles Pvt Ltd"
+
+    def test_the_matching_pair_is_still_accepted(self, client, auth_headers, client_id):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+
+        response = create_task(
+            client, auth_headers, client_id=client_id, compliance_item_id=item["id"]
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["compliance_item_id"] == item["id"]
+        assert response.json()["period_label"] == item["period_label"]
+
+    def test_withdrawal_no_longer_reaches_past_the_named_client(
+        self, client, auth_headers, client_id, other_client_id, db, firm_id
+    ):
+        """What the mismatch cost, from the other end: closing one client's
+        obligations cancelled work booked against a different client.
+
+        The task said Nimbus; the filing behind it was Ravi's. Ravi surrenders
+        GST, their filings close, and the withdrawal follows the filing — so a
+        task on Nimbus's board vanished for a reason nothing on it explains.
+        With the pair refused there is no such task to reach.
+        """
+        theirs = self._a_future_gst_filing(client, auth_headers, other_client_id)
+        create_task(
+            client,
+            auth_headers,
+            client_id=client_id,
+            compliance_item_id=theirs["id"],
+            title="Reconcile the GST ledger for Nimbus",
+        )
+
+        client.patch(
+            f"/api/v1/clients/{other_client_id}",
+            json={"gst_registered": False},
+            headers=auth_headers,
+        )
+
+        db.expire_all()
+        cancelled = db.scalars(
+            select(Task).where(
+                Task.firm_id == uuid.UUID(firm_id),
+                Task.client_id == uuid.UUID(client_id),
+                Task.status == TaskStatus.CANCELLED,
+            )
+        ).all()
+        assert not cancelled, "a surrender reached past the client the task named"
