@@ -151,6 +151,33 @@ def generate_compliance_items(
 
     A window the caller named is checked before anything is built; see
     :func:`check_window`.
+
+    The firm's row is held before the already-generated set is read, because
+    this is the same read-decide-write the plan limits, the invoice numbering
+    and all three reminder sweeps had to be ordered for: read which (type,
+    period) pairs the client already has, decide these are missing, insert one
+    row each.
+
+    Nothing ordered it, on the reasoning that the database refuses the
+    duplicate — ``uq_compliance_item_period`` covers (client, type, period).
+    It does refuse it, and that is the whole problem: the refusal arrives as an
+    ``IntegrityError``, not as a row quietly skipped. What the two callers get
+    is not one winner and one no-op:
+
+    * through the API it is a 409 saying the change "conflicts with an existing
+      record" — which is what a duplicate PAN says — on a request that asked
+      for a calendar top-up and was right to. *Generate from filings*, taking a
+      client back on, and saving a registration change all reach it, and the
+      02:00 sweep is running against every one of them;
+    * in the sweep itself it is worse, because that task walks every firm on
+      the deployment inside a single transaction. One collision on one client
+      of one firm rolls back the filings materialised for every firm before it,
+      and Celery then redelivers the task to collide again.
+
+    Held per firm and taken before the read, so two generations of the same
+    firm queue behind each other and the second one's lookup sees what the
+    first one wrote. ``create_client`` and a reactivating patch already hold it
+    via ``claim_client_slot``; taking it again inside one transaction is free.
     """
     today = today or clock.today()
     default_start, default_end = default_window(client, today)
@@ -159,6 +186,7 @@ def generate_compliance_items(
     if window_start is not None or window_end is not None:
         check_window(start, end)
 
+    firms.lock_firm(db, client.firm_id)
     existing = _existing_keys(db, client.id)
     created: list[ComplianceItem] = []
     skipped = 0

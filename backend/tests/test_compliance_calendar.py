@@ -2038,3 +2038,193 @@ class TestAnExplicitNullOnAFilingsRequiredFields:
         )
         assert response.status_code == 200, response.text
         assert response.json()["due_date"] == was_due.isoformat()
+
+
+class TestTwoGenerationsOfOneFirmAtOnce:
+    """Materialising a calendar is a read-decide-write, and nothing ordered it.
+
+    Read which (type, period) pairs the client already has, decide these are
+    missing, insert one row each. The reasoning was that the database refuses
+    the duplicate — ``uq_compliance_item_period`` covers (client, type, period)
+    — and it does. That is the problem: the refusal is an ``IntegrityError``,
+    not a row quietly skipped, so the loser of the race does not no-op. It
+    fails, and takes its whole transaction with it.
+
+    Four doors reach generation: creating a client, taking one back on, saving
+    a registration change, and the explicit top-up — against the 02:00 sweep
+    that walks every firm on the deployment inside one transaction.
+    """
+
+    def _stage_a_competing_run(self, monkeypatch, run) -> list:
+        """Run ``run`` on its own session at the instant this one takes the lock.
+
+        Which is where a real loser resumes: the winner has committed by then,
+        so everything after it is the ordinary code path deciding what is left.
+        """
+        from app.services import compliance_generator
+
+        fired: list = []
+        real = compliance_generator.firms.lock_firm
+
+        def winner_commits_first(session, firm_id):
+            if not fired:
+                fired.append(firm_id)
+                run()
+            return real(session, firm_id)
+
+        monkeypatch.setattr(
+            compliance_generator.firms, "lock_firm", winner_commits_first
+        )
+        return fired
+
+    def test_the_firm_is_held_before_the_generated_set_is_read(
+        self, client: TestClient, auth_headers: dict, db: Session, monkeypatch
+    ):
+        """A lock taken after the decision orders the writes and nothing else.
+
+        Driven through the explicit top-up, which is the one door that takes no
+        other lock on the way in — creating a client already holds the firm for
+        its plan-limit check, so it cannot show which lock this is about.
+        """
+        from app.services import compliance_generator
+
+        client_id = create_client_record(client, auth_headers)
+        order: list[str] = []
+        real_lock = compliance_generator.firms.lock_firm
+        real_read = compliance_generator._existing_keys
+        monkeypatch.setattr(
+            compliance_generator.firms,
+            "lock_firm",
+            lambda s, f: (order.append("lock"), real_lock(s, f))[1],
+        )
+        monkeypatch.setattr(
+            compliance_generator,
+            "_existing_keys",
+            lambda s, c: (order.append("read"), real_read(s, c))[1],
+        )
+
+        response = client.post(
+            f"{API}/clients/{client_id}/compliance-items", headers=auth_headers, json={}
+        )
+
+        assert response.status_code == 200, response.text
+        assert order == ["lock", "read"]
+
+    def test_a_top_up_that_lost_the_race_still_answers(
+        self, client: TestClient, auth_headers: dict, db: Session, monkeypatch
+    ):
+        """The explicit top-up, with a whole calendar generated underneath it.
+
+        Unordered this was a 409 saying the change "conflicts with an existing
+        record" — the wording of a duplicate PAN — on a request that asked for
+        a calendar top-up and was right to.
+        """
+        client_id = create_client_record(client, auth_headers)
+        before = len(items_for(db, client_id))
+
+        def competing_top_up():
+            client.post(
+                f"{API}/clients/{client_id}/compliance-items",
+                headers=auth_headers,
+                json={
+                    "window_start": (clock.today() - timedelta(days=400)).isoformat(),
+                    "window_end": (clock.today() + timedelta(days=400)).isoformat(),
+                },
+            )
+
+        fired = self._stage_a_competing_run(monkeypatch, competing_top_up)
+
+        response = client.post(
+            f"{API}/clients/{client_id}/compliance-items",
+            headers=auth_headers,
+            json={
+                "window_start": (clock.today() - timedelta(days=400)).isoformat(),
+                "window_end": (clock.today() + timedelta(days=400)).isoformat(),
+            },
+        )
+
+        assert fired, "the competing run never happened"
+        assert response.status_code == 200, response.text
+        # The loser creates nothing, because the winner already did — which is
+        # what "idempotent per (type, period)" was always meant to mean.
+        assert response.json()["created"] == 0
+        assert response.json()["skipped_existing"] > 0
+        db.expire_all()
+        after = items_for(db, client_id)
+        assert len(after) > before
+        keys = [(item.compliance_type_id, item.period_label) for item in after]
+        assert len(keys) == len(set(keys)), "the same filing was materialised twice"
+
+    def test_the_nightly_sweep_survives_a_top_up_running_against_it(
+        self, client: TestClient, auth_headers: dict, db: Session, monkeypatch
+    ):
+        """The sweep is the expensive loser: it holds every firm at once.
+
+        One collision on one client of one firm rolled back the filings
+        materialised for every firm ahead of it, and Celery then redelivered
+        the task to collide again.
+        """
+        from app.worker import tasks as worker_tasks
+
+        client_id = create_client_record(client, auth_headers)
+        db.expire_all()
+        before = len(items_for(db, client_id))
+
+        def competing_top_up():
+            response = client.post(
+                f"{API}/clients/{client_id}/compliance-items",
+                headers=auth_headers,
+                json={
+                    "window_start": (clock.today() - timedelta(days=400)).isoformat(),
+                    "window_end": (clock.today() + timedelta(days=400)).isoformat(),
+                },
+            )
+            assert response.status_code == 200, response.text
+
+        fired = self._stage_a_competing_run(monkeypatch, competing_top_up)
+
+        result = worker_tasks.generate_compliance_items_task()
+
+        assert fired, "the competing run never happened"
+        assert result["firms"] == 1
+        db.expire_all()
+        after = items_for(db, client_id)
+        # The top-up's rows are still there: the sweep did not roll them back.
+        assert len(after) > before
+        keys = [(item.compliance_type_id, item.period_label) for item in after]
+        assert len(keys) == len(set(keys)), "the same filing was materialised twice"
+
+    def test_the_sweep_walks_every_firm_and_holds_them_in_a_fixed_order(
+        self, client: TestClient, auth_headers: dict, db: Session, monkeypatch
+    ):
+        """Two unordered sweeps can each hold what the other wants next."""
+        from app.services import compliance_generator
+        from app.worker import tasks as worker_tasks
+
+        create_client_record(client, auth_headers)
+        for suffix in ("two", "three"):
+            registration = {
+                **FIRM_REGISTRATION,
+                "firm_name": f"Firm {suffix}",
+                "firm_email": f"office-{suffix}@example.in",
+                "owner_email": f"owner-{suffix}@example.in",
+                "pan": None,
+            }
+            other = client.post(f"{API}/auth/register", json=registration)
+            assert other.status_code == 201, other.text
+            headers = {"Authorization": f"Bearer {other.json()['access_token']}"}
+            create_client_record(client, headers, pan=None, gstin=None)
+
+        held: list = []
+        real = compliance_generator.firms.lock_firm
+        monkeypatch.setattr(
+            compliance_generator.firms,
+            "lock_firm",
+            lambda s, f: (held.append(f), real(s, f))[1],
+        )
+
+        result = worker_tasks.generate_compliance_items_task()
+
+        assert result["firms"] == 3
+        assert len(set(held)) == 3, "the sweep stopped covering every firm"
+        assert held == sorted(held), "an undefined lock order lets two sweeps cross"

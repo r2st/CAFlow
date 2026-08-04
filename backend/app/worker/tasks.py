@@ -52,10 +52,19 @@ __all__ = [
 
 @celery_app.task(name="caflow.generate_compliance_items")
 def generate_compliance_items_task() -> dict[str, int]:
-    """Extend every active firm's compliance items over the rolling window."""
+    """Extend every active firm's compliance items over the rolling window.
+
+    Ordered by id, because ``generate_compliance_items`` now holds each firm's
+    row and this sweep holds all of them at once — the transaction spans every
+    firm. Two runs walking an unordered list can each hold what the other wants
+    next; walking the same order means one queues behind the other instead.
+    It is the same ordering ``generate_tasks_task`` takes, for the same reason.
+    """
     with SessionLocal() as db:
         total = 0
-        firms = db.scalars(select(Firm).where(Firm.is_active.is_(True))).all()
+        firms = db.scalars(
+            select(Firm).where(Firm.is_active.is_(True)).order_by(Firm.id)
+        ).all()
         for firm in firms:
             total += regenerate_for_firm(db, firm.id)
         db.commit()

@@ -33,7 +33,11 @@ def cmd_create_db() -> None:
 def cmd_generate() -> None:
     with SessionLocal() as db:
         total = 0
-        for firm in db.scalars(select(Firm).where(Firm.is_active.is_(True))).all():
+        # Ordered for the reason the beat sweep is: generation holds each
+        # firm's row, and this walks every firm in one transaction.
+        for firm in db.scalars(
+            select(Firm).where(Firm.is_active.is_(True)).order_by(Firm.id)
+        ).all():
             total += regenerate_for_firm(db, firm.id)
         db.commit()
     print(f"Generated {total} compliance item(s).")
