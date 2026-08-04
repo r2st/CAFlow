@@ -44,6 +44,24 @@ def _get_invoice_or_404(
     it reads — see :func:`billing.load_for_update`. The tenancy check is the
     same either way, and comes after the lock: a row this firm cannot reach is
     one it was never told about, lock or no lock.
+
+    Every endpoint that *changes* an invoice passes it, because every one of
+    them is the same read-decide-write receipting is, decided off the status
+    or the amount paid rather than off a balance. Only receipting took it, and
+    the sessions here do not expire what they have loaded on commit — so the
+    other three read a copy that could predate anything a concurrent request
+    had already committed:
+
+    * cancelling reads ``amount_paid_paise`` to refuse withdrawing a bill the
+      client has settled. Against a stale zero it went through, and cancelling
+      releases the filings the invoice covered back into the billable pool —
+      so the client is invoiced a second time for work they have already paid
+      for, and the firm's own trail records the first invoice as withdrawn;
+    * editing reads the status to refuse touching an invoice that has gone
+      out. Against a stale ``draft`` the edit lands on a sent one — new lines,
+      new totals, a new due date on a document of record the client is holding
+      a copy of;
+    * sending reads the same status to refuse issuing one twice.
     """
     invoice = (
         billing.load_for_update(db, invoice_id)
@@ -439,7 +457,9 @@ def update_invoice(
     db: DbSession,
 ):
     """Edit a draft. Once sent, an invoice is a document of record."""
-    invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id)
+    # Held before the status is read, so "this one is still a draft" is not a
+    # conclusion drawn from a copy taken before someone else sent it.
+    invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id, for_update=True)
     if invoice.status != InvoiceStatus.DRAFT:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -495,7 +515,7 @@ def update_invoice(
 )
 def send_invoice(invoice_id: uuid.UUID, practitioner: Manager, db: DbSession):
     """Move a draft to sent, which is what starts the payment clock."""
-    invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id)
+    invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id, for_update=True)
     if invoice.status != InvoiceStatus.DRAFT:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -577,7 +597,10 @@ def record_payment(
 @router.post("/{invoice_id}/cancel", response_model=InvoiceDetailOut, summary="Cancel an invoice")
 def cancel_invoice(invoice_id: uuid.UUID, practitioner: Manager, db: DbSession):
     """Cancel an invoice and release its filings back to the billable pool."""
-    invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id)
+    # Held before the amount paid is read: releasing the filings turns on it,
+    # and a receipt committed since this session last looked is invisible to a
+    # plain read.
+    invoice = _get_invoice_or_404(db, practitioner.firm_id, invoice_id, for_update=True)
     if invoice.status == InvoiceStatus.CANCELLED:
         # Refused rather than waved through: a second cancel has no work left to
         # do, and the filings it named may since have been re-billed on another

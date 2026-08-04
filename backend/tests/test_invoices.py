@@ -2614,3 +2614,198 @@ class TestAReceiptDatedWhenItCannotHaveArrived:
         assert after["amount_paid_paise"] == 0
         assert after["payment_date"] is None
         assert after["status"] == sent["status"]
+
+
+class TestAnInvoiceChangedFromAStaleCopy:
+    """Only receipting held the invoice's row while it decided from it.
+
+    The other three transitions read it plainly, and the sessions here do not
+    expire what they have loaded on commit — so each of them could decide from
+    a copy taken before a concurrent request had already committed something
+    that changes the answer.
+
+    Both directions cost real money. Cancelling releases the filings an invoice
+    covered back into the billable pool, so cancelling one the client has just
+    settled bills them a second time for work already paid for. Editing is
+    refused on a sent invoice because it is a document of record; against a
+    stale ``draft`` the edit lands on the copy the client is holding.
+
+    The competing write is made through a second session and committed, which
+    is exactly what another worker or another practitioner's request looks
+    like from here.
+    """
+
+    def _draft(self, client, auth_headers, client_id, db):
+        """A draft, plus this session's copy of it — taken before the race.
+
+        The copy is *returned* rather than merely loaded, and every caller keeps
+        it in a local: the identity map holds weak references, so a copy nobody
+        is holding is collected and the next read goes to the database, which is
+        the one thing that would make the staleness disappear.
+
+        What it stands in for is the snapshot a request takes when it reads the
+        invoice and then decides from it a moment later. SQLite cannot run two
+        writers at once, so the read that predates a competing commit is
+        expressed this way rather than by racing two connections.
+        """
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        invoice_id = uuid.UUID(invoice["id"])
+        ours = db.get(Invoice, invoice_id)
+        assert ours.status is InvoiceStatus.DRAFT
+        # SQLite will not let another connection write past an open read.
+        db.commit()
+        return invoice, invoice_id, ours
+
+    def _in_another_session(self, invoice_id, change):
+        from app.database import SessionLocal
+
+        other = SessionLocal()
+        try:
+            change(other, billing.load_for_update(other, invoice_id))
+            other.commit()
+        finally:
+            other.close()
+
+    def _reread(self, invoice_id):
+        from app.database import SessionLocal
+
+        fresh = SessionLocal()
+        try:
+            invoice = fresh.get(Invoice, invoice_id)
+            return invoice.status, invoice.amount_paid_paise, invoice.notes
+        finally:
+            fresh.close()
+
+    def test_a_settled_invoice_cannot_be_cancelled_from_a_stale_balance(
+        self, client, auth_headers, client_id, db
+    ):
+        invoice, invoice_id, ours = self._draft(client, auth_headers, client_id, db)
+        sent = client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+        db.commit()
+
+        self._in_another_session(
+            invoice_id,
+            lambda session, inv: billing.record_payment(
+                inv, amount_paise=sent["total_paise"], reference="NEFT-1"
+            ),
+        )
+
+        response = client.post(
+            f"/api/v1/invoices/{invoice_id}/cancel", headers=auth_headers
+        )
+        assert response.status_code == 409, response.text
+        status_after, paid_after, _ = self._reread(invoice_id)
+        assert status_after is InvoiceStatus.PAID
+        assert paid_after == sent["total_paise"]
+        assert ours.id == invoice_id  # the stale copy, still held
+
+    def test_the_released_filings_stay_billed_when_the_cancel_is_refused(
+        self, client, auth_headers, client_id, db
+    ):
+        """The half that costs the client money.
+
+        Cancelling un-bills the filings the invoice cited so they can be
+        re-invoiced. Against a stale balance that ran on a paid invoice, and
+        the work then reappeared on the billable list.
+        """
+        items = file_everything(client, auth_headers)
+        billable = client.get("/api/v1/invoices/billable", headers=auth_headers).json()
+        assert billable["total_items"] > 0
+        generated = client.post(
+            "/api/v1/invoices/generate", json={}, headers=auth_headers
+        ).json()["invoices"][0]
+        invoice_id = uuid.UUID(generated["id"])
+        sent = client.post(
+            f"/api/v1/invoices/{invoice_id}/send", headers=auth_headers
+        ).json()
+        ours = db.get(Invoice, invoice_id)
+        assert ours.amount_paid_paise == 0
+        db.commit()
+
+        self._in_another_session(
+            invoice_id,
+            lambda session, inv: billing.record_payment(
+                inv, amount_paise=sent["total_paise"], reference="NEFT-2"
+            ),
+        )
+
+        assert (
+            client.post(
+                f"/api/v1/invoices/{invoice_id}/cancel", headers=auth_headers
+            ).status_code
+            == 409
+        )
+        still_billed = client.get(
+            "/api/v1/invoices/billable", headers=auth_headers
+        ).json()
+        assert still_billed["total_items"] == 0, "paid work went back on the billable list"
+        assert len(items) > 0
+        assert ours.id == invoice_id  # the stale copy, still held
+
+    def test_a_sent_invoice_cannot_be_edited_from_a_stale_status(
+        self, client, auth_headers, client_id, db
+    ):
+        invoice, invoice_id, ours = self._draft(client, auth_headers, client_id, db)
+
+        def send(session, inv):
+            inv.status = InvoiceStatus.SENT
+
+        self._in_another_session(invoice_id, send)
+
+        response = client.patch(
+            f"/api/v1/invoices/{invoice_id}",
+            json={"notes": "edited after it went out"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 409, response.text
+        _, _, notes_after = self._reread(invoice_id)
+        assert notes_after != "edited after it went out"
+        assert ours.id == invoice_id  # the stale copy, still held
+
+    def test_an_invoice_cannot_be_sent_twice_from_a_stale_status(
+        self, client, auth_headers, client_id, db
+    ):
+        invoice, invoice_id, ours = self._draft(client, auth_headers, client_id, db)
+
+        def send(session, inv):
+            inv.status = InvoiceStatus.SENT
+
+        self._in_another_session(invoice_id, send)
+
+        response = client.post(
+            f"/api/v1/invoices/{invoice_id}/send", headers=auth_headers
+        )
+        assert response.status_code == 409, response.text
+        assert ours.id == invoice_id  # the stale copy, still held
+
+    def test_each_transition_takes_its_invoice_through_the_lock(
+        self, client, auth_headers, client_id, monkeypatch
+    ):
+        """Asserted on the routes, the way receipting already is.
+
+        The guard is a keyword on a shared lookup, and dropping it from any one
+        of these is a one-character regression every other test here survives.
+        """
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        locked = []
+        real = billing.load_for_update
+        monkeypatch.setattr(
+            billing,
+            "load_for_update",
+            lambda session, invoice_id: (
+                locked.append(invoice_id),
+                real(session, invoice_id),
+            )[1],
+        )
+
+        client.patch(
+            f"/api/v1/invoices/{invoice['id']}",
+            json={"notes": "still a draft"},
+            headers=auth_headers,
+        )
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+        client.post(f"/api/v1/invoices/{invoice['id']}/cancel", headers=auth_headers)
+
+        assert locked == [uuid.UUID(invoice["id"])] * 3
