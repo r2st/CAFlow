@@ -15,7 +15,7 @@ from app.models.client import Client
 from app.models.reminder import Reminder
 from app.services import reminders as reminder_service
 from app.worker import tasks as worker_tasks
-from tests.conftest import first_item_of_type
+from tests.conftest import first_item_of_type, paged_order_by
 
 PDF_BYTES = b"%PDF-1.4\n% ledger\n"
 
@@ -1373,3 +1373,103 @@ class TestWhatAPractitionerMaySendUs:
             headers=auth_headers,
         )
         assert response.status_code == 201, response.text
+
+
+class TestPagingAListWhoseRowsShareAnInstant:
+    """``scheduled_for`` is not a tie-break here; it is the tie.
+
+    A sweep stamps every reminder it queues with ``ist_morning(run_date)`` —
+    09:00 IST — so a firm's whole morning queue carries one identical instant.
+    Ordering on that column alone leaves the row order unspecified, and an
+    unspecified order re-evaluated per page is what makes ``LIMIT``/``OFFSET``
+    hand the same reminder back on two pages while dropping another entirely.
+
+    This is the screen a practitioner checks to see what went out to whom, so a
+    row that vanishes between pages is a client who looks unchased.
+    """
+
+    def _queue(self, db, client, auth_headers, count: int = 12) -> int:
+        """A morning's worth of reminders, all sharing one scheduled instant."""
+        firm_id = db.scalar(select(Client.firm_id))
+        client_id = db.scalar(select(Client.id))
+        moment = reminder_service.ist_morning(clock.today())
+        for index in range(count):
+            db.add(
+                Reminder(
+                    firm_id=firm_id,
+                    client_id=client_id,
+                    reminder_type=ReminderType.FILING,
+                    channel=ReminderChannel.EMAIL,
+                    status=ReminderStatus.SCHEDULED,
+                    subject=f"Chase {index:02d}",
+                    body="…",
+                    recipient="accounts@nimbustextiles.in",
+                    scheduled_for=moment,
+                    extra={"kind": "filing", "offset_days": 10},
+                )
+            )
+        db.commit()
+        return count
+
+    def _walk(self, client, auth_headers, *, limit: int) -> list[str]:
+        seen: list[str] = []
+        offset = 0
+        while True:
+            page = client.get(
+                "/api/v1/reminders",
+                params={"limit": limit, "offset": offset},
+                headers=auth_headers,
+            ).json()
+            seen.extend(row["id"] for row in page["items"])
+            offset += limit
+            if offset >= page["total"]:
+                return seen
+
+    def test_paging_the_queue_shows_every_reminder_exactly_once(
+        self, client, auth_headers, client_id, db
+    ):
+        queued = self._queue(db, client, auth_headers)
+
+        seen = self._walk(client, auth_headers, limit=3)
+
+        assert len(seen) == queued
+        assert len(set(seen)) == queued, "a reminder appeared on two pages"
+
+    def test_the_page_boundary_does_not_move_between_reads(
+        self, client, auth_headers, client_id, db
+    ):
+        """Same query, same rows — the property ``OFFSET`` paging rests on."""
+        self._queue(db, client, auth_headers)
+
+        first = self._walk(client, auth_headers, limit=5)
+        again = self._walk(client, auth_headers, limit=5)
+
+        assert first == again
+
+    def test_one_page_of_them_matches_the_head_of_the_whole_list(
+        self, client, auth_headers, client_id, db
+    ):
+        queued = self._queue(db, client, auth_headers)
+
+        whole = self._walk(client, auth_headers, limit=queued)
+        page = client.get(
+            "/api/v1/reminders", params={"limit": 4}, headers=auth_headers
+        ).json()
+
+        assert [row["id"] for row in page["items"]] == whole[:4]
+
+    def test_the_order_the_page_is_taken_in_settles_every_pair_of_rows(
+        self, client, auth_headers, client_id, db, recorded_sql
+    ):
+        """The invariant itself, read off the SQL — see :func:`paged_order_by`.
+
+        SQLite returns these in rowid order whatever the clause says, so
+        walking the pages there cannot tell a total order from an accidental
+        one. The deployment runs PostgreSQL, which is under no such obligation.
+        """
+        self._queue(db, client, auth_headers, count=3)
+
+        recorded_sql.clear()
+        assert client.get("/api/v1/reminders", headers=auth_headers).status_code == 200
+
+        assert paged_order_by(recorded_sql, "reminders").endswith("reminders.id DESC")

@@ -322,7 +322,17 @@ def list_clients(
 
     total = db.scalar(select(func.count(Client.id)).where(*filters)) or 0
     rows = db.scalars(
-        select(Client).where(*filters).order_by(Client.name).limit(limit).offset(offset)
+        select(Client)
+        .where(*filters)
+        # ``id`` breaks the tie, because a name does not identify a client —
+        # that is the whole premise of ``billing._disambiguate``, and two
+        # clients of one firm sharing a name is the ordinary case it exists
+        # for: a proprietor and their firm, or two group companies filed under
+        # one trading name. Paging on the name alone repeats one of them and
+        # drops the other.
+        .order_by(Client.name, Client.id)
+        .limit(limit)
+        .offset(offset)
     ).all()
     return Page[ClientOut](
         items=[ClientOut.model_validate(row) for row in rows],

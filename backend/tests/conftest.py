@@ -208,3 +208,47 @@ def make_client_payload(**overrides) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
+@pytest.fixture
+def recorded_sql():
+    """Every statement the engine executes inside the block, whitespace folded."""
+    from sqlalchemy import event
+
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(" ".join(statement.split()))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
+def paged_order_by(statements: list[str], table: str) -> str:
+    """The ``ORDER BY`` of the one paged ``SELECT`` that read ``table``.
+
+    A ``LIMIT``/``OFFSET`` page is only well defined when the order it is taken
+    in is *total* — that is, when the columns named settle every pair of rows.
+    Where they do not, the row order is unspecified, the database is free to
+    settle it differently for each page, and the same query then repeats some
+    rows across pages and drops others.
+
+    Asserted against the emitted SQL rather than by walking the pages, because
+    a backend is allowed to be accidentally stable: SQLite returns these in
+    rowid order whatever the ``ORDER BY`` says, so a paging test that passes
+    there proves nothing about the PostgreSQL the deployment runs. The shape of
+    the clause is the part that is true on both.
+    """
+    paged = [
+        statement
+        for statement in statements
+        if statement.startswith("SELECT")
+        and f" FROM {table}" in statement
+        and "ORDER BY" in statement
+        and "LIMIT" in statement
+    ]
+    assert len(paged) == 1, f"expected one paged SELECT over {table}, got {len(paged)}"
+    return paged[0].split("ORDER BY", 1)[1].split("LIMIT", 1)[0].strip()

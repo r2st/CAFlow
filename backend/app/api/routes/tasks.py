@@ -332,7 +332,14 @@ def list_tasks(
             _load(db)
             .where(*filters)
             # Nulls last on due date: dated work outranks undated work.
-            .order_by(Task.due_date.is_(None), Task.due_date, Task.created_at)
+            # ``id`` closes it, because the two columns ahead of it do not:
+            # generation raises a firm's tasks in one sweep, so they share a
+            # ``created_at``, and their due dates are statutory deadlines that
+            # every GST client of the firm shares as well. A page boundary
+            # falling inside such a run repeats rows and drops others.
+            .order_by(
+                Task.due_date.is_(None), Task.due_date, Task.created_at, Task.id
+            )
             .limit(limit)
             .offset(offset)
         ).all()

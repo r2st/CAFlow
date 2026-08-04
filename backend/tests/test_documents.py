@@ -15,7 +15,7 @@ from app.models.base import DocumentCategory
 from app.models.document import Document
 from app.services import documents as document_service
 from app.services import storage
-from tests.conftest import first_item_of_type
+from tests.conftest import first_item_of_type, paged_order_by
 
 PDF_BYTES = b"%PDF-1.4\n% a pretend bank statement\n"
 
@@ -816,3 +816,59 @@ class TestAnExplicitNullOnADocumentsRequiredFields:
         )
         assert response.status_code == 200, response.text
         assert response.json()["compliance_item_id"] is None
+
+
+class TestPagingDocumentsUploadedTogether:
+    """``created_at`` alone does not settle the order of a batch of uploads.
+
+    A page taken in an order that is not total repeats rows and drops others;
+    see :func:`tests.conftest.paged_order_by`.
+    """
+
+    def _upload_a_batch(self, client, auth_headers, client_id, count=6) -> int:
+        for index in range(count):
+            response = client.post(
+                "/api/v1/documents/upload",
+                files={
+                    "file": (
+                        f"statement-{index:02d}.pdf",
+                        io.BytesIO(b"%PDF-1.4\n% a statement\n"),
+                        "application/pdf",
+                    )
+                },
+                data={"client_id": client_id},
+                headers=auth_headers,
+            )
+            assert response.status_code == 201, response.text
+        return count
+
+    def test_paging_shows_every_document_exactly_once(
+        self, client, auth_headers, client_id
+    ):
+        uploaded = self._upload_a_batch(client, auth_headers, client_id)
+
+        seen: list[str] = []
+        offset = 0
+        while True:
+            page = client.get(
+                "/api/v1/documents",
+                params={"limit": 2, "offset": offset},
+                headers=auth_headers,
+            ).json()
+            seen.extend(row["id"] for row in page["items"])
+            offset += 2
+            if offset >= page["total"]:
+                break
+
+        assert len(seen) == uploaded
+        assert len(set(seen)) == uploaded, "a document appeared on two pages"
+
+    def test_the_order_the_page_is_taken_in_settles_every_pair_of_rows(
+        self, client, auth_headers, client_id, recorded_sql
+    ):
+        self._upload_a_batch(client, auth_headers, client_id, count=2)
+
+        recorded_sql.clear()
+        assert client.get("/api/v1/documents", headers=auth_headers).status_code == 200
+
+        assert paged_order_by(recorded_sql, "documents").endswith("documents.id DESC")

@@ -16,7 +16,7 @@ from app.models.firm import Firm
 from app.models.task import Task
 from app.services import tasks as task_service
 from app.worker import tasks as worker_tasks
-from tests.conftest import first_item_of_type, make_client_payload
+from tests.conftest import first_item_of_type, make_client_payload, paged_order_by
 
 
 @pytest.fixture
@@ -1796,3 +1796,53 @@ class TestAnExplicitNullOnATasksRequiredFields:
         assert response.status_code == 200, response.text
         assert response.json()["title"] == task["title"]
         assert response.json()["priority"] == task["priority"]
+
+
+class TestPagingTasksRaisedByOneSweep:
+    """Neither column ahead of ``id`` settles a generated batch.
+
+    Generation raises a firm's tasks in one sweep, so they share a
+    ``created_at``, and their due dates are statutory deadlines every GST
+    client of the firm shares as well. A page boundary falling inside such a
+    run repeats rows and drops others; see :func:`tests.conftest.paged_order_by`.
+    """
+
+    def _generate(self, client, auth_headers) -> int:
+        response = client.post(
+            "/api/v1/tasks/generate", json={"horizon_days": 60}, headers=auth_headers
+        )
+        assert response.status_code == 200, response.text
+        created = response.json()["created"]
+        assert created > 1, "nothing to page through"
+        return created
+
+    def test_paging_shows_every_task_exactly_once(
+        self, client, auth_headers, client_id
+    ):
+        created = self._generate(client, auth_headers)
+
+        seen: list[str] = []
+        offset = 0
+        while True:
+            page = client.get(
+                "/api/v1/tasks",
+                params={"limit": 2, "offset": offset},
+                headers=auth_headers,
+            ).json()
+            seen.extend(row["id"] for row in page["items"])
+            offset += 2
+            if offset >= page["total"]:
+                break
+
+        assert len(seen) == created
+        assert len(set(seen)) == created, "a task appeared on two pages"
+
+    def test_the_order_the_page_is_taken_in_settles_every_pair_of_rows(
+        self, client, auth_headers, client_id, recorded_sql
+    ):
+        self._generate(client, auth_headers)
+
+        recorded_sql.clear()
+        assert client.get("/api/v1/tasks", headers=auth_headers).status_code == 200
+
+        assert paged_order_by(recorded_sql, "tasks").endswith("tasks.id")

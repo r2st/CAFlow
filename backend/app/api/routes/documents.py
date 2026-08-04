@@ -269,7 +269,12 @@ def list_documents(
             selectinload(Document.compliance_item).selectinload(ComplianceItem.compliance_type),
         )
         .where(*filters)
-        .order_by(Document.created_at.desc())
+        # ``id`` breaks the tie, for the reason the audit trail and the
+        # calendar both take one: a batch of uploads shares a ``created_at``
+        # to whatever resolution the backend stores, and a paged list whose
+        # order is not total repeats rows on one page and drops them from the
+        # next.
+        .order_by(Document.created_at.desc(), Document.id.desc())
         .limit(limit)
         .offset(offset)
     ).all()

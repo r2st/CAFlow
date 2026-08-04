@@ -270,7 +270,15 @@ def list_reminders(
         select(Reminder)
         .options(selectinload(Reminder.client))
         .where(*filters)
-        .order_by(Reminder.scheduled_for.desc())
+        # ``id`` breaks the tie, and here it is not a tie-break for the rare
+        # case: a sweep stamps every reminder it queues with the same instant —
+        # ``ist_morning(run_date)``, 09:00 IST — so a firm's whole morning
+        # queue shares one ``scheduled_for`` exactly. Ordering on that column
+        # alone leaves the row order unspecified, and an unspecified order
+        # re-evaluated per page is what makes ``LIMIT``/``OFFSET`` repeat some
+        # reminders across pages and skip others entirely. This is the screen a
+        # practitioner checks to see what went out to whom.
+        .order_by(Reminder.scheduled_for.desc(), Reminder.id.desc())
         .limit(limit)
         .offset(offset)
     ).all()

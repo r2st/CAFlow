@@ -34,7 +34,7 @@ from app.services.compliance_generator import (
     max_lookback_months,
     regenerate_for_firm,
 )
-from tests.conftest import make_client_payload
+from tests.conftest import make_client_payload, paged_order_by
 
 API = "/api/v1"
 
@@ -2480,3 +2480,58 @@ class TestToppingUpAClientTheFirmHasLetGo:
         )
         assert response.status_code == 200, response.text
         assert response.json()["created"] > 0
+
+
+class TestPagingClientsThatShareAName:
+    """A name does not identify a client.
+
+    That is the whole premise of ``billing._disambiguate``, and two clients of
+    one firm under one name is the ordinary case it exists for: a proprietor
+    and their firm, or two group companies under one trading name. Paging on
+    the name alone repeats one of them and drops the other; see
+    :func:`tests.conftest.paged_order_by`.
+    """
+
+    def _namesakes(self, client, auth_headers, count=6) -> int:
+        for index in range(count):
+            response = client.post(
+                f"{API}/clients",
+                json=make_client_payload(
+                    name="Nimbus Textiles Pvt Ltd",
+                    pan=None,
+                    gstin=None,
+                    email=f"accounts+{index}@nimbustextiles.in",
+                ),
+                headers=auth_headers,
+            )
+            assert response.status_code == 201, response.text
+        return count
+
+    def test_paging_shows_every_namesake_exactly_once(self, client, auth_headers):
+        created = self._namesakes(client, auth_headers)
+
+        seen: list[str] = []
+        offset = 0
+        while True:
+            page = client.get(
+                f"{API}/clients",
+                params={"limit": 2, "offset": offset},
+                headers=auth_headers,
+            ).json()
+            seen.extend(row["id"] for row in page["items"])
+            offset += 2
+            if offset >= page["total"]:
+                break
+
+        assert len(seen) == created
+        assert len(set(seen)) == created, "a client appeared on two pages"
+
+    def test_the_order_the_page_is_taken_in_settles_every_pair_of_rows(
+        self, client, auth_headers, recorded_sql
+    ):
+        self._namesakes(client, auth_headers, count=2)
+
+        recorded_sql.clear()
+        assert client.get(f"{API}/clients", headers=auth_headers).status_code == 200
+
+        assert paged_order_by(recorded_sql, "clients").endswith("clients.id")
