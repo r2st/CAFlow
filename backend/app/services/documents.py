@@ -14,6 +14,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -101,6 +102,50 @@ def clean_requirement(value: str | None) -> str | None:
             "digits and underscores, as in 'bank_statement'"
         )
     return candidate
+
+
+# What the document row can hold, and what a human can read back.
+#
+# Both of these arrive in the multipart part's own headers, so both are exactly
+# as long and as strange as the sender chose — and the portal upload that writes
+# them is reachable by anyone holding a client's magic link. Nothing bounded
+# either one:
+#
+# * ``original_filename`` is a ``VARCHAR(512)``. A nine-hundred-character name
+#   is silently accepted by SQLite and refused outright by PostgreSQL, so the
+#   deployment that matters answers a 500 — *after* ``save_upload`` has already
+#   written the bytes to the storage volume, leaving a file on disk with no row
+#   pointing at it and nothing to sweep it by;
+# * ``content_type`` is a ``VARCHAR(128)``, and the allow-list check reads only
+#   the part before the semicolon — so ``application/pdf; charset=…`` with four
+#   hundred characters of parameters passes it, and lands in the column whole
+#   whenever the bytes themselves carry no signature to override it.
+#
+# Truncated rather than refused: the upload is a real document either way, and
+# losing it over the length of its own name would be the worse answer. The tail
+# is what is kept, for the reason ``storage.safe_filename`` keeps it — the
+# extension is the part a practitioner reads.
+MAX_ORIGINAL_FILENAME = 255
+MAX_CONTENT_TYPE = 128
+
+# ``sanitize_text`` deliberately keeps newlines and tabs, because a note and an
+# address are genuinely multiline. A filename is one line: it is rendered in the
+# portal, quoted in the audit trail and echoed in a download header.
+_FILENAME_WHITESPACE = re.compile(r"\s+")
+
+
+def display_filename(filename: str | None) -> str:
+    """The sender's own name for an upload, made storable and readable."""
+    stem = Path(filename or "").name
+    cleaned = _FILENAME_WHITESPACE.sub(" ", sanitize_text(stem)).strip()
+    return cleaned[-MAX_ORIGINAL_FILENAME:]
+
+
+def bounded_content_type(content_type: str | None) -> str | None:
+    """The recorded content type, cut to what the column holds."""
+    if content_type is None:
+        return None
+    return sanitize_text(content_type)[:MAX_CONTENT_TYPE] or None
 
 
 @dataclass
@@ -205,14 +250,16 @@ def ingest_upload(
     # Record what the bytes actually are, not what the upload claimed. A
     # browser that sends application/octet-stream for a PDF would otherwise
     # keep that PDF out of the text extractor for good.
-    content_type = storage.effective_content_type(content_type, data, filename)
+    content_type = bounded_content_type(
+        storage.effective_content_type(content_type, data, filename)
+    )
 
     document = Document(
         firm_id=client.firm_id,
         client_id=client.id,
         compliance_item_id=compliance_item_id,
         uploaded_by_practitioner_id=uploaded_by_practitioner_id,
-        original_filename=filename or stored.safe_filename,
+        original_filename=display_filename(filename) or stored.safe_filename,
         storage_path=stored.storage_path,
         content_type=content_type,
         size_bytes=stored.size_bytes,

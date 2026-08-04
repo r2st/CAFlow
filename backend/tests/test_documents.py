@@ -680,6 +680,108 @@ class TestRequirementValidationOnUpdate:
         assert response.json()["satisfies_requirements"] == ["ais_tis", "export_invoices"]
 
 
+class TestTheNameAndTypeAnUploadArrivesUnder:
+    """Both come out of the multipart part's own headers, so both are exactly
+    as long and as strange as the sender chose — and the portal upload that
+    writes them is reachable by anyone holding a client's magic link.
+
+    ``original_filename`` is a ``VARCHAR(512)`` and ``content_type`` a
+    ``VARCHAR(128)``. SQLite ignores a declared width, so nothing here failed;
+    PostgreSQL refuses the row outright, and it refuses it *after* the bytes
+    have been written to the storage volume — a 500 for the sender and a file
+    on disk with no row pointing at it.
+    """
+
+    def _upload(self, client, headers, client_id, *, filename, content_type, body=PDF_BYTES):
+        return client.post(
+            "/api/v1/documents/upload",
+            files={"file": (filename, io.BytesIO(body), content_type)},
+            data={"client_id": client_id},
+            headers=headers,
+        )
+
+    def test_a_filename_longer_than_the_column_is_shortened_not_refused(
+        self, client, auth_headers, client_id
+    ):
+        """The upload is a real document either way; losing it over the length
+        of its own name would be the worse answer."""
+        response = self._upload(
+            client,
+            auth_headers,
+            client_id,
+            filename="A" * 900 + ".pdf",
+            content_type="application/pdf",
+        )
+        assert response.status_code == 201, response.text
+        stored = response.json()["document"]["original_filename"]
+        assert len(stored) <= document_service.MAX_ORIGINAL_FILENAME
+        # The tail is kept, so the extension — the part a practitioner reads —
+        # survives, exactly as ``storage.safe_filename`` keeps it.
+        assert stored.endswith(".pdf")
+
+    def test_a_content_type_padded_past_the_column_is_cut(
+        self, client, auth_headers, client_id
+    ):
+        """The allow-list reads only the part before the semicolon, so a type
+        with four hundred characters of parameters walks straight past it."""
+        response = self._upload(
+            client,
+            auth_headers,
+            client_id,
+            filename="ledger.txt",
+            content_type="text/plain; charset=" + "x" * 400,
+            body=b"opening balance 1,00,000",
+        )
+        assert response.status_code == 201, response.text
+        stored = response.json()["document"]["content_type"]
+        assert len(stored) <= document_service.MAX_CONTENT_TYPE
+
+    def test_a_filename_is_reduced_to_one_readable_line(self):
+        """It is rendered in the portal, quoted in the audit trail and echoed
+        in a download header, so the newlines and invisible characters
+        ``sanitize_text`` keeps for a multiline note have no place in it.
+
+        Asserted against the helper rather than over HTTP: the test client's
+        multipart encoder percent-escapes a control character in a filename
+        before it leaves, and a real sender need not.
+        """
+        assert (
+            document_service.display_filename("bank\nstatement​\tmarch.pdf")
+            == "bank statement march.pdf"
+        )
+
+    def test_a_path_is_reduced_to_its_basename(self, client, auth_headers, client_id):
+        response = self._upload(
+            client,
+            auth_headers,
+            client_id,
+            filename="../../etc/form16.pdf",
+            content_type="application/pdf",
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["document"]["original_filename"] == "form16.pdf"
+
+    def test_an_ordinary_name_is_left_exactly_as_sent(
+        self, client, auth_headers, client_id
+    ):
+        response = self._upload(
+            client,
+            auth_headers,
+            client_id,
+            filename="Bank Statement — Mar 2026.pdf",
+            content_type="application/pdf",
+        )
+        assert response.status_code == 201, response.text
+        assert (
+            response.json()["document"]["original_filename"]
+            == "Bank Statement — Mar 2026.pdf"
+        )
+
+    def test_a_nameless_upload_falls_back_to_the_stored_name(self):
+        assert document_service.display_filename("") == ""
+        assert document_service.display_filename(None) == ""
+
+
 class TestAnExplicitNullOnADocumentsRequiredFields:
     """``compliance_item_id`` is the one field here a caller may null out —
     that is how a document is unlinked from a filing. The rest back ``NOT
