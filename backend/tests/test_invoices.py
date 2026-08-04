@@ -2809,3 +2809,210 @@ class TestAnInvoiceChangedFromAStaleCopy:
         client.post(f"/api/v1/invoices/{invoice['id']}/cancel", headers=auth_headers)
 
         assert locked == [uuid.UUID(invoice["id"])] * 3
+
+
+class TestCountingTheRevenueSummaryInTheDatabase:
+    """Every figure on the billing screen is an aggregate, and all of them
+    used to be computed by reading the year's invoices into memory.
+
+    Along with *every line of every one of them* — eagerly, in a second query —
+    to produce a summary that never looks at a line. An invoice is a permanent
+    record, a practice raises one per client per billing run, and the default
+    window is the whole current financial year; the screen is what a firm opens
+    to find out what it is owed, which is to say in the last week of the month,
+    while the same database is running the month-end generation.
+
+    The arithmetic is unchanged, and these pin both halves: that it still adds
+    up, and that it is no longer done by loading the rows.
+    """
+
+    @pytest.fixture
+    def counted_sql(self):
+        """Every statement the engine executes inside the block."""
+        from sqlalchemy import event
+
+        from app.database import engine
+
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()))
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            yield statements
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+    def _row_reads(self, statements, table: str) -> int:
+        """Statements that pull rows out of ``table`` rather than aggregate it."""
+        return sum(
+            1
+            for statement in statements
+            if statement.startswith("SELECT")
+            and f" FROM {table}" in statement
+            and "count(" not in statement
+            and "sum(" not in statement
+        )
+
+    def _book_of_invoices(self, client, auth_headers, client_id, count=8):
+        """A year's worth of billing: sent, part-paid, drafted and cancelled."""
+        raised = []
+        for index in range(count):
+            invoice = make_invoice(client, auth_headers, client_id).json()
+            if index % 4 == 0:  # left as a draft
+                raised.append(("draft", invoice))
+                continue
+            sent = client.post(
+                f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+            ).json()
+            if index % 4 == 1:
+                client.post(
+                    f"/api/v1/invoices/{invoice['id']}/payments",
+                    json={"amount_paise": 50_000},
+                    headers=auth_headers,
+                )
+                raised.append(("part_paid", sent))
+            elif index % 4 == 2:
+                raised.append(("sent", sent))
+            else:
+                client.post(
+                    f"/api/v1/invoices/{invoice['id']}/cancel", headers=auth_headers
+                )
+                raised.append(("cancelled", sent))
+        return raised
+
+    def test_the_summary_is_not_computed_by_reading_the_invoices(
+        self, client, auth_headers, client_id, counted_sql
+    ):
+        self._book_of_invoices(client, auth_headers, client_id)
+
+        counted_sql.clear()
+        response = client.get("/api/v1/invoices/revenue", headers=auth_headers)
+
+        assert response.status_code == 200, response.text
+        assert self._row_reads(counted_sql, "invoices") == 0
+        # The lines were the sharper half: loaded eagerly, and never read.
+        assert self._row_reads(counted_sql, "invoice_lines") == 0
+        assert self._row_reads(counted_sql, "compliance_items") == 0
+
+    def test_the_totals_are_the_ones_the_invoices_add_up_to(
+        self, client, auth_headers, client_id
+    ):
+        raised = self._book_of_invoices(client, auth_headers, client_id)
+        summary = client.get("/api/v1/invoices/revenue", headers=auth_headers).json()
+
+        issued = [inv for kind, inv in raised if kind in ("sent", "part_paid")]
+        drafts = [inv for kind, inv in raised if kind == "draft"]
+
+        assert summary["invoiced_paise"] == sum(inv["total_paise"] for inv in issued)
+        assert summary["draft_paise"] == sum(inv["total_paise"] for inv in drafts)
+        assert summary["collected_paise"] == 50_000 * sum(
+            1 for kind, _ in raised if kind == "part_paid"
+        )
+        assert summary["outstanding_paise"] == (
+            summary["invoiced_paise"] - summary["collected_paise"]
+        )
+        # A cancelled invoice is in none of the money and none of the count.
+        assert summary["invoice_count"] == len(issued) + len(drafts)
+        assert summary["by_client"]["Nimbus Textiles Pvt Ltd"] == summary["invoiced_paise"]
+
+    def test_a_bill_past_its_due_date_with_a_balance_is_the_overdue_figure(
+        self, client, auth_headers, client_id, db
+    ):
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        sent = client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+        row = db.get(Invoice, uuid.UUID(invoice["id"]))
+        row.due_date = clock.today() - timedelta(days=10)
+        db.commit()
+
+        summary = client.get("/api/v1/invoices/revenue", headers=auth_headers).json()
+        assert summary["overdue_paise"] == sent["total_paise"]
+
+    def test_an_invoice_with_no_due_date_is_never_late(
+        self, client, auth_headers, client_id, db
+    ):
+        """A NULL due date fails the comparison, which is what the Python did."""
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+        row = db.get(Invoice, uuid.UUID(invoice["id"]))
+        row.due_date = None
+        db.commit()
+
+        summary = client.get("/api/v1/invoices/revenue", headers=auth_headers).json()
+        assert summary["overdue_paise"] == 0
+        assert summary["outstanding_paise"] > 0
+
+    def test_a_settled_invoice_is_outstanding_by_nothing_and_overdue_by_nothing(
+        self, client, auth_headers, client_id, db
+    ):
+        invoice = make_invoice(client, auth_headers, client_id).json()
+        sent = client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+        row = db.get(Invoice, uuid.UUID(invoice["id"]))
+        row.due_date = clock.today() - timedelta(days=10)
+        db.commit()
+        client.post(
+            f"/api/v1/invoices/{invoice['id']}/payments",
+            json={"amount_paise": sent["total_paise"]},
+            headers=auth_headers,
+        )
+
+        summary = client.get("/api/v1/invoices/revenue", headers=auth_headers).json()
+        assert summary["collected_paise"] == sent["total_paise"]
+        assert summary["outstanding_paise"] == 0
+        assert summary["overdue_paise"] == 0
+
+    def test_a_firm_with_no_billing_at_all_reads_zero_rather_than_null(
+        self, client, auth_headers
+    ):
+        """``SUM`` over nothing is NULL, and every one of these is an integer."""
+        summary = client.get("/api/v1/invoices/revenue", headers=auth_headers).json()
+        assert summary["invoice_count"] == 0
+        assert summary["invoiced_paise"] == 0
+        assert summary["collected_paise"] == 0
+        assert summary["outstanding_paise"] == 0
+        assert summary["overdue_paise"] == 0
+        assert summary["draft_paise"] == 0
+        assert summary["unbilled_paise"] == 0
+        assert summary["by_client"] == {}
+        assert summary["by_category"] == {}
+
+    def test_unbilled_work_is_summed_by_category_without_reading_the_filings(
+        self, client, auth_headers, client_id, db, counted_sql
+    ):
+        file_everything(client, auth_headers)
+
+        counted_sql.clear()
+        summary = client.get("/api/v1/invoices/revenue", headers=auth_headers).json()
+
+        assert self._row_reads(counted_sql, "compliance_items") == 0
+        # Still the same total the filings themselves carry.
+        expected = (
+            db.scalar(
+                select(func.coalesce(func.sum(ComplianceItem.fee_paise), 0)).where(
+                    ComplianceItem.status.in_(billing.FILED_STATUSES),
+                    ComplianceItem.is_billed.is_(False),
+                    ComplianceItem.fee_paise > 0,
+                )
+            )
+            or 0
+        )
+        assert expected > 0
+        assert summary["unbilled_paise"] == expected
+        assert sum(summary["by_category"].values()) == expected
+
+    def test_the_window_still_bounds_what_is_counted(
+        self, client, auth_headers, client_id
+    ):
+        make_invoice(client, auth_headers, client_id)
+        summary = client.get(
+            "/api/v1/invoices/revenue",
+            params={"from_date": "2000-01-01", "to_date": "2000-12-31"},
+            headers=auth_headers,
+        ).json()
+        assert summary["invoice_count"] == 0
+        assert summary["draft_paise"] == 0

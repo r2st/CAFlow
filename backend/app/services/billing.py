@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -24,7 +24,7 @@ from app.core import clock
 from app.core.periods import fiscal_year_start, fy_label
 from app.models.base import ComplianceStatus, InvoiceStatus
 from app.models.client import Client
-from app.models.compliance import ComplianceItem
+from app.models.compliance import ComplianceItem, ComplianceType
 from app.models.invoice import Invoice, InvoiceLine
 from app.services import firms
 
@@ -599,11 +599,11 @@ class RevenueSummary:
 UNNAMED_CLIENT = "—"
 
 
-def _client_label(client: Client | None) -> str:
-    return client.name if client is not None else UNNAMED_CLIENT
+def _client_label(name: str | None) -> str:
+    return name if name else UNNAMED_CLIENT
 
 
-def _disambiguate(totals: dict[uuid.UUID, tuple[Client | None, int]]) -> dict[str, int]:
+def _disambiguate(rows: list[tuple[uuid.UUID, str | None, str | None, int]]) -> dict[str, int]:
     """Name each client's revenue, telling apart any two that share a name.
 
     ``by_client`` is keyed by name and was accumulated by name, so two clients
@@ -619,21 +619,22 @@ def _disambiguate(totals: dict[uuid.UUID, tuple[Client | None, int]]) -> dict[st
     guess. The PAN is what a practitioner would reach for to tell two clients
     apart; a client without one falls back to the leading digits of its id,
     which is at least stable and at least distinct.
+
+    Each row is ``(client_id, name, pan, amount)`` — the three columns the
+    naming needs rather than the whole client, since the totals now come back
+    from a grouped query instead of from rows read into memory.
     """
     seen: dict[str, int] = {}
-    for client, _ in totals.values():
-        name = _client_label(client)
-        seen[name] = seen.get(name, 0) + 1
+    for _, name, _pan, _amount in rows:
+        label = _client_label(name)
+        seen[label] = seen.get(label, 0) + 1
 
     labelled: dict[str, int] = {}
-    for client_id, (client, amount) in totals.items():
-        name = _client_label(client)
-        if seen[name] > 1:
-            qualifier = (client.pan if client is not None and client.pan else None) or (
-                str(client_id)[:8]
-            )
-            name = f"{name} ({qualifier})"
-        labelled[name] = labelled.get(name, 0) + amount
+    for client_id, name, pan, amount in rows:
+        label = _client_label(name)
+        if seen[label] > 1:
+            label = f"{label} ({pan or str(client_id)[:8]})"
+        labelled[label] = labelled.get(label, 0) + amount
     return labelled
 
 
@@ -645,49 +646,118 @@ def revenue_summary(
     to_date: date,
     today: date | None = None,
 ) -> RevenueSummary:
-    """Invoiced / collected / outstanding over a window, plus unbilled work."""
+    """Invoiced / collected / outstanding over a window, plus unbilled work.
+
+    Counted by the database rather than read whole and reduced here, for the
+    reason the dashboard, the calendar and the workload view were each taken
+    off the same curve. Every figure on this screen is an aggregate, and what
+    used to happen on each visit was that every invoice the firm raised in the
+    financial year was read off disk and hydrated into a mapped object — along
+    with *every line of every one of them*, eagerly, in a second query, to
+    compute a summary that never looks at a line.
+
+    That set only grows: an invoice is a permanent record, a practice raises one
+    per client per billing run, and the default window is the whole current
+    financial year. The billing screen is what a firm opens to find out what it
+    is owed, which means it is opened most in the last week of the month —
+    while the same database is running the month-end invoice generation.
+
+    Three grouped queries in place of it: the money, the per-client breakdown,
+    and the unbilled work. The arithmetic is unchanged, including which statuses
+    contribute to what — a cancelled invoice is not counted at all, a draft
+    counts towards ``draft_paise`` and the invoice count and nothing else, and
+    lateness is derived from the due date and the balance rather than read off
+    the status.
+    """
     today = today or clock.today()
     summary = RevenueSummary(from_date=from_date, to_date=to_date)
 
-    invoices = list(
-        db.scalars(
-            select(Invoice)
-            .options(selectinload(Invoice.client), selectinload(Invoice.lines))
-            .where(
-                Invoice.firm_id == firm_id,
-                Invoice.issue_date >= from_date,
-                Invoice.issue_date <= to_date,
-            )
-        ).all()
+    window = [
+        Invoice.firm_id == firm_id,
+        Invoice.issue_date >= from_date,
+        Invoice.issue_date <= to_date,
+    ]
+    # Everything a client has actually been asked to pay. Cancelled is excluded
+    # from every figure; a draft is separated inside the query rather than by a
+    # second pass over the same rows.
+    counted = [*window, Invoice.status != InvoiceStatus.CANCELLED]
+    is_draft = Invoice.status == InvoiceStatus.DRAFT
+    balance = Invoice.total_paise - Invoice.amount_paid_paise
+
+    def total(expression):
+        """A ``SUM(CASE …)`` that answers 0 rather than NULL for an empty firm."""
+        return func.coalesce(func.sum(expression), 0)
+
+    def issued(amount):
+        return case((is_draft, 0), else_=amount)
+
+    (
+        summary.invoice_count,
+        summary.draft_paise,
+        summary.invoiced_paise,
+        summary.collected_paise,
+        summary.outstanding_paise,
+        summary.overdue_paise,
+    ) = db.execute(
+        select(
+            func.count(Invoice.id),
+            total(case((is_draft, Invoice.total_paise), else_=0)),
+            total(issued(Invoice.total_paise)),
+            total(issued(Invoice.amount_paid_paise)),
+            total(issued(balance)),
+            # A NULL due date fails the comparison and falls to the ``else_``,
+            # which is what the Python did: an invoice with no date on it is
+            # not late.
+            total(
+                case(
+                    (
+                        (~is_draft) & (Invoice.due_date < today) & (balance > 0),
+                        balance,
+                    ),
+                    else_=0,
+                )
+            ),
+        ).where(*counted)
+    ).one()
+
+    # Grouped by client id and named afterwards, because a name does not
+    # identify a client; see :func:`_disambiguate`. Outer-joined so a row whose
+    # client has somehow gone still carries its revenue, which is what reading
+    # the relationship did.
+    summary.by_client = _disambiguate(
+        [
+            (client_id, name, pan, amount)
+            for client_id, name, pan, amount in db.execute(
+                select(
+                    Invoice.client_id,
+                    Client.name,
+                    Client.pan,
+                    func.sum(Invoice.total_paise),
+                )
+                .outerjoin(Client, Client.id == Invoice.client_id)
+                .where(*counted, ~is_draft)
+                .group_by(Invoice.client_id, Client.name, Client.pan)
+            ).all()
+        ]
     )
 
-    # Accumulated by client id and named afterwards, because a name does not
-    # identify a client; see :func:`_disambiguate`.
-    per_client: dict[uuid.UUID, tuple[Client | None, int]] = {}
-    for invoice in invoices:
-        if invoice.status == InvoiceStatus.CANCELLED:
-            continue
-        summary.invoice_count += 1
-        if invoice.status == InvoiceStatus.DRAFT:
-            summary.draft_paise += invoice.total_paise
-            continue
-
-        summary.invoiced_paise += invoice.total_paise
-        summary.collected_paise += invoice.amount_paid_paise
-        summary.outstanding_paise += invoice.balance_paise
-        if invoice.due_date and invoice.due_date < today and invoice.balance_paise > 0:
-            summary.overdue_paise += invoice.balance_paise
-
-        _, running = per_client.get(invoice.client_id, (invoice.client, 0))
-        per_client[invoice.client_id] = (invoice.client, running + invoice.total_paise)
-
-    summary.by_client = _disambiguate(per_client)
-
-    # Work that is finished but has not made it onto an invoice yet.
-    for item in unbilled_items(db, firm_id):
-        summary.unbilled_paise += item.fee_paise
-        category = item.compliance_type.category.value
-        summary.by_category[category] = summary.by_category.get(category, 0) + item.fee_paise
+    # Work that is finished but has not made it onto an invoice yet — the same
+    # filings :func:`unbilled_items` selects, summed by category instead of
+    # loaded.
+    for category, amount in db.execute(
+        select(ComplianceType.category, func.sum(ComplianceItem.fee_paise))
+        .join(ComplianceType, ComplianceType.id == ComplianceItem.compliance_type_id)
+        .where(
+            ComplianceItem.firm_id == firm_id,
+            ComplianceItem.status.in_(FILED_STATUSES),
+            ComplianceItem.is_billed.is_(False),
+            ComplianceItem.fee_paise > 0,
+        )
+        .group_by(ComplianceType.category)
+    ).all():
+        summary.unbilled_paise += amount
+        key = category.value
+        summary.by_category[key] = summary.by_category.get(key, 0) + amount
 
     return summary
 
