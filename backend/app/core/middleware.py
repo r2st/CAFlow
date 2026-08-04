@@ -14,6 +14,7 @@ import logging
 import time
 import uuid
 
+from starlette.exceptions import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -167,17 +168,50 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 class BodySizeLimitMiddleware:
-    """Reject oversized bodies from the declared Content-Length.
+    """Cap the request body, by the declared length *and* by what arrives.
 
     Pure ASGI rather than ``BaseHTTPMiddleware`` so the rejection happens
-    before Starlette begins buffering the body. A chunked request without a
-    Content-Length still reaches the route, where the per-upload limit in
-    ``services.storage`` applies.
+    before Starlette begins buffering the body.
+
+    The declared ``Content-Length`` is the cheap half: it refuses an oversized
+    upload before a byte of it is read. It is also the half a caller can simply
+    omit. ``Transfer-Encoding: chunked`` carries no length, and nothing then
+    stood between the socket and Starlette's multipart parser — which has no
+    size limit of its own on a *file* part, spools it to a temporary file past
+    one megabyte, and hands the route an ``UploadFile`` the route then reads
+    whole into memory. The per-upload check in :mod:`app.services.storage` runs
+    after all of that, so the 413 it produces is honest about the file and
+    useless about the cost: thirty megabytes, or thirty gigabytes, are already
+    on disk and in RAM by the time it is raised.
+
+    ``POST /portal/documents`` is the sharp end of that. It is reachable by
+    anyone holding a client's magic link — a party outside the firm entirely —
+    and one chunked request with no Content-Length is enough to fill the
+    storage volume's temporary space.
+
+    So the body is counted as it is read. ``receive`` is wrapped, the running
+    total is checked against the same limit, and the read *raises* as soon as
+    it is passed — which is what stops the parser mid-part rather than merely
+    reporting on it once it has finished. Nothing further is pulled off the
+    socket, nothing more is spooled, and the temporary file the parser had open
+    is closed as the exception unwinds.
+
+    Raised as an ``HTTPException`` rather than an exception of our own for one
+    specific reason: FastAPI wraps body parsing in a bare ``except Exception``
+    that turns anything it catches into "There was an error parsing the body"
+    — a 400 that says the caller sent something malformed, which is exactly the
+    wrong thing to tell someone whose upload was too big. ``HTTPException`` is
+    the one type it re-raises, so this reaches the registered handler and comes
+    out as the same 413 envelope the declared-length path produces.
     """
 
     def __init__(self, app: ASGIApp, max_bytes: int) -> None:
         self.app = app
         self.max_bytes = max_bytes
+
+    @property
+    def _detail(self) -> str:
+        return f"Request body exceeds the {self.max_bytes / (1024 * 1024):.0f} MB limit"
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -192,19 +226,34 @@ class BodySizeLimitMiddleware:
             except ValueError:
                 break
             if declared > self.max_bytes:
-                limit_mb = self.max_bytes / (1024 * 1024)
                 from app.core.errors import error_response
 
                 response = error_response(
-                    status_code=413,
-                    detail=f"Request body exceeds the {limit_mb:.0f} MB limit",
-                    request=Request(scope),
+                    status_code=413, detail=self._detail, request=Request(scope)
                 )
                 await response(scope, receive, send)
                 return
             break
 
-        await self.app(scope, receive, send)
+        received = 0
+
+        async def counted_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    logger.warning(
+                        "Undeclared body passed the %s-byte limit on %s %s",
+                        self.max_bytes,
+                        scope.get("method"),
+                        scope.get("path"),
+                        extra={"path": scope.get("path"), "received_bytes": received},
+                    )
+                    raise HTTPException(status_code=413, detail=self._detail)
+            return message
+
+        await self.app(scope, counted_receive, send)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

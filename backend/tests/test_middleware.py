@@ -8,10 +8,15 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
 from app.core import ratelimit
-from app.core.middleware import RequestContextMiddleware, client_ip
+from app.core.middleware import (
+    BodySizeLimitMiddleware,
+    RequestContextMiddleware,
+    client_ip,
+)
 from app.main import app
 
 # A whole number of minutes, so the frozen instant below sits exactly on a
@@ -162,6 +167,157 @@ class TestBodySizeLimit:
         )
         assert response.status_code == 413
         assert response.json()["error"]["code"] == "payload_too_large"
+
+
+class TestABodyThatNeverDeclaredItsLength:
+    """``Content-Length`` is the half of the limit a caller can simply omit.
+
+    ``Transfer-Encoding: chunked`` carries no length, and nothing then stood
+    between the socket and Starlette's multipart parser — which puts no size
+    limit on a *file* part at all, spools it to a temporary file past one
+    megabyte, and hands the route an ``UploadFile`` the route reads whole into
+    memory. The per-upload check in ``services.storage`` runs after all of
+    that: the 413 it produces is accurate about the file and useless about the
+    cost, because the bytes are already on disk and in RAM.
+
+    ``POST /portal/documents`` is the sharp end of it — reachable by anyone
+    holding a client's magic link, which is a party outside the firm entirely.
+    """
+
+    LIMIT = settings.max_request_body_bytes
+
+    @pytest.fixture
+    def portal_headers(self, client, auth_headers, client_id) -> dict[str, str]:
+        token = client.post(
+            f"/api/v1/clients/{client_id}/portal-link", json={}, headers=auth_headers
+        ).json()["token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    def _chunked_upload(self, client, headers, fields, path, body_bytes):
+        boundary = "----caflow-test"
+        head = "".join(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
+            for name, value in fields.items()
+        ) + (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="big.pdf"\r\n'
+            f"Content-Type: application/pdf\r\n\r\n"
+        )
+
+        def stream():
+            # A generator body is what makes httpx omit Content-Length, which
+            # is the whole point: this is the shape the declared-length check
+            # cannot see.
+            yield head.encode()
+            yield b"%PDF-1.4\n"
+            sent = 0
+            while sent < body_bytes:
+                chunk = b"A" * (256 * 1024)
+                sent += len(chunk)
+                yield chunk
+            yield f"\r\n--{boundary}--\r\n".encode()
+
+        return client.post(
+            path,
+            content=stream(),
+            headers={
+                **headers,
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+
+    def test_a_practitioner_upload_is_capped_by_what_arrives(
+        self, client: TestClient, auth_headers, client_id
+    ):
+        response = self._chunked_upload(
+            client,
+            auth_headers,
+            {"client_id": client_id},
+            "/api/v1/documents/upload",
+            self.LIMIT + 5 * 1024 * 1024,
+        )
+        assert response.status_code == 413, response.text
+        assert response.json()["error"]["code"] == "payload_too_large"
+        # The request-body limit, not the per-upload one: this was stopped
+        # before it ever reached a file the storage layer could measure.
+        assert "Request body exceeds" in response.json()["detail"]
+
+    def test_the_portal_upload_is_capped_too(self, client: TestClient, portal_headers):
+        """The one an outside party can reach."""
+        response = self._chunked_upload(
+            client,
+            portal_headers,
+            {},
+            "/api/v1/portal/documents",
+            self.LIMIT + 5 * 1024 * 1024,
+        )
+        assert response.status_code == 413, response.text
+        assert response.json()["error"]["code"] == "payload_too_large"
+        # Asserted on the message, not just the code: the storage layer answers
+        # 413 too, and it answers it only once the bytes are already spent.
+        assert "Request body exceeds" in response.json()["detail"]
+
+    def test_an_undeclared_body_inside_the_limit_still_works(
+        self, client: TestClient, auth_headers, client_id
+    ):
+        """The cap must not turn every chunked upload into a refusal."""
+        response = self._chunked_upload(
+            client, auth_headers, {"client_id": client_id}, "/api/v1/documents/upload", 1024
+        )
+        assert response.status_code == 201, response.text
+
+    def test_the_read_stops_rather_than_reporting_afterwards(self):
+        """Asserted at the ASGI layer, because that is where the cost is.
+
+        Everything above only proves the status code. What matters is that the
+        body is *not drained first*: the refusal has to come out of ``receive``
+        while there are still chunks on the wire, or the disk and the memory
+        have already been spent by the time anyone says no.
+        """
+        chunks = [
+            {"type": "http.request", "body": b"x" * 400, "more_body": True}
+            for _ in range(10)
+        ]
+        consumed = []
+
+        async def inner(scope, receive, send):  # pragma: no cover - raises first
+            while True:
+                message = await receive()
+                consumed.append(len(message.get("body", b"")))
+                if not message.get("more_body"):
+                    break
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        async def receive():
+            return chunks.pop(0)
+
+        async def send(message):  # pragma: no cover - never reached
+            raise AssertionError("the app should not have answered")
+
+        middleware = BodySizeLimitMiddleware(inner, max_bytes=1000)
+        scope = {"type": "http", "method": "POST", "path": "/x", "headers": []}
+
+        with pytest.raises(StarletteHTTPException) as raised:
+            asyncio.run(middleware(scope, receive, send))
+
+        assert raised.value.status_code == 413
+        # Two chunks accepted (800 bytes), the third refused at 1200 — and the
+        # remaining seven were never pulled off the wire.
+        assert consumed == [400, 400]
+        assert len(chunks) == 7
+
+    def test_a_non_http_scope_is_passed_straight_through(self):
+        seen = []
+
+        async def inner(scope, receive, send):
+            seen.append(scope["type"])
+
+        asyncio.run(
+            BodySizeLimitMiddleware(inner, max_bytes=10)({"type": "lifespan"}, None, None)
+        )
+        assert seen == ["lifespan"]
 
 
 class TestRateLimiting:

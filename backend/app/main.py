@@ -173,12 +173,22 @@ def create_app() -> FastAPI:
 
     # add_middleware wraps, so the LAST one added is the outermost. Read this
     # block bottom-up for the request order:
-    #   SecurityHeaders -> CORS -> RequestContext -> BodySizeLimit -> RateLimit
+    #   SecurityHeaders -> CORS -> RequestContext -> RateLimit -> BodySizeLimit
     # Security headers and CORS go outermost so they still apply to a response
     # produced by an inner layer (a 429, a 413, a handled 500). Request context
     # sits above the rest so everything below it logs with a request id.
-    app.add_middleware(RateLimitMiddleware)
+    #
+    # The body limit is innermost, and that is load-bearing rather than
+    # arbitrary. It caps an undeclared body by raising out of ``receive``
+    # (see BodySizeLimitMiddleware), and every ``BaseHTTPMiddleware`` above it
+    # relays ``receive`` through an anyio task group — which repackages
+    # anything raised there as an ``ExceptionGroup``. FastAPI only re-raises an
+    # ``HTTPException``, so from any outer position the 413 arrived as "There
+    # was an error parsing the body": a 400 telling the caller their upload was
+    # malformed when it was merely too big. Innermost, the router calls the
+    # wrapped ``receive`` directly and the refusal reaches the caller intact.
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(
         CORSMiddleware,
