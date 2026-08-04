@@ -15,7 +15,7 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentPractitioner, DbSession, Manager, PortalClient
@@ -402,6 +402,28 @@ def portal_overview(client: PortalClient, db: DbSession):
             )
         )
 
+    # Only the two kinds of document this page can show, narrowed by the query
+    # rather than by the loop below it.
+    #
+    # Every document the client had was read otherwise — hydrated into a mapped
+    # object, each one joined to its filing and that filing to its compliance
+    # type — and then filtered down here to the shared ones and the client's
+    # own uploads. Most of a client's documents are neither: they are the
+    # firm's working papers, the computations and the drafts a practitioner
+    # uploaded against the filing and deliberately did not share, and a
+    # document is a permanent record so that set only grows.
+    #
+    # Nothing leaked — the two comprehensions below have always filtered — but
+    # this is the landing page of a session authenticated by a magic link, held
+    # by a party outside the firm, and there is no reason for it to be reading
+    # the firm's private papers off disk at all. It is also the last of the
+    # landing pages still loading its whole table; the dashboard, the calendar,
+    # the workload view, the client screen and the billing summary have each
+    # been taken off the same curve.
+    visible = or_(
+        Document.is_shared_with_client.is_(True),
+        Document.uploaded_via_portal.is_(True),
+    )
     uploads = list(
         db.scalars(
             select(Document)
@@ -410,8 +432,10 @@ def portal_overview(client: PortalClient, db: DbSession):
                     ComplianceItem.compliance_type
                 )
             )
-            .where(Document.client_id == client.id)
-            .order_by(Document.created_at.desc())
+            .where(Document.client_id == client.id, visible)
+            # ``id`` breaks the tie: a batch of uploads shares a timestamp, and
+            # the two lists below are built from this one order.
+            .order_by(Document.created_at.desc(), Document.id.desc())
         ).all()
     )
 

@@ -766,3 +766,123 @@ class TestPortalBilling:
 
         assert all("fee_paise" not in filing for filing in body["filings"])
         assert all("notes" not in shown for shown in body["invoices"])
+
+
+class TestWhatTheLandingPageReadsToBuildItself:
+    """The portal showed two lists of documents and read a third to get them.
+
+    Every document the client had was loaded — hydrated into a mapped object,
+    each one joined to its filing and that filing to its compliance type — and
+    then filtered down here to the shared ones and the client's own uploads.
+    Most of a client's documents are neither: they are the firm's working
+    papers, the computations and the drafts a practitioner uploaded against a
+    filing and deliberately did not share. A document is a permanent record, so
+    that set only grows.
+
+    Nothing leaked; the filtering was always there. But this is the landing
+    page of a session authenticated by a magic link, held by a party outside
+    the firm, and there is no reason for it to read the firm's private papers
+    off disk at all. It is also the last of the landing pages still loading its
+    whole table — the dashboard, the calendar, the workload view, the client
+    screen and the billing summary have each been taken off the same curve.
+    """
+
+    def _upload(self, client, auth_headers, client_id, name, *, share=False):
+        response = client.post(
+            "/api/v1/documents/upload",
+            files={"file": (name, io.BytesIO(PDF_BYTES), "application/pdf")},
+            data={"client_id": client_id, "share_with_client": str(share).lower()},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["document"]
+
+    def _portal_upload(self, client, portal_headers, name):
+        response = client.post(
+            "/api/v1/portal/documents",
+            files={"file": (name, io.BytesIO(PDF_BYTES), "application/pdf")},
+            headers=portal_headers,
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    def test_the_firms_private_papers_are_never_read(
+        self, client, auth_headers, client_id, portal_headers, recorded_sql
+    ):
+        private = [
+            self._upload(client, auth_headers, client_id, f"workpaper-{i}.pdf")
+            for i in range(4)
+        ]
+        shared = self._upload(
+            client, auth_headers, client_id, "acknowledgement.pdf", share=True
+        )
+
+        recorded_sql.clear()
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        # The WHERE clause, not the whole statement: every column of the table
+        # is named in the SELECT list, so looking for the two flags anywhere
+        # would pass whether or not they narrow anything.
+        wheres = [
+            statement.split(" WHERE ", 1)[1]
+            for statement in recorded_sql
+            if statement.startswith("SELECT")
+            and " FROM documents" in statement
+            and " WHERE " in statement
+        ]
+        by_client = [where for where in wheres if "documents.client_id" in where]
+        assert by_client, "the page stopped reading the client's documents entirely"
+        for where in by_client:
+            assert "is_shared_with_client" in where and "uploaded_via_portal" in where, (
+                "the whole table is still being read to build two filtered lists"
+            )
+        assert [doc["id"] for doc in body["shared_documents"]] == [shared["id"]]
+        assert body["my_uploads"] == []
+        # And the point of the filter: none of them are in the payload either.
+        rendered = {doc["id"] for doc in body["shared_documents"] + body["my_uploads"]}
+        assert rendered.isdisjoint({doc["id"] for doc in private})
+
+    def test_both_lists_the_page_shows_are_still_whole(
+        self, client, auth_headers, client_id, portal_headers
+    ):
+        """Narrowing the query must not narrow what the client sees."""
+        shared = [
+            self._upload(client, auth_headers, client_id, f"ack-{i}.pdf", share=True)
+            for i in range(3)
+        ]
+        self._upload(client, auth_headers, client_id, "internal.pdf")
+        mine = [
+            self._portal_upload(client, portal_headers, f"bank-{i}.pdf")
+            for i in range(2)
+        ]
+
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        assert {doc["id"] for doc in body["shared_documents"]} == {
+            doc["id"] for doc in shared
+        }
+        assert {doc["id"] for doc in body["my_uploads"]} == {doc["id"] for doc in mine}
+
+    def test_a_document_that_is_both_shared_and_client_uploaded_is_in_both(
+        self, client, auth_headers, client_id, portal_headers, db
+    ):
+        """The two lists overlap by design, and the query is an ``OR``."""
+        from app.models.document import Document
+
+        uploaded = self._portal_upload(client, portal_headers, "statement.pdf")
+        row = db.get(Document, uuid.UUID(uploaded["id"]))
+        row.is_shared_with_client = True
+        db.commit()
+
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        assert [doc["id"] for doc in body["shared_documents"]] == [uploaded["id"]]
+        assert [doc["id"] for doc in body["my_uploads"]] == [uploaded["id"]]
+
+    def test_a_client_with_nothing_to_show_still_lands(
+        self, client, auth_headers, client_id, portal_headers
+    ):
+        body = client.get("/api/v1/portal/me", headers=portal_headers).json()
+
+        assert body["shared_documents"] == []
+        assert body["my_uploads"] == []
