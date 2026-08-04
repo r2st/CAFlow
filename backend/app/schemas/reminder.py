@@ -8,7 +8,12 @@ from datetime import datetime
 from pydantic import Field
 
 from app.models.base import ReminderChannel, ReminderStatus, ReminderType
-from app.schemas.common import ORMModel, SanitizedModel
+from app.schemas.common import (
+    DraftContext,
+    MessageBody,
+    ORMModel,
+    SanitizedModel,
+)
 
 
 class ReminderOut(ORMModel):
@@ -38,7 +43,7 @@ class ReminderCreate(SanitizedModel):
     reminder_type: ReminderType = ReminderType.CUSTOM
     channel: ReminderChannel | None = None
     subject: str | None = Field(default=None, max_length=512)
-    body: str | None = None
+    body: MessageBody | None = None
     scheduled_for: datetime | None = None
     compliance_item_id: uuid.UUID | None = None
     invoice_id: uuid.UUID | None = None
@@ -51,7 +56,9 @@ class ReminderDraftRequest(SanitizedModel):
     purpose: str = Field(default="document_request", max_length=64)
     compliance_item_id: uuid.UUID | None = None
     invoice_id: uuid.UUID | None = None
-    extra_context: dict = Field(default_factory=dict)
+    # Bounded in size and shape: every entry is rendered into the prompt that
+    # goes to OpenRouter. See :data:`~app.schemas.common.DraftContext`.
+    extra_context: DraftContext = Field(default_factory=dict)
 
 
 class ReminderDraftOut(SanitizedModel):

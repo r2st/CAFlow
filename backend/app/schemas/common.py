@@ -246,3 +246,43 @@ ServiceFees = Annotated[
     dict[ServiceFeeCode, ServiceFeeAmount],
     Field(max_length=MAX_SERVICE_FEE_OVERRIDES),
 ]
+
+
+# The facts a practitioner adds to an AI-drafted message, and the message body
+# itself. Both are free-form on purpose, and neither had any bound at all.
+#
+# ``extra_context`` is the sharper of the two, because it is not merely stored.
+# ``draft_client_message`` renders every entry into the prompt as
+# ``- <key>: <value>`` and posts it to OpenRouter, so an unbounded dict is an
+# unbounded *outbound* request — as large as the body limit allows, twenty-five
+# megabytes, on a paid API, from any authenticated practitioner including a
+# junior, at whatever rate the default bucket permits. Nothing downstream
+# noticed: the model is asked for at most 400 tokens back, so the cost and the
+# latency sit entirely on the side nothing was counting. A nested structure did
+# the same in less space, since ``{key}: {value}`` renders a whole object.
+#
+# So the shape is pinned as well as the size: a context entry is a fact about a
+# filing or an invoice — a date, a number, a name — and a scalar is what that
+# is. A list or an object arriving here is not a caller filling in details, and
+# the two server-built contexts (:mod:`app.services.reminders`) are assembled
+# after validation and are unaffected either way.
+#
+# ``body`` is the plainer half. It is a ``TEXT`` column, so it took whatever
+# arrived and the dispatcher then handed it to SMTP: a twenty-five megabyte
+# reminder is a row that is read back on every listing and a message no relay
+# will accept. Generous rather than tight — a practitioner pasting a long
+# statement of account into a message is doing ordinary work.
+MAX_DRAFT_CONTEXT_ENTRIES = 25
+MAX_DRAFT_CONTEXT_KEY = 64
+MAX_DRAFT_CONTEXT_VALUE = 500
+MAX_MESSAGE_BODY = 20_000
+
+DraftContextKey = Annotated[str, Field(min_length=1, max_length=MAX_DRAFT_CONTEXT_KEY)]
+DraftContextValue = (
+    Annotated[str, Field(max_length=MAX_DRAFT_CONTEXT_VALUE)] | int | float | bool | None
+)
+DraftContext = Annotated[
+    dict[DraftContextKey, DraftContextValue],
+    Field(max_length=MAX_DRAFT_CONTEXT_ENTRIES),
+]
+MessageBody = Annotated[str, Field(max_length=MAX_MESSAGE_BODY)]

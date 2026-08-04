@@ -1277,3 +1277,99 @@ class TestCancellingAChaseThatIsGoingOut:
             f"/api/v1/reminders/{reminder['id']}/cancel", headers=auth_headers
         )
         assert response.status_code == 404
+
+
+class TestWhatAPractitionerMaySendUs:
+    """The two free-form fields on this router, both of which were unbounded.
+
+    ``extra_context`` is the sharper one: every entry is rendered into the
+    prompt posted to OpenRouter, so an unbounded dict is an unbounded outbound
+    request on a paid API, reachable by any authenticated practitioner.
+    """
+
+    def test_a_context_entry_longer_than_a_fact_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        response = client.post(
+            "/api/v1/reminders/draft",
+            json={
+                "client_id": client_id,
+                "extra_context": {"note": "x" * 5_000},
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+
+    def test_a_context_of_thousands_of_entries_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        response = client.post(
+            "/api/v1/reminders/draft",
+            json={
+                "client_id": client_id,
+                "extra_context": {f"k{n}": "v" for n in range(2_000)},
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+
+    def test_a_nested_structure_is_not_a_fact_about_a_filing(
+        self, client, auth_headers, client_id
+    ):
+        response = client.post(
+            "/api/v1/reminders/draft",
+            json={
+                "client_id": client_id,
+                "extra_context": {"payload": {"nested": ["and", "unbounded"]}},
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+
+    def test_the_ordinary_context_a_practitioner_adds_still_works(
+        self, client, auth_headers, client_id
+    ):
+        response = client.post(
+            "/api/v1/reminders/draft",
+            json={
+                "client_id": client_id,
+                "purpose": "fee_reminder",
+                "extra_context": {
+                    "invoice_number": "INV/FY2026-27/0004",
+                    "amount_inr": 12_500.50,
+                    "urgent": True,
+                    "chased_before": None,
+                },
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["body"]
+
+    def test_a_message_body_larger_than_a_message_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        response = client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "subject": "Statement of account",
+                "body": "x" * 50_000,
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+
+    def test_a_long_but_reasonable_body_is_still_accepted(
+        self, client, auth_headers, client_id
+    ):
+        response = client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "subject": "Statement of account",
+                "body": "Dear client,\n\n" + ("line of the statement\n" * 500),
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
