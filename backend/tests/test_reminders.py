@@ -1473,3 +1473,125 @@ class TestPagingAListWhoseRowsShareAnInstant:
         assert client.get("/api/v1/reminders", headers=auth_headers).status_code == 200
 
         assert paged_order_by(recorded_sql, "reminders").endswith("reminders.id DESC")
+
+
+class TestWhenAReminderTheFirmScheduledActuallyGoesOut:
+    """``scheduled_for`` is the only datetime this API takes in.
+
+    A timestamp with no offset names a wall clock rather than a moment, and
+    nothing required one — so what the value meant was settled by whichever
+    reader got to it. PostgreSQL casts a naive value using the session's
+    ``TimeZone``, which nothing here sets; SQLAlchemy's SQLite dialect drops
+    ``tzinfo`` on the way in, and ``clock.to_ist`` reads a stored naive
+    timestamp as UTC.
+
+    Read as IST, which is the clock the product runs on and the one the person
+    filling in the field is looking at — the same reading ``ist_morning``,
+    ``audit._day_bounds`` and ``tasks._month_start_instant`` already take.
+    """
+
+    def _queue(self, client, auth_headers, client_id, scheduled_for: str) -> str:
+        response = client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "subject": "Please send the bank statement",
+                "body": "b",
+                "scheduled_for": scheduled_for,
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["id"]
+
+    def _stored(self, db, reminder_id: str) -> datetime:
+        db.expire_all()
+        return db.get(Reminder, uuid.UUID(reminder_id)).scheduled_for
+
+    def test_a_bare_timestamp_is_the_indian_morning_the_firm_meant(
+        self, client, auth_headers, client_id, db
+    ):
+        """09:00 in the office is 03:30 UTC, not 09:00 UTC.
+
+        Read as UTC it became 14:30 IST: a chase set for first thing went out
+        in the middle of the afternoon.
+        """
+        reminder_id = self._queue(client, auth_headers, client_id, "2026-09-01T09:00:00")
+
+        assert clock.to_ist(self._stored(db, reminder_id)).replace(tzinfo=None) == datetime(
+            2026, 9, 1, 9, 0
+        )
+
+    def test_an_offset_the_caller_sent_is_believed(
+        self, client, auth_headers, client_id, db
+    ):
+        reminder_id = self._queue(
+            client, auth_headers, client_id, "2026-09-01T09:00:00+00:00"
+        )
+
+        assert clock.to_ist(self._stored(db, reminder_id)).replace(tzinfo=None) == datetime(
+            2026, 9, 1, 14, 30
+        )
+
+    def test_a_non_utc_offset_is_re_expressed_rather_than_dropped(
+        self, client, auth_headers, client_id, db
+    ):
+        """Both backends have to store the same moment, whatever arrived.
+
+        SQLite's dialect writes the naive part and discards the offset, so an
+        aware value that is not already UTC would otherwise be stored as its
+        own local wall clock.
+        """
+        reminder_id = self._queue(
+            client, auth_headers, client_id, "2026-09-01T09:00:00+05:30"
+        )
+
+        assert clock.to_ist(self._stored(db, reminder_id)).replace(tzinfo=None) == datetime(
+            2026, 9, 1, 9, 0
+        )
+
+    def test_the_evening_of_a_deadline_is_not_pushed_past_it(
+        self, client, auth_headers, client_id, db
+    ):
+        """The direction that costs the client the filing.
+
+        20:00 IST on the 20th read as UTC is 01:30 IST on the *21st* — after
+        the deadline the reminder exists to beat.
+        """
+        reminder_id = self._queue(client, auth_headers, client_id, "2026-09-20T20:00:00")
+
+        assert clock.date_of(self._stored(db, reminder_id)) == date(2026, 9, 20)
+
+    def test_a_reminder_with_no_time_on_it_still_goes_out_now(
+        self, client, auth_headers, client_id, db
+    ):
+        """Omitting the field is unchanged: the row is queued for this instant."""
+        response = client.post(
+            "/api/v1/reminders",
+            json={"client_id": client_id, "subject": "now", "body": "b"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+
+        queued = self._stored(db, response.json()["id"])
+        assert abs((datetime.now(UTC) - clock.to_ist(queued).astimezone(UTC)).total_seconds()) < 60
+
+    def test_the_dispatcher_agrees_about_which_ones_are_due(
+        self, client, auth_headers, client_id, db
+    ):
+        """The whole point of pinning it: a queue read against ``now``.
+
+        A bare morning timestamp from a day already past is due; one from a day
+        still ahead is not, and neither answer may depend on how the database
+        was configured.
+        """
+        yesterday = clock.today() - timedelta(days=1)
+        tomorrow = clock.today() + timedelta(days=1)
+        self._queue(client, auth_headers, client_id, f"{yesterday.isoformat()}T09:00:00")
+        self._queue(client, auth_headers, client_id, f"{tomorrow.isoformat()}T09:00:00")
+
+        counts = client.get(
+            "/api/v1/reminders/pending-count", headers=auth_headers
+        ).json()
+
+        assert counts == {"scheduled": 2, "due_now": 1}

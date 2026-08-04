@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated
 
-from pydantic import Field
+from pydantic import AfterValidator, Field
 
+from app.core import clock
 from app.models.base import ReminderChannel, ReminderStatus, ReminderType
 from app.schemas.common import (
     DraftContext,
@@ -14,6 +16,43 @@ from app.schemas.common import (
     ORMModel,
     SanitizedModel,
 )
+
+
+def as_instant(value: datetime | None) -> datetime | None:
+    """Pin a caller's timestamp to an instant, reading a bare one as IST.
+
+    ``scheduled_for`` is the only datetime this API takes *in*, and nothing
+    required it to carry an offset. A timestamp without one names a wall clock
+    and not a moment, so what it meant was decided by whoever read it next —
+    and none of the readers agreed:
+
+    * PostgreSQL casts a naive value into ``timestamptz`` using the session's
+      ``TimeZone``, which nothing here sets. The stored instant therefore
+      depended on how the database server happened to be configured;
+    * SQLAlchemy's SQLite dialect drops ``tzinfo`` when it writes, and
+      everything that reads a stored timestamp back — ``clock.to_ist`` says so
+      plainly — treats a naive one as UTC.
+
+    So the value a practitioner typed as 09:00 became 09:00 UTC, which is 14:30
+    in the office that typed it. A reminder set for first thing in the morning
+    went out in the middle of the afternoon, and one set for the evening of a
+    deadline went out after it had passed.
+
+    Read as IST, because that is the clock this product runs on and the one the
+    person filling in the field is looking at — the same reading
+    ``reminders.ist_morning``, ``audit._day_bounds`` and
+    ``tasks._month_start_instant`` already take when an Indian wall-clock time
+    has to become an instant. An offset the caller *did* send is believed and
+    simply re-expressed, so both backends store the same moment either way.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=clock.IST)
+    return value.astimezone(UTC)
+
+
+Instant = Annotated[datetime, AfterValidator(as_instant)]
 
 
 class ReminderOut(ORMModel):
@@ -44,7 +83,9 @@ class ReminderCreate(SanitizedModel):
     channel: ReminderChannel | None = None
     subject: str | None = Field(default=None, max_length=512)
     body: MessageBody | None = None
-    scheduled_for: datetime | None = None
+    # Pinned to an instant on the way in; a bare timestamp is Indian office
+    # time. See :func:`as_instant`.
+    scheduled_for: Instant | None = None
     compliance_item_id: uuid.UUID | None = None
     invoice_id: uuid.UUID | None = None
 
