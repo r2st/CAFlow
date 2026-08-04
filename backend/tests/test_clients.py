@@ -2380,3 +2380,103 @@ class TestAnExplicitNullOnAClientsRequiredFields:
         updated = response.json()["client"]
         assert updated["name"] == created_client["name"]
         assert updated["is_active"] is True
+
+
+class TestToppingUpAClientTheFirmHasLetGo:
+    """Generation knows nothing about off-boarding, so the endpoint has to.
+
+    Off-boarding closes every open filing a client has — that is what
+    ``shelve_open_items`` does, and reactivating is what puts them back. The
+    generator only ever adds: it materialises whatever the registrations call
+    for, at ``pending``, and the shelved rows do not stop it because they only
+    cover periods that already existed.
+
+    So ``POST /clients/{id}/compliance-items`` was the one door back into the
+    state the rest of the module takes care to prevent — a firm that has
+    stopped acting for a client handed a fresh calendar of obligations for
+    them, which nothing sweeps out again because only reactivation reopens a
+    shelved calendar.
+    """
+
+    def onboard_and_let_go(self, client: TestClient, auth_headers: dict) -> str:
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        client_id = created["client"]["id"]
+        assert created["compliance_items_created"] > 0
+        assert (
+            client.delete(f"{API}/clients/{client_id}", headers=auth_headers).status_code
+            == 204
+        )
+        return client_id
+
+    def test_the_calendar_of_an_off_boarded_client_is_not_regenerated(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = self.onboard_and_let_go(client, auth_headers)
+        # A window past what was already materialised, which is what a
+        # practitioner backfilling or extending a calendar actually sends.
+        today = clock.today()
+        response = client.post(
+            f"{API}/clients/{client_id}/compliance-items",
+            headers=auth_headers,
+            json={
+                "window_start": today.isoformat(),
+                "window_end": add_months(today, 36).isoformat(),
+            },
+        )
+        assert response.status_code == 409, response.text
+        assert "off-boarded" in response.json()["detail"]
+
+        # And nothing was written: every filing is still where off-boarding
+        # left it.
+        assert {
+            item.status
+            for item in db.scalars(
+                select(ComplianceItem).where(
+                    ComplianceItem.client_id == uuid.UUID(client_id)
+                )
+            ).all()
+        } == {ComplianceStatus.NOT_APPLICABLE}
+
+    def test_the_refusal_names_the_way_back(
+        self, client: TestClient, auth_headers: dict
+    ):
+        client_id = self.onboard_and_let_go(client, auth_headers)
+        detail = client.post(
+            f"{API}/clients/{client_id}/compliance-items", headers=auth_headers, json={}
+        ).json()["detail"]
+        assert "reactivate" in detail.lower()
+
+    def test_a_client_taken_back_on_can_be_topped_up_again(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The refusal is about the standing, not about the client."""
+        client_id = self.onboard_and_let_go(client, auth_headers)
+        assert (
+            client.patch(
+                f"{API}/clients/{client_id}",
+                headers=auth_headers,
+                json={"is_active": True},
+            ).status_code
+            == 200
+        )
+        response = client.post(
+            f"{API}/clients/{client_id}/compliance-items", headers=auth_headers, json={}
+        )
+        assert response.status_code == 200, response.text
+
+    def test_an_active_client_is_untouched_by_the_check(
+        self, client: TestClient, auth_headers: dict, client_id: str
+    ):
+        today = clock.today()
+        response = client.post(
+            f"{API}/clients/{client_id}/compliance-items",
+            headers=auth_headers,
+            json={
+                "window_start": today.isoformat(),
+                "window_end": add_months(today, 24).isoformat(),
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["created"] > 0

@@ -462,6 +462,34 @@ def generate_items(
 ):
     """Explicitly (re)generate compliance items for a client over a window."""
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
+    # Off-boarding closes every open filing a client has — that is what
+    # ``shelve_open_items`` is for, and reactivating is what puts them back.
+    # Generation knows nothing about any of it: it materialises whatever the
+    # registrations call for, at ``pending``, and the shelved rows do not stop
+    # it because they only cover periods that already existed.
+    #
+    # So this endpoint was the one door back into a state the rest of the module
+    # takes care to prevent. A firm that has stopped acting for a client got a
+    # fresh calendar of obligations for them: pending on the calendar, counted
+    # on the dashboard beside the not-applicable rows off-boarding had just
+    # written, going overdue one by one, raising tasks on somebody's queue, and
+    # chasing a client the firm no longer acts for — over the firm's own name —
+    # for the paperwork behind a return nobody owes it. Nothing sweeps it back
+    # out, because reactivation is the only thing that reopens a shelved
+    # calendar and this client was never reactivated.
+    #
+    # The nightly top-up already skips them (``regenerate_for_firm`` walks
+    # active clients only) and the patch only generates on the reactivating
+    # transition. This is the same rule said out loud on the one path a
+    # practitioner drives by hand.
+    if not client.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"{client.name} has been off-boarded — reactivate the client to "
+                "restore their compliance calendar"
+            ),
+        )
     try:
         result = generate_compliance_items(
             db, client, window_start=payload.window_start, window_end=payload.window_end
