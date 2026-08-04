@@ -14,6 +14,7 @@ from copy import deepcopy
 import httpx
 import pytest
 
+from app.core import clock
 from app.models.base import DocumentCategory
 from app.services import ai
 from app.services.ai import (
@@ -872,3 +873,162 @@ class TestAReplyWithNothingInIt:
         )
 
         assert (budget.drafted, budget.templated) == (0, 1)
+
+
+class TestAnExtractedFieldThatCouldNotBeStored:
+    """``extracted_data`` is a JSON column, and on the deployment it is JSONB.
+
+    Whatever the model reports lands there whole, so a value Python is happy to
+    hold but PostgreSQL will not accept as JSON is a row the database refuses —
+    and the refusal arrives at the commit *ending the upload*, after
+    ``storage.save_upload`` has already written the bytes to the storage
+    volume. That leaves a file on disk with no row pointing at it and nothing
+    to sweep it by, which is the one outcome categorising a document is never
+    allowed to produce.
+    """
+
+    def _categorise(self, capture_posts, body: str):
+        _, queue = capture_posts
+        queue.append(_StubResponse(_content(body)))
+        return categorise_document("doc.pdf", client=OpenRouterClient(api_key="sk-or-test"))
+
+    @pytest.mark.parametrize(
+        "literal",
+        [
+            # json.loads accepts all three: the first two are tokens Python's
+            # parser allows by extension, and the third simply overflows.
+            "NaN",
+            "Infinity",
+            "1e400",
+        ],
+    )
+    def test_an_amount_json_cannot_carry_is_not_stored(self, capture_posts, literal):
+        result = self._categorise(
+            capture_posts, f'{{"category": "other", "total_amount_inr": {literal}}}'
+        )
+
+        assert "total_amount_inr" not in result.extracted
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e400"])
+    def test_what_is_kept_is_what_postgresql_would_accept(self, capture_posts, literal):
+        """The assertion that names the actual failure.
+
+        ``allow_nan=False`` is the standard's own rule, and it is the one JSONB
+        applies: ``NaN`` and ``Infinity`` are not JSON, so the row is rejected
+        outright rather than stored oddly.
+        """
+        result = self._categorise(
+            capture_posts,
+            f'{{"category": "other", "confidence": 0.9, "total_amount_inr": {literal}}}',
+        )
+
+        json.dumps(result.extracted, allow_nan=False)
+
+    def test_an_amount_that_is_merely_large_is_still_kept(self, capture_posts):
+        # The bound is on what JSON can carry, not on how much a client billed.
+        result = self._categorise(
+            capture_posts, '{"category": "other", "total_amount_inr": 1e30}'
+        )
+
+        assert result.extracted["total_amount_inr"] == pytest.approx(1e30)
+
+    @pytest.mark.parametrize(
+        "reported", ['{"from": "2026-04-01"}', '["Q1", "Q2"]', "true", "false"]
+    )
+    def test_a_period_that_is_not_a_label_is_dropped(self, capture_posts, reported):
+        """This field was the one thing reaching the column that nothing checked.
+
+        It is not something the model invents unaided either: the excerpt it
+        reads is the client's own upload, so what it echoes back is chosen by
+        whoever sent the file.
+        """
+        result = self._categorise(
+            capture_posts, f'{{"category": "other", "period": {reported}}}'
+        )
+
+        assert "period" not in result.extracted
+
+    def test_an_over_long_period_is_cut_to_a_label(self, capture_posts):
+        result = self._categorise(
+            capture_posts,
+            json.dumps({"category": "other", "period": "Q1 FY2026-27 " + "x" * 500}),
+        )
+
+        assert len(result.extracted["period"]) == ai.MAX_LLM_TEXT_FIELD
+        assert result.extracted["period"].startswith("Q1 FY2026-27")
+
+    def test_an_ordinary_period_is_kept_whole(self, capture_posts):
+        result = self._categorise(
+            capture_posts, json.dumps({"category": "other", "period": " Q1 FY2026-27 "})
+        )
+
+        assert result.extracted["period"] == "Q1 FY2026-27"
+
+    def test_control_characters_do_not_reach_the_column(self, capture_posts):
+        # Rendered back into the document screen, like every other stored
+        # string, so it is sanitised on the way in like every other one.
+        result = self._categorise(
+            capture_posts, json.dumps({"category": "other", "period": "2026\x00-07"})
+        )
+
+        assert result.extracted["period"] == "2026-07"
+
+    def test_a_document_supplied_amount_never_costs_the_upload(self, db, monkeypatch):
+        """End to end: the row is written, and the file it points at is there.
+
+        The failure this guards is not visible in the categoriser's return
+        value — it is a ``DataError`` out of the commit that *ends* the upload,
+        with the bytes already on the storage volume.
+        """
+        from app.models.base import EntityType
+        from app.models.client import Client
+        from app.models.firm import Firm
+        from app.services import documents as document_service
+        from app.services import storage
+
+        firm = Firm(name="Sharma & Associates", email="office@sharma-ca.in")
+        db.add(firm)
+        db.flush()
+        record = Client(
+            firm_id=firm.id,
+            name="Nimbus Textiles",
+            entity_type=EntityType.PRIVATE_LIMITED,
+            onboarded_on=clock.today(),
+        )
+        db.add(record)
+        db.flush()
+
+        def model_reports_infinity(*args, **kwargs):
+            """What ``categorise_document`` returns when the model answers so.
+
+            Built through ``clean_llm_field`` rather than around it, so this
+            stands in for the model's reply rather than for the checking.
+            """
+            reported = {"total_amount_inr": float("inf"), "period": {"q": 1}}
+            return CategorisationResult(
+                category=DocumentCategory.SALES_INVOICE,
+                confidence=0.9,
+                extracted={
+                    key: cleaned
+                    for key, value in reported.items()
+                    if (cleaned := ai.clean_llm_field(key, value)) is not None
+                },
+                source="llm",
+            )
+
+        monkeypatch.setattr(
+            document_service, "categorise_document", model_reports_infinity
+        )
+        document = document_service.ingest_upload(
+            db,
+            client=record,
+            filename="invoice.pdf",
+            data=b"%PDF-1.4\n% ledger\n",
+            content_type="application/pdf",
+        )
+        db.commit()
+
+        # The rule JSONB applies: NaN and Infinity are not JSON, and a row
+        # carrying either is refused outright rather than stored oddly.
+        json.dumps(document.extracted_data, allow_nan=False)
+        assert storage.resolve_stored(document.storage_path).exists()

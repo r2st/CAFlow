@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ import httpx
 
 from app.config import settings
 from app.models.base import DocumentCategory
+from app.schemas.common import sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +199,43 @@ LLM_FIELD_PATTERNS: dict[str, re.Pattern[str]] = {
     "gstin": GSTIN_PATTERN,
 }
 
+# How much of a model-supplied text field is kept. ``period`` is a label —
+# "Q1 FY2026-27", "July 2026" — and nothing that lands in this column is ever
+# shown at length.
+MAX_LLM_TEXT_FIELD = 120
+
+
+def finite_number(value: Any) -> float | None:
+    """``value`` as a real number, or None if it is not one.
+
+    ``float()`` is not the whole of it, because the two values that break this
+    are ones ``float()`` accepts. ``json.loads`` turns ``1e400`` into ``inf``
+    without complaint, and it accepts the bare ``NaN`` and ``Infinity`` tokens
+    outright — both of which a free-tier model emits: the first from copying a
+    figure out of a document with too many digits on it, the second as its way
+    of saying it could not fill the field.
+
+    Neither survives the trip into ``documents.extracted_data``. That is a JSON
+    column, and it is ``JSONB`` on PostgreSQL — which is what the deployment
+    runs — where ``Infinity`` and ``NaN`` are not valid JSON and the row is
+    refused. The ``DataError`` comes out of the commit at the *end* of the
+    upload, by which time ``storage.save_upload`` has already written the bytes
+    to the storage volume: a file on disk with no row pointing at it, and
+    nothing to sweep it by. Categorising a document is the one part of an
+    upload allowed to be wrong; it is not allowed to lose the file.
+
+    :func:`confidence_or` already refuses a NaN for exactly this reason. This
+    is the other number the model is asked for, and it was left open.
+    """
+    if isinstance(value, bool):
+        # json true is not an amount; it is a model that ignored the schema.
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
 
 def clean_llm_field(key: str, value: Any) -> Any | None:
     """Normalise one model-supplied field, or None if it cannot be trusted."""
@@ -209,15 +248,24 @@ def clean_llm_field(key: str, value: Any) -> Any | None:
 
     if key == "total_amount_inr":
         # Asked for as a number; stored as one or not at all, so that nothing
-        # downstream has to guess whether this field holds "₹1,23,456".
-        if isinstance(value, bool):
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
+        # downstream has to guess whether this field holds "₹1,23,456". See
+        # :func:`finite_number` for why a bare ``float()`` is not enough.
+        return finite_number(value)
 
-    return value
+    # ``period``, and whatever the prompt asks for next. This branch used to
+    # store the value exactly as it arrived, which made it the one thing
+    # reaching ``extracted_data`` that nothing checked at all — and it is not a
+    # field the model invents on its own: the excerpt it reads is the client's
+    # own upload, so its contents are chosen by whoever sent the file.
+    #
+    # A label is a scalar and a short one. An object or a list is not a period,
+    # it is a model returning a structure where a string was asked for, and
+    # storing it puts a shape in the column that every reader downstream would
+    # have to guess at. Sanitised and cut for the reason every other inbound
+    # string is: it is rendered back into the document screen.
+    if isinstance(value, (bool, dict, list)):
+        return None
+    return sanitize_text(str(value))[:MAX_LLM_TEXT_FIELD] or None
 
 
 def heuristic_category(filename: str) -> tuple[DocumentCategory, float]:
