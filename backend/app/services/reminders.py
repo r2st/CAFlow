@@ -17,6 +17,7 @@ intact and makes "did we chase them?" answerable.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy import select
@@ -78,6 +79,49 @@ def kind_of(reminder: Reminder) -> str:
     be chased a second time on the next run.
     """
     return (reminder.extra or {}).get("kind", "filing")
+
+
+def _group_queued(
+    db: Session, column, ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, list[Reminder]]:
+    """Everything already queued against each of ``ids``, in one query.
+
+    ``already_queued`` reads the reminders a filing or an invoice already
+    carries, and every sweep asked for them one target at a time — inside a
+    loop over the firm's whole due list, and inside the transaction that holds
+    the firm's row for the length of the run.
+
+    That is one round-trip per filing, on a run whose size is the firm's client
+    list rather than a handful: a firm's deadlines cluster on the same offset
+    day, because every GST client is due on the 20th. Twenty-five clients of
+    the seeded calendar are thirteen hundred filings, so a sweep that queues
+    thirteen hundred reminders spent thirteen hundred separate SELECTs finding
+    out that none of them had one — and the *quiet* run, the one where
+    everything is already queued and nothing is added, costs exactly the same.
+
+    None of it buys anything a single query does not. The candidate set is the
+    firm's own due list, and the reminders hanging off it are few.
+    """
+    grouped: dict[uuid.UUID, list[Reminder]] = {target_id: [] for target_id in ids}
+    if not grouped:
+        return grouped
+    for reminder in db.scalars(select(Reminder).where(column.in_(grouped))).all():
+        grouped[getattr(reminder, column.key)].append(reminder)
+    return grouped
+
+
+def queued_for_items(
+    db: Session, item_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, list[Reminder]]:
+    """Reminders already queued against each filing. See :func:`_group_queued`."""
+    return _group_queued(db, Reminder.compliance_item_id, item_ids)
+
+
+def queued_for_invoices(
+    db: Session, invoice_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, list[Reminder]]:
+    """Reminders already queued against each invoice. See :func:`_group_queued`."""
+    return _group_queued(db, Reminder.invoice_id, invoice_ids)
 
 
 def already_queued(existing: list[Reminder], kind: str, offset: int) -> bool:
@@ -250,6 +294,9 @@ def queue_document_reminders(
         outstanding = documents.items_awaiting_documents(
             db, current_firm_id, from_date=run_date, to_date=horizon
         )
+        # One query for the whole firm's due list rather than one per filing;
+        # see :func:`_group_queued`.
+        queued_already = queued_for_items(db, [item.id for item, _ in outstanding])
         for item, checklist in outstanding:
             days_left = (item.due_date - run_date).days
             if days_left not in offsets:
@@ -258,12 +305,7 @@ def queue_document_reminders(
             if client is None or not client.is_active:
                 continue
 
-            existing = list(
-                db.scalars(
-                    select(Reminder).where(Reminder.compliance_item_id == item.id)
-                ).all()
-            )
-            if already_queued(existing, "document", days_left):
+            if already_queued(queued_already[item.id], "document", days_left):
                 continue
 
             missing_labels = [
@@ -348,7 +390,10 @@ def queue_payment_reminders(
         hold_while_queueing(db, current_firm_id)
         # Every message is signed by the firm that raised the invoice.
         firm_name = firms.name_of(db, current_firm_id)
-        for invoice in billing.unpaid_invoices(db, current_firm_id, today=run_date):
+        receivables = billing.unpaid_invoices(db, current_firm_id, today=run_date)
+        # One query for the firm's whole receivables list; see :func:`_group_queued`.
+        queued_already = queued_for_invoices(db, [inv.id for inv in receivables])
+        for invoice in receivables:
             if invoice.due_date is None:
                 continue
             days_overdue = (run_date - invoice.due_date).days
@@ -358,10 +403,7 @@ def queue_payment_reminders(
             if client is None or not client.is_active:
                 continue
 
-            existing = list(
-                db.scalars(select(Reminder).where(Reminder.invoice_id == invoice.id)).all()
-            )
-            if already_queued(existing, "payment", days_overdue):
+            if already_queued(queued_already[invoice.id], "payment", days_overdue):
                 continue
 
             channel = preferred_channel(client)

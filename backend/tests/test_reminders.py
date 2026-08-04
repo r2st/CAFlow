@@ -946,3 +946,158 @@ class TestOneSweepAtATime:
         servable = reminder_service.firms.servable_firm_ids(db)
         assert set(held) == servable
         assert held == sorted(held), "an undefined lock order lets two sweeps cross"
+
+
+class TestTheQueueIsReadOncePerFirm:
+    """``already_queued`` asked the database one filing at a time.
+
+    The read sat inside the loop over the firm's whole due list, inside the
+    transaction that holds the firm's row for the length of the run. A firm's
+    deadlines cluster on the same offset day — every GST client is due on the
+    20th — so the loop is as long as the client list, not a handful, and the
+    quiet run where everything is already queued costs exactly as much as the
+    busy one.
+    """
+
+    @pytest.fixture
+    def counted_sql(self):
+        """Every statement the engine executes inside the block."""
+        from sqlalchemy import event
+
+        from app.database import engine
+
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()))
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            yield statements
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+    def _reminder_reads(self, statements) -> int:
+        return sum(
+            1
+            for statement in statements
+            if statement.startswith("SELECT") and " FROM reminders" in statement
+        )
+
+    def _many_filings_on_one_day(self, client, auth_headers, db, run_date, count=6):
+        """Put ``count`` clients' filings all on the same offset day."""
+        from app.models.compliance import ComplianceItem
+        from tests.conftest import make_client_payload
+
+        for index in range(count):
+            payload = make_client_payload()
+            payload["name"] = f"Batch Client {index}"
+            payload.pop("pan")
+            payload.pop("gstin")
+            assert (
+                client.post("/api/v1/clients", json=payload, headers=auth_headers).status_code
+                == 201
+            )
+        items = db.scalars(select(ComplianceItem)).all()
+        for item in items:
+            item.due_date = run_date + timedelta(days=10)
+        db.commit()
+        return items
+
+    def test_the_document_sweep_reads_the_queue_once(
+        self, client, auth_headers, db, firm_id, counted_sql
+    ):
+        run_date = clock.today()
+        items = self._many_filings_on_one_day(client, auth_headers, db, run_date)
+        assert len(items) > 20, "not enough filings for the count to mean anything"
+
+        counted_sql.clear()
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+
+        assert len(queued) > 20
+        assert self._reminder_reads(counted_sql) == 1
+
+    def test_the_document_sweep_still_skips_what_is_already_queued(
+        self, client, auth_headers, db, firm_id
+    ):
+        """The batched read has to answer the same question the loop did."""
+        run_date = clock.today()
+        self._many_filings_on_one_day(client, auth_headers, db, run_date)
+
+        first = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        db.commit()
+        second = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+
+        assert len(first) > 20
+        assert second == []
+
+    def test_the_payment_sweep_reads_the_queue_once(
+        self, client, auth_headers, db, firm_id, client_id, counted_sql
+    ):
+        from app.models.base import InvoiceStatus
+        from app.models.invoice import Invoice
+        from tests.conftest import make_client_payload
+        from tests.test_invoices import file_everything
+
+        # One invoice per client, so the count can tell a batched read from a
+        # per-invoice one.
+        for index in range(6):
+            payload = make_client_payload()
+            payload["name"] = f"Receivable Client {index}"
+            payload.pop("pan")
+            payload.pop("gstin")
+            assert (
+                client.post("/api/v1/clients", json=payload, headers=auth_headers).status_code
+                == 201
+            )
+        file_everything(client, auth_headers)
+        client.post("/api/v1/invoices/generate", json={}, headers=auth_headers)
+        drafts = db.scalars(select(Invoice)).all()
+        run_date = clock.today()
+        for invoice in drafts:
+            invoice.status = InvoiceStatus.SENT
+            invoice.due_date = run_date - timedelta(days=7)
+        db.commit()
+        assert len(drafts) >= 6
+
+        counted_sql.clear()
+        queued = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[7]
+        )
+
+        assert len(queued) == len(drafts)
+        assert self._reminder_reads(counted_sql) == 1
+
+    def test_the_filing_sweep_reads_the_queue_once(
+        self, client, auth_headers, db, counted_sql, monkeypatch
+    ):
+        """The third sweep, which lives in the worker."""
+        run_date = clock.today()
+        items = self._many_filings_on_one_day(client, auth_headers, db, run_date)
+        assert len(items) > 20
+
+        monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: _NonClosing(db))
+        counted_sql.clear()
+        result = worker_tasks.schedule_compliance_reminders_task(run_date.isoformat())
+
+        assert result["queued"] > 0
+        assert self._reminder_reads(counted_sql) == 1
+
+
+class _NonClosing:
+    """The test's own session, handed to a worker task that owns its lifetime."""
+
+    def __init__(self, session):
+        self._session = session
+
+    def __enter__(self):
+        return self._session
+
+    def __exit__(self, *exc):
+        return False

@@ -115,6 +115,11 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
                     ComplianceItem.due_date <= run_date + timedelta(days=60),
                 )
             ).all()
+            # One query for the firm's whole due list rather than one per
+            # filing; see ``reminders._group_queued``.
+            queued_already = reminder_service.queued_for_items(
+                db, [item.id for item in items]
+            )
 
             for item in items:
                 offsets = item.compliance_type.reminder_offsets_days or []
@@ -129,12 +134,9 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
                 # for the same filing on the same day is a different message
                 # and must not silence this one. Checked in Python so the JSON
                 # predicate behaves identically on PostgreSQL and SQLite.
-                existing = list(
-                    db.scalars(
-                        select(Reminder).where(Reminder.compliance_item_id == item.id)
-                    ).all()
-                )
-                if reminder_service.already_queued(existing, "filing", days_left):
+                if reminder_service.already_queued(
+                    queued_already[item.id], "filing", days_left
+                ):
                     continue
 
                 body = draft_client_message(
