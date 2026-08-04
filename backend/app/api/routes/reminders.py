@@ -287,7 +287,11 @@ def list_reminders(
 def cancel_reminder(
     reminder_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
 ):
-    reminder = db.get(Reminder, reminder_id)
+    # Held before the status is read, because the dispatcher may be sending
+    # this very row: a status read past the lock is one taken before the
+    # message went out, and the cancel then writes over a send that happened.
+    # See :func:`reminder_service.load_for_update`.
+    reminder = reminder_service.load_for_update(db, reminder_id)
     if reminder is None or reminder.firm_id != practitioner.firm_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reminder not found")
     if reminder.status != ReminderStatus.SCHEDULED:
@@ -322,15 +326,18 @@ def cancel_scheduled_for_client(
 ):
     """Stop chasing a client — cancels everything still queued for them."""
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
-    pending = list(
-        db.scalars(
-            select(Reminder).where(
-                Reminder.firm_id == practitioner.firm_id,
-                Reminder.client_id == client.id,
-                Reminder.status == ReminderStatus.SCHEDULED,
-            )
-        ).all()
-    )
+    # Each row held before its status is read, for the reason the single cancel
+    # takes the lock: the dispatcher may be part-way through this client's
+    # queue, and a plain read of it is a read of what was true before the
+    # message went out. Re-checked per row once the lock is ours, so one the
+    # dispatcher has just sent is left as sent rather than recorded cancelled.
+    pending = [
+        reminder
+        for reminder in reminder_service.scheduled_for_client_for_update(
+            db, firm_id=practitioner.firm_id, client_id=client.id
+        )
+        if reminder.status == ReminderStatus.SCHEDULED
+    ]
     for reminder in pending:
         reminder.status = ReminderStatus.CANCELLED
 

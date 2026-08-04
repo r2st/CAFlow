@@ -444,6 +444,72 @@ def queue_payment_reminders(
     return queued
 
 
+# ------------------------------------------------------- cancelling a chase --
+
+
+def load_for_update(db: Session, reminder_id: uuid.UUID) -> Reminder | None:
+    """Read a reminder with its row held for the rest of the transaction.
+
+    Cancelling one is a read-decide-write over the same row the dispatcher
+    claims: read the status, decide it is still ``SCHEDULED``, write
+    ``CANCELLED``. The dispatcher takes that row with ``FOR UPDATE SKIP
+    LOCKED``, sends the message, stamps ``SENT`` and commits — and a plain
+    ``SELECT`` is not blocked by that lock, so the cancel read a status taken
+    before the message went out and the ``UPDATE`` simply queued behind the
+    send.
+
+    What lands is a row saying ``cancelled`` with ``sent_at`` set beside it: the
+    firm's own record of who it has contacted says this client was not written
+    to, on a morning they were. Nothing in the trail contradicts it, because the
+    cancel is the later write and the audit line says a practitioner stopped the
+    chase.
+
+    Held before the status is read, so the decision and the write are one step.
+    ``populate_existing`` is the other half, for the reason
+    :func:`~app.services.billing.load_for_update` gives: the session keeps
+    loaded rows without expiring them on commit, so a second read would
+    otherwise be answered out of the identity map with values older than the
+    lock.
+    """
+    return db.scalars(
+        select(Reminder)
+        .where(Reminder.id == reminder_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).first()
+
+
+def scheduled_for_client_for_update(
+    db: Session, *, firm_id: uuid.UUID, client_id: uuid.UUID
+) -> list[Reminder]:
+    """A client's still-queued reminders, each row held. See :func:`load_for_update`.
+
+    "Stop chasing this client" is the same race in bulk, and it is the one a
+    practitioner reaches for when a client rings in — which is to say, in the
+    morning, while the dispatcher is working through exactly these rows.
+
+    Waited for rather than skipped: a row the dispatcher holds is one being sent
+    right now, and the honest answer is to let the send finish and then find the
+    reminder already ``SENT``. The caller re-checks the status per row, so what
+    is reported cancelled is what was actually still waiting.
+    """
+    return list(
+        db.scalars(
+            select(Reminder)
+            .where(
+                Reminder.firm_id == firm_id,
+                Reminder.client_id == client_id,
+                Reminder.status == ReminderStatus.SCHEDULED,
+            )
+            # Ordered, so two callers queue behind each other on the rows in the
+            # same order rather than crossing.
+            .order_by(Reminder.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
+    )
+
+
 # ------------------------------------------------------------------ manual --
 
 

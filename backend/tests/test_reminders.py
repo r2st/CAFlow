@@ -1101,3 +1101,179 @@ class _NonClosing:
 
     def __exit__(self, *exc):
         return False
+
+
+class TestCancellingAChaseThatIsGoingOut:
+    """A cancel decides from the row, not from a copy taken before the send.
+
+    The dispatcher claims a due reminder with ``FOR UPDATE SKIP LOCKED``, sends
+    it, stamps ``SENT`` and commits. A plain read is not blocked by that lock,
+    so cancelling read a status from before the message went out and the
+    ``UPDATE`` merely queued behind the send — landing a row that says
+    ``cancelled`` with ``sent_at`` set beside it. The firm's own record of who
+    it has written to then says this client was not contacted, on a morning
+    they were.
+    """
+
+    def _queued(self, client, auth_headers, client_id, subject="chase"):
+        return client.post(
+            "/api/v1/reminders",
+            json={"client_id": client_id, "subject": subject, "body": "b"},
+            headers=auth_headers,
+        ).json()
+
+    def _send_from_another_connection(self, db, reminder_id: uuid.UUID) -> None:
+        """What the dispatcher commits while this request is deciding."""
+        db.commit()  # SQLite will not let another connection write past a read
+
+        from app.database import SessionLocal
+
+        other = SessionLocal()
+        try:
+            theirs = reminder_service.load_for_update(other, reminder_id)
+            theirs.status = ReminderStatus.SENT
+            theirs.sent_at = datetime.now(UTC)
+            other.commit()
+        finally:
+            other.close()
+
+    def test_the_locked_read_sees_a_send_a_plain_one_misses(
+        self, client, auth_headers, client_id, db
+    ):
+        reminder = self._queued(client, auth_headers, client_id)
+        reminder_id = uuid.UUID(reminder["id"])
+
+        # Our copy, taken before the dispatcher's send exists. Held onto, or
+        # the session lets go of it and the staleness never arises.
+        ours = db.get(Reminder, reminder_id)
+        assert ours.status == ReminderStatus.SCHEDULED
+
+        self._send_from_another_connection(db, reminder_id)
+
+        # The plain read still answers with what we loaded first.
+        assert db.get(Reminder, reminder_id).status == ReminderStatus.SCHEDULED
+        # The locked one is what the cancel has to be decided from.
+        assert reminder_service.load_for_update(db, reminder_id).status == (
+            ReminderStatus.SENT
+        )
+
+    def test_a_reminder_already_sent_is_refused_rather_than_overwritten(
+        self, client, auth_headers, client_id, db
+    ):
+        reminder = self._queued(client, auth_headers, client_id)
+        reminder_id = uuid.UUID(reminder["id"])
+        # Into the identity map and *kept* there: the map holds weak
+        # references, so a copy nothing is holding is collected and the next
+        # plain read goes to the database after all. A request that has already
+        # touched the row — the ``POST`` above did — is holding one.
+        ours = db.get(Reminder, reminder_id)
+
+        self._send_from_another_connection(db, reminder_id)
+        assert ours.status == ReminderStatus.SCHEDULED, "the stale copy went away"
+
+        response = client.post(
+            f"/api/v1/reminders/{reminder['id']}/cancel", headers=auth_headers
+        )
+        assert response.status_code == 409, response.text
+        assert "already sent" in response.json()["detail"]
+        assert reminder_service.load_for_update(db, reminder_id).status == (
+            ReminderStatus.SENT
+        )
+
+    def test_stopping_every_chase_holds_the_rows_it_decides_from(
+        self, client, auth_headers, client_id, monkeypatch
+    ):
+        """"Stop chasing this client" is the same race in bulk.
+
+        And it is the one a practitioner reaches for when a client rings in —
+        which is to say in the morning, while the dispatcher is working through
+        exactly these rows. SQLite renders no locking clause, so the ordering
+        itself cannot be reproduced here; what can be asserted is that the
+        endpoint asks for the rows through the lock rather than past it.
+        """
+        for subject in ("one", "two"):
+            self._queued(client, auth_headers, client_id, subject)
+
+        locked = []
+        real = reminder_service.scheduled_for_client_for_update
+        monkeypatch.setattr(
+            reminder_service,
+            "scheduled_for_client_for_update",
+            lambda session, **kw: (locked.append(kw), real(session, **kw))[1],
+        )
+
+        response = client.post(
+            "/api/v1/reminders/cancel-scheduled",
+            params={"client_id": client_id},
+            headers=auth_headers,
+        )
+        assert response.json() == {"cancelled": 2}
+        assert [kw["client_id"] for kw in locked] == [uuid.UUID(client_id)]
+
+    def test_stopping_every_chase_leaves_the_one_already_sent_alone(
+        self, client, auth_headers, client_id, db
+    ):
+        sent = self._queued(client, auth_headers, client_id, "going out")
+        still_queued = self._queued(client, auth_headers, client_id, "waiting")
+        # Held, for the reason above: an identity-map entry nothing references
+        # is collected, and the staleness this exists to reproduce never
+        # arises.
+        ours = [db.get(Reminder, uuid.UUID(row["id"])) for row in (sent, still_queued)]
+
+        self._send_from_another_connection(db, uuid.UUID(sent["id"]))
+        assert [r.status for r in ours] == [ReminderStatus.SCHEDULED] * 2
+
+        response = client.post(
+            "/api/v1/reminders/cancel-scheduled",
+            params={"client_id": client_id},
+            headers=auth_headers,
+        )
+        # One of the two was still waiting; the other had gone out.
+        assert response.json() == {"cancelled": 1}
+        assert reminder_service.load_for_update(db, uuid.UUID(sent["id"])).status == (
+            ReminderStatus.SENT
+        )
+        assert reminder_service.load_for_update(
+            db, uuid.UUID(still_queued["id"])
+        ).status == ReminderStatus.CANCELLED
+
+    def test_the_cancel_endpoint_takes_its_reminder_through_the_lock(
+        self, client, auth_headers, client_id, monkeypatch
+    ):
+        """Asserted on the route, not left to the service.
+
+        The guard is one call on a two-line handler, and going back to
+        ``db.get`` is a change every other test in this class would still pass
+        on SQLite — where the lock renders as nothing and only the re-read is
+        observable.
+        """
+        reminder = self._queued(client, auth_headers, client_id)
+
+        locked = []
+        real = reminder_service.load_for_update
+        monkeypatch.setattr(
+            reminder_service,
+            "load_for_update",
+            lambda session, rid: (locked.append(rid), real(session, rid))[1],
+        )
+
+        response = client.post(
+            f"/api/v1/reminders/{reminder['id']}/cancel", headers=auth_headers
+        )
+        assert response.status_code == 200, response.text
+        assert locked == [uuid.UUID(reminder["id"])]
+
+    def test_a_reminder_of_another_firm_is_still_not_found(
+        self, client, auth_headers, client_id, db
+    ):
+        """The lock comes before the tenancy check, so it has to not leak one."""
+        reminder = self._queued(client, auth_headers, client_id)
+        other_firm = uuid.uuid4()
+        row = db.get(Reminder, uuid.UUID(reminder["id"]))
+        row.firm_id = other_firm
+        db.commit()
+
+        response = client.post(
+            f"/api/v1/reminders/{reminder['id']}/cancel", headers=auth_headers
+        )
+        assert response.status_code == 404
