@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 from app.models.base import DocumentCategory, DocumentStatus
-from app.schemas.common import ORMModel, SanitizedModel
+from app.schemas.common import ORMModel, SanitizedModel, not_clearable
 
 
 class DocumentOut(ORMModel):
@@ -42,6 +42,16 @@ class DocumentUpdate(SanitizedModel):
     is_shared_with_client: bool | None = None
     # Setting the category by hand confirms it and clears the AI confidence.
     is_category_confirmed: bool | None = None
+
+    # ``compliance_item_id`` is the one field here a caller may null out — that
+    # is how a document is unlinked from a filing. The rest back ``NOT NULL``
+    # columns; an uncategorised document is ``other``, not nothing.
+    _no_nulls = not_clearable(
+        "category",
+        "satisfies_requirements",
+        "is_shared_with_client",
+        "is_category_confirmed",
+    )
 
 
 class RequirementStateOut(SanitizedModel):

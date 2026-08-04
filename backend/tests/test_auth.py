@@ -898,3 +898,103 @@ class TestTheFirmKeepsAnAdministrator:
 
         assert response.status_code == 200
         assert response.json()["is_active"] is False
+
+
+class TestAnExplicitNullOnATeamMembersRequiredFields:
+    """``phone`` is optional because a member may not have given one — ``null``
+    clears it. ``role`` is optional because a PATCH need not name it; the
+    column is ``NOT NULL``, so ``null`` is not an instruction.
+
+    ``exclude_unset`` cannot separate them, so the null reached the database
+    and came back a 409 saying the change "conflicts with an existing record" —
+    which is what a duplicate address says, and is not what happened.
+    """
+
+    def _member(self, client: TestClient, auth_headers: dict) -> dict:
+        response = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Temp Staff",
+                "email": "temp@sharma-ca.in",
+                "password": "temp-password-123",
+                "role": "junior",
+                "phone": "+919876500011",
+                "membership_number": "123456",
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    @pytest.mark.parametrize("field", ["full_name", "role", "is_active"])
+    def test_a_null_is_refused_by_name(
+        self, client: TestClient, auth_headers: dict, field: str
+    ):
+        member = self._member(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/auth/practitioners/{member['id']}",
+            headers=auth_headers,
+            json={field: None},
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["fields"][0]["field"] == field
+        assert "null" in response.json()["detail"]
+
+    def test_the_member_is_left_exactly_as_they_were(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The refusal is total — nothing in the same body is applied.
+
+        Which matters here more than elsewhere: ``is_active`` is what decides
+        whether this person can sign in at all.
+        """
+        member = self._member(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/auth/practitioners/{member['id']}",
+            headers=auth_headers,
+            json={"full_name": "Renamed", "is_active": None},
+        )
+        assert response.status_code == 422, response.text
+
+        login = client.post(
+            f"{API}/auth/login",
+            json={"email": "temp@sharma-ca.in", "password": "temp-password-123"},
+        )
+        assert login.status_code == 200, login.text
+        assert login.json()["practitioner"]["full_name"] == "Temp Staff"
+
+    @pytest.mark.parametrize("field", ["phone", "membership_number"])
+    def test_the_genuinely_optional_fields_stay_clearable(
+        self, client: TestClient, auth_headers: dict, field: str
+    ):
+        member = self._member(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/auth/practitioners/{member['id']}",
+            headers=auth_headers,
+            json={field: None},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()[field] is None
+
+    def test_omitting_a_required_field_still_leaves_it_alone(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """``mode="before"`` on a named field only runs when the caller sent
+        it, so an absent field is untouched — which is the whole distinction."""
+        member = self._member(client, auth_headers)
+
+        response = client.patch(
+            f"{API}/auth/practitioners/{member['id']}",
+            headers=auth_headers,
+            json={"phone": "+919876500022"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["full_name"] == "Temp Staff"
+        assert response.json()["role"] == "junior"
+        assert response.json()["is_active"] is True

@@ -8,7 +8,7 @@ from datetime import date, datetime
 from pydantic import Field
 
 from app.models.base import TaskPriority, TaskStatus
-from app.schemas.common import ORMModel, SanitizedModel
+from app.schemas.common import ORMModel, SanitizedModel, not_clearable
 
 
 class TaskCreate(SanitizedModel):
@@ -31,6 +31,10 @@ class TaskUpdate(SanitizedModel):
     priority: TaskPriority | None = None
     due_date: date | None = None
     estimated_minutes: int | None = Field(default=None, ge=0, le=60 * 24 * 30)
+
+    # A task always has a title, a status and a priority; the assignee, the
+    # date and the estimate are the ones a caller may take back off.
+    _no_nulls = not_clearable("title", "status", "priority")
 
 
 class TaskOut(ORMModel):

@@ -12,6 +12,7 @@ from app.schemas.common import (
     ORMModel,
     Password,
     SanitizedModel,
+    not_clearable,
     validate_gstin,
     validate_pan,
 )
@@ -63,6 +64,9 @@ class PractitionerUpdate(SanitizedModel):
     phone: str | None = Field(default=None, max_length=20)
     membership_number: str | None = Field(default=None, max_length=32)
     is_active: bool | None = None
+
+    # A team member always has a name, a role and a standing.
+    _no_nulls = not_clearable("full_name", "role", "is_active")
 
 
 class PractitionerOut(ORMModel):

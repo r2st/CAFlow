@@ -15,6 +15,7 @@ from app.schemas.common import (
     ORMModel,
     SanitizedModel,
     ServiceFees,
+    not_clearable,
     validate_gstin,
     validate_pan,
     validate_tan,
@@ -139,6 +140,22 @@ class ClientUpdate(SanitizedModel):
     _validate_pan = field_validator("pan")(validate_pan)
     _validate_gstin = field_validator("gstin")(validate_gstin)
     _validate_tan = field_validator("tan")(validate_tan)
+    # The identity and registration fields back ``NOT NULL`` columns, so a null
+    # here is not "clear it" — there is nothing to clear it to. The contact
+    # fields above are genuinely optional and stay clearable.
+    _no_nulls = not_clearable(
+        "name",
+        "entity_type",
+        "gst_registered",
+        "gst_filing_frequency",
+        "tds_applicable",
+        "income_tax_applicable",
+        "tax_audit_applicable",
+        "roc_applicable",
+        "payroll_applicable",
+        "is_active",
+        "service_fees",
+    )
 
 
 class ClientOut(ORMModel):

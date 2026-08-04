@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session
@@ -1742,3 +1743,80 @@ class TestASelectionThatNamesOneFilingTwice:
         )
 
         assert response.json() == {"updated": 1, "skipped": 1}
+
+
+class TestAnExplicitNullOnAFilingsRequiredFields:
+    """A PATCH body is all optionals, and the optionality means two different
+    things. ``notes`` is optional because a filing may not have any — ``null``
+    clears it. ``due_date`` is optional because a PATCH need not name it; the
+    column is ``NOT NULL``, so ``null`` is not an instruction.
+
+    ``exclude_unset`` cannot tell them apart, so the null was written — and
+    ``_normalise_filing`` then compared the filing date against a deadline that
+    was no longer there, which came back a 500 with nothing naming the field.
+    """
+
+    def test_clearing_the_deadline_is_refused_by_name(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "due_date": None},
+        )
+
+        assert response.status_code == 422, response.text
+        body = response.json()
+        assert body["error"]["fields"][0]["field"] == "due_date"
+        assert "null" in body["detail"]
+
+    @pytest.mark.parametrize("field", ["status", "fee_paise"])
+    def test_the_other_required_fields_are_refused_too(
+        self, client: TestClient, auth_headers: dict, db: Session, field: str
+    ):
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}", headers=auth_headers, json={field: None}
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["fields"][0]["field"] == field
+
+    def test_the_genuinely_optional_fields_stay_clearable(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The distinction this draws has to leave the other side working."""
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"notes": "chase the client"},
+        )
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"notes": None, "assigned_practitioner_id": None},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["notes"] is None
+
+    def test_omitting_a_required_field_still_leaves_it_alone(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+        was_due = item.due_date
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "in_progress"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["due_date"] == was_due.isoformat()

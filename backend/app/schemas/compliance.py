@@ -9,7 +9,12 @@ from pydantic import Field, field_validator
 
 from app.core import clock
 from app.models.base import ComplianceCategory, ComplianceStatus, Frequency
-from app.schemas.common import MAX_AMOUNT_PAISE, ORMModel, SanitizedModel
+from app.schemas.common import (
+    MAX_AMOUNT_PAISE,
+    ORMModel,
+    SanitizedModel,
+    not_clearable,
+)
 
 
 def validate_filed_on(value: date | None) -> date | None:
@@ -94,6 +99,10 @@ class ComplianceItemUpdate(SanitizedModel):
     notes: str | None = None
 
     _validate_filed_on = field_validator("filed_on")(validate_filed_on)
+    # A filing always has a status, a deadline and a fee. Clearing the deadline
+    # in particular is what the filed/delayed comparison then reads, so a null
+    # there used to come back a 500 rather than a refusal naming the field.
+    _no_nulls = not_clearable("status", "due_date", "fee_paise")
 
 
 class BulkStatusUpdate(SanitizedModel):

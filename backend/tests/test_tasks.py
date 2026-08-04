@@ -1716,3 +1716,83 @@ class TestCountingTheWorkloadInTheDatabase:
 
         assert set(rows) == {"Anita Sharma", "Junior Jain"}
         assert all(row["open_tasks"] == 0 for row in rows.values())
+
+
+class TestAnExplicitNullOnATasksRequiredFields:
+    """``assignee_id`` is optional because a task may be unassigned — ``null``
+    hands it back to the pool. ``status`` is optional because a PATCH need not
+    name it; the column is ``NOT NULL``.
+
+    ``exclude_unset`` cannot tell the two apart, so ``{"status": null}`` was
+    applied — and the audit summary then read ``task.status.value`` off the
+    ``None`` that had just been written, which came back a 500 with a request
+    id and nothing naming the field.
+    """
+
+    @pytest.mark.parametrize("field", ["title", "status", "priority"])
+    def test_a_null_is_refused_by_name(self, client, auth_headers, field):
+        task = create_task(client, auth_headers).json()
+
+        response = client.patch(
+            f"/api/v1/tasks/{task['id']}", json={field: None}, headers=auth_headers
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["fields"][0]["field"] == field
+        assert "null" in response.json()["detail"]
+
+    def test_the_task_is_left_exactly_as_it_was(self, client, auth_headers):
+        """The refusal is total — nothing in the same body is applied."""
+        task = create_task(client, auth_headers).json()
+
+        response = client.patch(
+            f"/api/v1/tasks/{task['id']}",
+            json={"title": "Renamed", "status": None},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+
+        after = client.get(f"/api/v1/tasks/{task['id']}", headers=auth_headers).json()
+        assert after["title"] == task["title"]
+        assert after["status"] == "todo"
+
+    @pytest.mark.parametrize(
+        "field", ["assignee_id", "due_date", "estimated_minutes", "description"]
+    )
+    def test_the_genuinely_optional_fields_stay_clearable(
+        self, client, auth_headers, junior, field
+    ):
+        """Handing a task back to the pool is the ordinary use of a null here."""
+        task = create_task(
+            client,
+            auth_headers,
+            assignee_id=junior["id"],
+            due_date=clock.today().isoformat(),
+        ).json()
+        client.patch(
+            f"/api/v1/tasks/{task['id']}",
+            json={"estimated_minutes": 30, "description": "chase the ledger"},
+            headers=auth_headers,
+        )
+
+        response = client.patch(
+            f"/api/v1/tasks/{task['id']}", json={field: None}, headers=auth_headers
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()[field] is None
+
+    def test_omitting_a_required_field_still_leaves_it_alone(self, client, auth_headers):
+        """``mode="before"`` on a named field only runs when the caller sent
+        it, so an absent field is untouched — which is the whole distinction."""
+        task = create_task(client, auth_headers).json()
+
+        response = client.patch(
+            f"/api/v1/tasks/{task['id']}",
+            json={"status": "in_progress"},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["title"] == task["title"]
+        assert response.json()["priority"] == task["priority"]

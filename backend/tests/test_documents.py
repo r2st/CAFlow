@@ -678,3 +678,39 @@ class TestRequirementValidationOnUpdate:
         )
         assert response.status_code == 200, response.text
         assert response.json()["satisfies_requirements"] == ["ais_tis", "export_invoices"]
+
+
+class TestAnExplicitNullOnADocumentsRequiredFields:
+    """``compliance_item_id`` is the one field here a caller may null out —
+    that is how a document is unlinked from a filing. The rest back ``NOT
+    NULL`` columns, and writing a null into one came back a 409 saying the
+    change "conflicts with an existing record", which is what a duplicate says
+    and is not what happened."""
+
+    @pytest.mark.parametrize(
+        "field", ["category", "satisfies_requirements", "is_shared_with_client"]
+    )
+    def test_a_null_is_refused_by_name(self, client, auth_headers, client_id, field):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        response = client.patch(
+            f"/api/v1/documents/{document['id']}",
+            json={field: None},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["fields"][0]["field"] == field
+
+    def test_unlinking_a_filing_still_works(self, client, auth_headers, client_id):
+        item = first_item_of_type(client, {"Authorization": auth_headers["Authorization"]}, "GSTR3B_MONTHLY")
+        document = upload(
+            client, auth_headers, client_id=client_id, compliance_item_id=item["id"]
+        ).json()["document"]
+        assert document["compliance_item_id"] == item["id"]
+
+        response = client.patch(
+            f"/api/v1/documents/{document['id']}",
+            json={"compliance_item_id": None},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["compliance_item_id"] is None

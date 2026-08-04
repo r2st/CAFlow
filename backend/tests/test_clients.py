@@ -2292,3 +2292,91 @@ class TestAnOnboardingDateTheGeneratorCannotReach:
         response = client.post(f"{API}/clients", json=payload, headers=auth_headers)
         assert response.status_code == 201, response.text
         assert response.json()["client"]["onboarded_on"] == clock.today().isoformat()
+
+
+class TestAnExplicitNullOnAClientsRequiredFields:
+    """A PATCH body is all optionals, and the optionality carries two meanings.
+
+    ``phone`` is optional because a client may not have one — ``null`` clears
+    it, which is an instruction. ``name`` is optional because a PATCH need not
+    name it; the column is ``NOT NULL``, so ``null`` is not an instruction, it
+    is a value the row cannot hold.
+
+    ``exclude_unset`` cannot separate them — a field explicitly set to ``null``
+    is set — so the null reached the database and came back a 409 saying the
+    change "conflicts with an existing record". That is what a duplicate PAN
+    says, and it is not what happened: a caller reading it goes looking for the
+    record it collided with.
+    """
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "name",
+            "entity_type",
+            "gst_registered",
+            "gst_filing_frequency",
+            "tds_applicable",
+            "income_tax_applicable",
+            "tax_audit_applicable",
+            "roc_applicable",
+            "payroll_applicable",
+            "is_active",
+            "service_fees",
+        ],
+    )
+    def test_a_null_is_refused_by_name(
+        self, client: TestClient, auth_headers: dict, created_client: dict, field: str
+    ):
+        response = client.patch(
+            f"{API}/clients/{created_client['id']}", headers=auth_headers, json={field: None}
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["fields"][0]["field"] == field
+        assert "null" in response.json()["detail"]
+
+    def test_the_client_is_left_exactly_as_it_was(
+        self, client: TestClient, auth_headers: dict, created_client: dict
+    ):
+        """The refusal is total — nothing in the same body is applied."""
+        response = client.patch(
+            f"{API}/clients/{created_client['id']}",
+            headers=auth_headers,
+            json={"contact_person": "Someone New", "is_active": None},
+        )
+        assert response.status_code == 422, response.text
+
+        after = client.get(f"{API}/clients/{created_client['id']}", headers=auth_headers).json()
+        assert after["contact_person"] == created_client["contact_person"]
+        assert after["is_active"] is True
+
+    @pytest.mark.parametrize(
+        "field", ["contact_person", "phone", "whatsapp", "address", "notes", "pan"]
+    )
+    def test_the_genuinely_optional_fields_stay_clearable(
+        self, client: TestClient, auth_headers: dict, created_client: dict, field: str
+    ):
+        """The distinction this draws has to leave the other side working."""
+        response = client.patch(
+            f"{API}/clients/{created_client['id']}", headers=auth_headers, json={field: None}
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["client"][field] is None
+
+    def test_omitting_a_required_field_still_leaves_it_alone(
+        self, client: TestClient, auth_headers: dict, created_client: dict
+    ):
+        """``mode="before"`` on a named field only runs when the caller sent
+        it, so an absent field is untouched — which is the whole distinction."""
+        response = client.patch(
+            f"{API}/clients/{created_client['id']}",
+            headers=auth_headers,
+            json={"contact_person": "Priya Nair"},
+        )
+
+        assert response.status_code == 200, response.text
+        updated = response.json()["client"]
+        assert updated["name"] == created_client["name"]
+        assert updated["is_active"] is True

@@ -90,6 +90,55 @@ class Message(BaseModel):
     detail: str
 
 
+def refuse_null(value: Any, info: ValidationInfo) -> Any:
+    """Refuse an explicit ``null`` on a field that has no cleared state.
+
+    Every PATCH body is a model of optionals, and the optionality carries two
+    different meanings that nothing separated. ``pan`` is optional because a
+    client may not have one — sending ``null`` clears it, which is an
+    instruction. ``name`` is optional because a PATCH need not name it — the
+    column is ``NOT NULL``, so ``null`` is not an instruction at all, it is a
+    value the record cannot hold.
+
+    ``exclude_unset`` cannot tell them apart: a field explicitly set to ``null``
+    is set, so it reached the handler and was written. What came back depended
+    only on which column it was:
+
+    * ``PATCH /compliance/items/{id}`` with ``{"status": "filed", "due_date":
+      null}`` cleared the deadline in memory and then compared the filing date
+      against it to decide filed-versus-delayed — ``date > None`` — so the
+      request came back a 500 with a request id and nothing naming the field.
+      ``PATCH /tasks/{id}`` with ``{"status": null}`` did the same on the way
+      into the audit summary;
+    * ``PATCH /clients/{id}`` with ``{"name": null}`` or ``{"is_active": null}``
+      reached the database and came back a 409 saying the change "conflicts with
+      an existing record" — which is what a duplicate PAN says, and is not what
+      happened. A caller reading it goes looking for the record it collided
+      with.
+
+    Neither is a shape a UI sends on purpose; both are what a client library
+    serialising an absent field as ``null`` produces, which is the ordinary way
+    to reach this. Answered as a 422 naming the field, the way every other
+    validation failure is, and the field's own name says which one it was.
+    """
+    if value is None:
+        raise ValueError(
+            f"{info.field_name} cannot be set to null — omit it to leave it unchanged"
+        )
+    return value
+
+
+def not_clearable(*fields: str):
+    """A validator refusing ``null`` on each of ``fields``. See :func:`refuse_null`.
+
+    Assigned into a PATCH schema alongside its other validators. ``mode="before"``
+    on a *named* field only runs when the caller supplied that field, so an
+    omitted field is untouched and the default still applies — which is the
+    distinction this exists to draw.
+    """
+    return field_validator(*fields, mode="before")(refuse_null)
+
+
 def validate_pan(value: str | None) -> str | None:
     if value is None or value == "":
         return None
