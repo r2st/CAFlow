@@ -90,6 +90,22 @@ def display_state_sql(today: date):
     )
 
 
+def _task_follow_up(item: ComplianceItem, was: ComplianceStatus) -> str | None:
+    """Which way the work raised for ``item`` has to move, if either.
+
+    Split out from :func:`_follow_with_tasks` so the batch endpoint can decide
+    for every filing first and then move them in one query each — see
+    :func:`bulk_update_status`.
+    """
+    if was == item.status:
+        return None
+    if item.status == ComplianceStatus.NOT_APPLICABLE:
+        return "withdraw"
+    if was == ComplianceStatus.NOT_APPLICABLE:
+        return "reinstate"
+    return None
+
+
 def _follow_with_tasks(db: Session, item: ComplianceItem, was: ComplianceStatus) -> None:
     """Move the work raised for a filing whose status a practitioner just changed.
 
@@ -113,12 +129,11 @@ def _follow_with_tasks(db: Session, item: ComplianceItem, was: ComplianceStatus)
     back at the status it held. A task a manager cancelled themselves carries
     no marker and is left alone.
     """
-    if was == item.status:
-        return
-    if item.status == ComplianceStatus.NOT_APPLICABLE:
-        task_service.withdraw_tasks_for_items(db, [item.id])
-    elif was == ComplianceStatus.NOT_APPLICABLE:
-        task_service.reinstate_tasks_for_items(db, [item.id])
+    match _task_follow_up(item, was):
+        case "withdraw":
+            task_service.withdraw_tasks_for_items(db, [item.id])
+        case "reinstate":
+            task_service.reinstate_tasks_for_items(db, [item.id])
 
 
 @router.get("/types", response_model=list[ComplianceTypeOut], summary="List compliance types")
@@ -439,6 +454,16 @@ def bulk_update_status(
             )
         ).all()
     )
+    # Decided for the whole batch, then moved in one query each. The work
+    # follows the filing exactly as it does on the single-item patch — see
+    # :func:`_follow_with_tasks` — but this endpoint takes up to five hundred
+    # ids, and asking per filing meant up to five hundred round-trips inside one
+    # transaction to answer a question one ``IN`` clause answers. It is the
+    # end-of-deadline batch: a firm marks a month of GST returns filed in a
+    # single click, on the twentieth, when every other practice is doing the
+    # same to the same database.
+    withdraw: list[uuid.UUID] = []
+    reinstate: list[uuid.UUID] = []
     for item in items:
         was_status = item.status
         item.status = payload.status
@@ -447,7 +472,13 @@ def bulk_update_status(
         # Never "given" here: a non-filed status has just been refused a date
         # above, so reverting a batch always clears the stale one.
         _normalise_filing(item, filed_on=payload.filed_on, filed_on_given=False)
-        _follow_with_tasks(db, item, was_status)
+        match _task_follow_up(item, was_status):
+            case "withdraw":
+                withdraw.append(item.id)
+            case "reinstate":
+                reinstate.append(item.id)
+    task_service.withdraw_tasks_for_items(db, withdraw)
+    task_service.reinstate_tasks_for_items(db, reinstate)
 
     audit.record(
         db,

@@ -1876,6 +1876,93 @@ class TestTheCalendarIsCountedAndPagedByTheDatabase:
         assert all("limit" in sql for sql in reading_rows), reading_rows
 
 
+class TestABatchMovesItsTasksInOneQuery:
+    """``bulk-status`` takes up to five hundred ids and is the end-of-deadline
+    workflow — a month of GST returns marked filed in one click, on the
+    twentieth, by every practice at once.
+
+    The work raised for a filing follows the filing, which is right; asking per
+    filing whether it had any was up to five hundred round-trips inside one
+    transaction to answer what one ``IN`` clause answers.
+    """
+
+    def _withdrawable(self, client: TestClient, auth_headers: dict, db: Session):
+        client_id = create_client_record(client, auth_headers)
+        items = items_for(db, client_id)[:8]
+        response = client.post(
+            f"{API}/tasks/generate", headers=auth_headers, json={"horizon_days": 365}
+        )
+        assert response.status_code == 200, response.text
+        return [str(item.id) for item in items]
+
+    def _count_task_reads(self, fn) -> int:
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()).lower())
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            fn()
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        return len([sql for sql in statements if sql.startswith("select") and " tasks" in sql])
+
+    def test_withdrawing_a_batch_asks_about_its_tasks_once(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        item_ids = self._withdrawable(client, auth_headers, db)
+
+        def withdraw():
+            response = client.post(
+                f"{API}/compliance/items/bulk-status",
+                headers=auth_headers,
+                json={"item_ids": item_ids, "status": "not_applicable"},
+            )
+            assert response.status_code == 200, response.text
+
+        assert self._count_task_reads(withdraw) <= 1
+
+    def test_the_tasks_still_follow_the_whole_batch(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        item_ids = self._withdrawable(client, auth_headers, db)
+        tracked = [
+            uuid.UUID(item_id)
+            for item_id in item_ids
+            if db.scalars(
+                select(Task).where(Task.compliance_item_id == uuid.UUID(item_id))
+            ).first()
+        ]
+        assert tracked, "expected the batch to carry tasks"
+
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": item_ids, "status": "not_applicable"},
+        )
+        db.expire_all()
+        assert all(
+            task.status == TaskStatus.CANCELLED
+            for task in db.scalars(
+                select(Task).where(Task.compliance_item_id.in_(tracked))
+            ).all()
+        )
+
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": item_ids, "status": "pending"},
+        )
+        db.expire_all()
+        assert all(
+            task.status == TaskStatus.TODO
+            for task in db.scalars(
+                select(Task).where(Task.compliance_item_id.in_(tracked))
+            ).all()
+        )
+
+
 class TestAnExplicitNullOnAFilingsRequiredFields:
     """A PATCH body is all optionals, and the optionality means two different
     things. ``notes`` is optional because a filing may not have any — ``null``
