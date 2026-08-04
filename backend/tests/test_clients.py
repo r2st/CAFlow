@@ -2210,3 +2210,85 @@ class TestServiceFeeBounds:
         )
         assert response.status_code == 200, response.text
         assert response.json()["client"]["service_fees"] == {"GSTR3B_MONTHLY": 250_000}
+
+
+class TestAnOnboardingDateTheGeneratorCannotReach:
+    """``onboarded_on`` is where the generation window *starts*, not a note.
+
+    ``default_window`` runs from it to ``compliance_generation_months`` past
+    today, so a date beyond that horizon makes a window that runs backwards —
+    and a backwards window materialises nothing.
+
+    That was reported as success: ``201`` with ``compliance_items_created: 0``,
+    which reads exactly like a client who genuinely owes nothing. Nothing
+    afterwards notices either, because the monthly top-up recomputes the same
+    empty window. The client sits on the books occupying a plan slot with no
+    calendar at all — no filing, no task, no reminder, no fee — and the firm
+    finds out when the client asks why their return was not filed.
+
+    A mistyped year produces it, which is the digit that gets mistyped in a
+    date field, and it is the one typo whose result looks like a healthy
+    record.
+    """
+
+    def _create(self, client: TestClient, auth_headers, onboarded_on, **overrides):
+        payload = make_client_payload(**overrides)
+        payload["name"] = "Horizon Traders"
+        payload.pop("pan", None)
+        payload.pop("gstin", None)
+        payload["onboarded_on"] = onboarded_on.isoformat()
+        return client.post(f"{API}/clients", json=payload, headers=auth_headers)
+
+    @property
+    def horizon(self) -> date:
+        return add_months(clock.today(), settings.compliance_generation_months)
+
+    def test_a_mistyped_year_is_refused_rather_than_creating_an_empty_calendar(
+        self, client: TestClient, auth_headers
+    ):
+        response = self._create(client, auth_headers, add_months(clock.today(), 12 * 36))
+        assert response.status_code == 422, response.text
+        fields = response.json()["error"]["fields"]
+        assert [f["field"] for f in fields] == ["onboarded_on"]
+        assert "no filings at all" in fields[0]["message"]
+
+    def test_the_refusal_names_the_last_date_that_would_work(
+        self, client: TestClient, auth_headers
+    ):
+        response = self._create(client, auth_headers, self.horizon + timedelta(days=1))
+        assert response.status_code == 422, response.text
+        assert f"{self.horizon:%d %b %Y}" in response.json()["detail"]
+
+    def test_the_horizon_itself_is_still_accepted(
+        self, client: TestClient, auth_headers
+    ):
+        """Bounded, not banned — the edge belongs to the caller."""
+        response = self._create(client, auth_headers, self.horizon)
+        assert response.status_code == 201, response.text
+
+    def test_an_engagement_starting_next_month_still_generates_its_calendar(
+        self, client: TestClient, auth_headers
+    ):
+        """The reason this is a horizon rather than a ban.
+
+        A client taken on with effect from the start of next month is ordinary,
+        and their calendar has to come with them.
+        """
+        response = self._create(client, auth_headers, add_months(clock.today(), 1))
+        assert response.status_code == 201, response.text
+        assert response.json()["compliance_items_created"] > 0
+
+    def test_back_dating_stays_open(self, client: TestClient, auth_headers):
+        """Picking up a client whose returns began years ago is ordinary."""
+        response = self._create(client, auth_headers, clock.today() - timedelta(days=365 * 8))
+        assert response.status_code == 201, response.text
+        assert response.json()["compliance_items_created"] > 0
+
+    def test_omitting_it_is_unaffected(self, client: TestClient, auth_headers):
+        payload = make_client_payload()
+        payload["name"] = "No Date Traders"
+        payload.pop("pan", None)
+        payload.pop("gstin", None)
+        response = client.post(f"{API}/clients", json=payload, headers=auth_headers)
+        assert response.status_code == 201, response.text
+        assert response.json()["client"]["onboarded_on"] == clock.today().isoformat()

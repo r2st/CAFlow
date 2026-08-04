@@ -7,6 +7,9 @@ from datetime import date, datetime
 
 from pydantic import EmailStr, Field, field_validator
 
+from app.config import settings
+from app.core import clock
+from app.core.periods import add_months
 from app.models.base import EntityType, GSTFilingFrequency
 from app.schemas.common import (
     ORMModel,
@@ -16,6 +19,53 @@ from app.schemas.common import (
     validate_pan,
     validate_tan,
 )
+
+
+def validate_onboarded_on(value: date | None) -> date | None:
+    """Refuse an onboarding date the calendar generator cannot reach.
+
+    ``onboarded_on`` is not merely a note about when the engagement started —
+    it is the *start* of the window compliance items are generated over.
+    :func:`~app.services.compliance_generator.default_window` runs from it to
+    ``compliance_generation_months`` past today, so a date beyond that horizon
+    produces a window that runs backwards, and a backwards window materialises
+    nothing.
+
+    That was reported as success. Creating the client answered ``201`` with
+    ``compliance_items_created: 0``, which reads exactly like a client who
+    genuinely owes nothing — and nothing afterwards ever notices: the monthly
+    top-up recomputes the same empty window, so the client sits on the books
+    occupying a plan slot with no calendar at all. Not one filing is raised,
+    no task, no reminder, and no fee. The firm finds out when the client asks
+    why their return was not filed.
+
+    A mistyped year is what produces it, which is the digit that gets mistyped
+    in a date field, and it is the one typo whose result looks like a healthy
+    client record.
+
+    Dating an engagement a little ahead is real, so this is a horizon rather
+    than a ban: a client taken on with effect from next month, or from the
+    start of the new financial year, is inside it and generates the part of
+    their calendar that falls in the window. The bound is the generator's own
+    reach, because past it there is by definition nothing to generate.
+
+    Back-dating stays open with no bound at all — picking up a client whose
+    returns began years ago is ordinary, and the window simply starts at the
+    generator's own three-month look-back instead.
+
+    Today is today in India; see :mod:`app.core.clock`.
+    """
+    if value is None:
+        return value
+    horizon = add_months(clock.today(), settings.compliance_generation_months)
+    if value > horizon:
+        raise ValueError(
+            f"onboarded_on cannot be later than {horizon:%d %b %Y} — the compliance "
+            f"calendar is generated {settings.compliance_generation_months} months "
+            "ahead, so a client onboarded after that would be created with no "
+            "filings at all"
+        )
+    return value
 
 
 class ClientBase(SanitizedModel):
@@ -54,6 +104,8 @@ class ClientCreate(ClientBase):
     onboarded_on: date | None = None
     # Set false to create the client without materialising compliance items.
     generate_compliance_items: bool = True
+
+    _validate_onboarded_on = field_validator("onboarded_on")(validate_onboarded_on)
 
 
 class ClientUpdate(SanitizedModel):
