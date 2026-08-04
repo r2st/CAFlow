@@ -12,9 +12,11 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.audit import AuditLog
+from app.services import audit
 from tests.conftest import (
     FIRM_REGISTRATION,
     first_lapsed_item_of_type,
@@ -591,3 +593,154 @@ class TestTheTrailRecordsWhatHappened:
         # A human choosing the category is what makes the guess meaningless,
         # and the trail is where "a human chose it" is recorded.
         assert diff["after"]["is_category_confirmed"] is True
+
+
+class TestWhereASignInCameFrom:
+    """``ip_address`` is the one field on the one table that answers it.
+
+    It was ``request.client.host`` — the machine that opened the TCP
+    connection. In every deployment of this system that machine is Caddy, so
+    the field held the reverse proxy's address: the same value on every row,
+    for every firm, for every registration and every sign-in. The trail is what
+    a firm reads once a credential is suspected of having leaked, and it was
+    answering with a constant.
+
+    ``client_ip`` is the resolution the access log and the rate limiter already
+    use — the careful one, which believes a forwarded chain only from a trusted
+    peer and walks it right-to-left so a forged prefix is skipped. The three
+    places that name a caller now agree about who it was.
+    """
+
+    @pytest.fixture
+    def behind_a_proxy(self, monkeypatch):
+        """The production shape: something trusted terminates the connection."""
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "trust_proxy_headers", True)
+        monkeypatch.setattr(settings, "trusted_proxy_ips", "*")
+
+    def _entry(self, db: Session, action: str) -> AuditLog:
+        entries = db.scalars(
+            select(AuditLog).where(AuditLog.action == action)
+        ).all()
+        assert len(entries) == 1, f"expected one {action} entry, got {len(entries)}"
+        return entries[0]
+
+    def test_registration_records_the_caller_not_the_proxy(
+        self, client: TestClient, db: Session, behind_a_proxy
+    ):
+        response = client.post(
+            f"{API}/auth/register",
+            json=FIRM_REGISTRATION,
+            headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1"},
+        )
+        assert response.status_code == 201, response.text
+
+        assert self._entry(db, "firm.register").ip_address == "203.0.113.7"
+
+    def test_signing_in_records_the_caller_not_the_proxy(
+        self, client: TestClient, db: Session, registered_firm: dict, behind_a_proxy
+    ):
+        response = client.post(
+            f"{API}/auth/login",
+            json={
+                "email": FIRM_REGISTRATION["owner_email"],
+                "password": FIRM_REGISTRATION["owner_password"],
+            },
+            headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1"},
+        )
+        assert response.status_code == 200, response.text
+
+        assert self._entry(db, "auth.login").ip_address == "203.0.113.7"
+
+    def test_an_unproxied_deployment_still_records_the_peer(
+        self, client: TestClient, db: Session, registered_firm: dict
+    ):
+        """With the switch off the header is not believed, which is the
+        conservative direction — a caller gets its own address, not one it
+        chose."""
+        response = client.post(
+            f"{API}/auth/login",
+            json={
+                "email": FIRM_REGISTRATION["owner_email"],
+                "password": FIRM_REGISTRATION["owner_password"],
+            },
+            headers={"X-Forwarded-For": "203.0.113.7"},
+        )
+        assert response.status_code == 200, response.text
+
+        assert self._entry(db, "auth.login").ip_address != "203.0.113.7"
+
+
+class TestTheUserAgentARequestArrivesWith:
+    """``audit_log.user_agent`` is a VARCHAR(512) fed straight from the header.
+
+    Nothing bounded it, on the two endpoints that record it — registration and
+    sign-in, both reachable without credentials. SQLite truncates silently;
+    PostgreSQL, which is what the deployment runs, refuses the row, so a caller
+    sending a kilobyte of User-Agent could not register *and could not sign
+    in*. Truncated rather than refused: the sign-in is genuine either way.
+    """
+
+    def _login(self, client: TestClient, agent: str):
+        return client.post(
+            f"{API}/auth/login",
+            json={
+                "email": FIRM_REGISTRATION["owner_email"],
+                "password": FIRM_REGISTRATION["owner_password"],
+            },
+            headers={"User-Agent": agent},
+        )
+
+    def _entry(self, db: Session) -> AuditLog:
+        return db.scalars(
+            select(AuditLog).where(AuditLog.action == "auth.login")
+        ).one()
+
+    def test_an_over_long_agent_is_cut_to_what_the_column_holds(
+        self, client: TestClient, db: Session, registered_firm: dict
+    ):
+        response = self._login(client, "Mozilla/5.0 " + "A" * 4000)
+
+        assert response.status_code == 200, response.text
+        recorded = self._entry(db).user_agent
+        assert len(recorded) == audit.MAX_USER_AGENT
+        # The head is kept: a user agent identifies itself at the front.
+        assert recorded.startswith("Mozilla/5.0 ")
+
+    def test_an_ordinary_agent_is_recorded_whole(
+        self, client: TestClient, db: Session, registered_firm: dict
+    ):
+        agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) CAFlow/1.0"
+
+        assert self._login(client, agent).status_code == 200
+        assert self._entry(db).user_agent == agent
+
+    def test_control_characters_do_not_reach_the_trail(self):
+        """It is rendered back into the audit screen and into the log, and
+        every other string reaching the database is sanitised on the way in.
+
+        Asserted against the resolver rather than over HTTP: these are bytes an
+        HTTP client will not put in a header for you, which is exactly why one
+        arriving from something that is not a browser is worth stripping.
+        """
+        from tests.test_middleware import fake_request
+
+        request = fake_request({"user-agent": "CAFlow/1.0\x00\x07​ spoof"})
+
+        assert audit.request_origin(request)[1] == "CAFlow/1.0 spoof"
+
+    def test_a_request_with_no_agent_records_nothing_rather_than_a_blank(
+        self, client: TestClient, db: Session, registered_firm: dict
+    ):
+        response = client.request(
+            "POST",
+            f"{API}/auth/login",
+            json={
+                "email": FIRM_REGISTRATION["owner_email"],
+                "password": FIRM_REGISTRATION["owner_password"],
+            },
+            headers={"User-Agent": ""},
+        )
+        assert response.status_code == 200, response.text
+        assert self._entry(db).user_agent is None

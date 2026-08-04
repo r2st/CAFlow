@@ -102,6 +102,7 @@ def _token_response(practitioner: Practitioner, firm: Firm) -> TokenResponse:
 def register_firm(payload: FirmRegisterRequest, request: Request, db: DbSession):
     """Create a firm together with its owner practitioner."""
     _refuse_duplicate_email(db, payload.owner_email)
+    caller_ip, caller_agent = audit.request_origin(request)
 
     firm = Firm(
         name=payload.firm_name,
@@ -135,8 +136,8 @@ def register_firm(payload: FirmRegisterRequest, request: Request, db: DbSession)
         entity_id=firm.id,
         actor=owner,
         summary=f"Firm {firm.name} registered on the {firm.plan.value} plan",
-        ip_address=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
+        ip_address=caller_ip,
+        user_agent=caller_agent,
     )
     db.commit()
     db.refresh(firm)
@@ -170,6 +171,7 @@ def login(payload: LoginRequest, request: Request, db: DbSession):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Firm is not active")
 
     practitioner.last_login_at = datetime.now(UTC)
+    caller_ip, caller_agent = audit.request_origin(request)
     audit.record(
         db,
         action="auth.login",
@@ -177,8 +179,8 @@ def login(payload: LoginRequest, request: Request, db: DbSession):
         entity_id=practitioner.id,
         actor=practitioner,
         summary=f"{practitioner.email} signed in",
-        ip_address=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
+        ip_address=caller_ip,
+        user_agent=caller_agent,
     )
     db.commit()
     db.refresh(practitioner)

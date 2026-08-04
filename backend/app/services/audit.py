@@ -10,6 +10,53 @@ from sqlalchemy.orm import Session
 
 from app.models.audit import AuditLog
 from app.models.firm import Practitioner
+from app.schemas.common import sanitize_text
+
+# What ``audit_log.user_agent`` holds. The header is whatever the caller chose
+# to send and nothing bounded it, on the two endpoints that record it —
+# ``/auth/register`` and ``/auth/login``, both reachable without credentials.
+# SQLite truncates silently and PostgreSQL, which is what the deployment runs,
+# refuses the row outright: a ``DataError`` out of the commit, so a caller
+# sending a kilobyte of User-Agent could not register *and could not sign in*.
+#
+# Truncated rather than refused, for the reason ``documents`` truncates a
+# filename: the sign-in is genuine either way, and losing it over the length of
+# a header the practitioner never typed would be the worse answer. The head is
+# what is kept here — a user agent identifies itself at the front.
+MAX_USER_AGENT = 512
+
+
+def request_origin(request: Any) -> tuple[str | None, str | None]:
+    """Who made this request, as the trail records it: address and user agent.
+
+    ``request.client.host`` is the machine that opened the TCP connection, and
+    in every deployment of this system that machine is Caddy. So the one field
+    on the one table that answers "where was this signed in from" held the
+    reverse proxy's address — the same value on every row, for every firm, for
+    every registration and every sign-in. The trail is what a firm reads after
+    a credential is suspected of having leaked, and it was answering with a
+    constant.
+
+    :func:`app.core.middleware.client_ip` is the resolution the access log and
+    the rate limiter already use, and it is the careful one: the forwarded
+    chain is believed only when the connection itself came from a trusted
+    proxy, and it is walked right-to-left so a prefix the caller forged is
+    skipped. Reused here rather than re-derived, so the three places that name
+    a caller cannot disagree about who it was.
+
+    The user agent is sanitised and cut to what the column holds; see
+    :data:`MAX_USER_AGENT`. Sanitised because it is rendered back into the
+    audit screen and the log, and control characters in it are the caller's
+    choice — inbound sanitising covers every other string that reaches the
+    database, and a raw header is not an exception worth making.
+    """
+    from app.core.middleware import client_ip
+
+    agent = request.headers.get("user-agent")
+    return (
+        client_ip(request),
+        (sanitize_text(agent)[:MAX_USER_AGENT] or None) if agent else None,
+    )
 
 
 def record(
