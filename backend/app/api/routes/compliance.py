@@ -62,10 +62,32 @@ def _empty_bucket(label: str) -> ComplianceCalendarBucket:
     )
 
 
-def _tally(bucket: ComplianceCalendarBucket, state: str) -> None:
-    bucket.total += 1
+def _tally(bucket: ComplianceCalendarBucket, state: str, count: int = 1) -> None:
+    bucket.total += count
     if state in ("upcoming", "due_soon", "overdue", "filed"):
-        setattr(bucket, state, getattr(bucket, state) + 1)
+        setattr(bucket, state, getattr(bucket, state) + count)
+
+
+def display_state_sql(today: date):
+    """``derive_display_status`` as the SQL expression it already is.
+
+    The same five-way split the model computes in Python, so the calendar's
+    counts and its rows cannot disagree — and the same one
+    ``clients._compliance_summary`` and the dashboard already express. ``case``
+    rather than an aggregate ``FILTER`` clause, for the reason those give:
+    FILTER wants SQLite 3.30 and this has to render the same on both backends.
+    """
+    return case(
+        (ComplianceItem.status.in_(FILED_STATUSES), "filed"),
+        (ComplianceItem.status == ComplianceStatus.NOT_APPLICABLE, "not_applicable"),
+        (ComplianceItem.due_date < today, "overdue"),
+        (
+            ComplianceItem.due_date
+            <= today + timedelta(days=ComplianceItem.DUE_SOON_WINDOW_DAYS),
+            "due_soon",
+        ),
+        else_="upcoming",
+    )
 
 
 def _follow_with_tasks(db: Session, item: ComplianceItem, was: ComplianceStatus) -> None:
@@ -145,8 +167,25 @@ def compliance_calendar(
 ):
     """Compliance items in a window, bucketed by period with status counts.
 
-    ``display_status`` is derived (due date vs today) rather than stored, so it
-    is applied after the query; ``total`` then reflects the filtered set.
+    Counted by the database and paged by the database, rather than read whole
+    and reduced here. ``display_status`` is derived from the due date rather
+    than stored, and that is what used to make this the one list endpoint whose
+    ``limit`` bought nothing: every filing in the window was loaded, hydrated
+    into a mapped object *and* validated into a response model, and then all but
+    one page of it was thrown away.
+
+    The window is the caller's, so its size is too. A filing is a permanent
+    record and the nightly generator adds a year of them per client ahead of
+    time, so ``?from_date=2000-01-01&to_date=2099-12-31`` is a firm's entire
+    calendar — past, present and pre-generated — materialised to render two
+    hundred rows. This is the screen a practitioner opens first each morning,
+    and every one of them opens it in the same half hour.
+
+    ``display_state_sql`` is what makes it expressible: the derived state is a
+    date comparison, so the filter, the per-period buckets and the summary are
+    all one grouped query, and only the page itself is read as rows. The counts
+    are still counts of the filtered set — ``total`` is the sum of the buckets,
+    so the two cannot drift apart.
     """
     if display_status is not None and display_status not in DISPLAY_STATES:
         raise HTTPException(
@@ -163,6 +202,7 @@ def compliance_calendar(
             detail="to_date must not be before from_date",
         )
 
+    display_state = display_state_sql(today)
     filters = [
         ComplianceItem.firm_id == practitioner.firm_id,
         ComplianceItem.due_date >= start,
@@ -176,39 +216,53 @@ def compliance_calendar(
         filters.append(ComplianceItem.status == compliance_status)
     if assigned_to:
         filters.append(ComplianceItem.assigned_practitioner_id == assigned_to)
-
-    stmt = (
-        select(ComplianceItem)
-        .options(
-            selectinload(ComplianceItem.client), selectinload(ComplianceItem.compliance_type)
-        )
-        .where(*filters)
-        .order_by(ComplianceItem.due_date, ComplianceItem.period_label)
-    )
-    if category:
-        stmt = stmt.join(ComplianceType).where(ComplianceType.category == category)
-
-    rows = list(db.scalars(stmt).all())
-    serialised = [_serialise(item, today) for item in rows]
     if display_status:
-        serialised = [item for item in serialised if item.display_status == display_status]
+        filters.append(display_state == display_status)
+
+    def narrow(stmt):
+        stmt = stmt.where(*filters)
+        if category:
+            stmt = stmt.join(ComplianceType).where(ComplianceType.category == category)
+        return stmt
 
     summary = _empty_bucket("all")
     buckets: dict[str, ComplianceCalendarBucket] = {}
-    for item in serialised:
-        _tally(summary, item.display_status)
-        bucket = buckets.setdefault(item.period_label, _empty_bucket(item.period_label))
-        _tally(bucket, item.display_status)
+    grouped = db.execute(
+        narrow(
+            select(
+                ComplianceItem.period_label, display_state, func.count(ComplianceItem.id)
+            )
+        ).group_by(ComplianceItem.period_label, display_state)
+    ).all()
+    for period_label, state, count in grouped:
+        _tally(summary, state, count)
+        bucket = buckets.setdefault(period_label, _empty_bucket(period_label))
+        _tally(bucket, state, count)
+
+    rows = db.scalars(
+        narrow(
+            select(ComplianceItem).options(
+                selectinload(ComplianceItem.client),
+                selectinload(ComplianceItem.compliance_type),
+            )
+        )
+        # ``id`` breaks the tie: two filings of one client can share a deadline
+        # and a period, and a page boundary falling between them would otherwise
+        # repeat or drop a row depending on how the rows came back.
+        .order_by(ComplianceItem.due_date, ComplianceItem.period_label, ComplianceItem.id)
+        .limit(limit)
+        .offset(offset)
+    ).all()
 
     return ComplianceCalendarResponse(
         from_date=start,
         to_date=end,
-        total=len(serialised),
+        total=summary.total,
         limit=limit,
         offset=offset,
         summary=summary,
         buckets=sorted(buckets.values(), key=lambda b: b.period_label),
-        items=serialised[offset : offset + limit],
+        items=[_serialise(item, today) for item in rows],
     )
 
 

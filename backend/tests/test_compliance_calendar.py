@@ -1745,6 +1745,137 @@ class TestASelectionThatNamesOneFilingTwice:
         assert response.json() == {"updated": 1, "skipped": 1}
 
 
+class TestTheCalendarIsCountedAndPagedByTheDatabase:
+    """``display_status`` is derived rather than stored, and that used to be
+    what made ``limit`` buy nothing here: every filing in the caller's window
+    was read off disk, hydrated, *and* validated into a response model before
+    all but one page of it was discarded.
+
+    The window is the caller's own, so its size is too — a mistyped or
+    deliberately wide range is a firm's entire calendar, past and pre-generated.
+    The numbers must not have moved; only where they are computed has.
+    """
+
+    def _calendar(self, client, auth_headers, query: str = "") -> dict:
+        response = client.get(
+            f"{API}/compliance/calendar?from_date=2020-01-01&to_date=2035-12-31{query}",
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def _spread(self, db: Session, client_id: str) -> None:
+        """Put the client's filings across every display state."""
+        items = items_for(db, client_id)
+        assert len(items) > 6, "expected a calendar worth spreading across states"
+        today = clock.today()
+        items[0].due_date = today - timedelta(days=30)  # overdue
+        items[1].due_date = today                       # due today, so due_soon
+        items[2].due_date = today + timedelta(days=7)   # the edge of due_soon
+        items[3].due_date = today + timedelta(days=8)   # one day past it
+        items[4].status = ComplianceStatus.NOT_APPLICABLE
+        items[5].status = ComplianceStatus.FILED
+        items[5].filed_on = today
+        db.commit()
+
+    def test_the_counts_agree_with_the_model_row_by_row(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The SQL split and ``derive_display_status`` are one definition."""
+        client_id = client_of_long_standing(client, auth_headers)
+        self._spread(db, client_id)
+        today = clock.today()
+
+        expected = {"overdue": 0, "due_soon": 0, "upcoming": 0, "filed": 0}
+        total = 0
+        for item in items_for(db, client_id):
+            total += 1
+            state = item.derive_display_status(today)
+            if state in expected:
+                expected[state] += 1
+
+        summary = self._calendar(client, auth_headers)["summary"]
+        assert summary["total"] == total
+        assert {key: summary[key] for key in expected} == expected
+
+    def test_every_display_state_filters_to_exactly_its_own_rows(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = client_of_long_standing(client, auth_headers)
+        self._spread(db, client_id)
+        today = clock.today()
+
+        for state in ("overdue", "due_soon", "upcoming", "filed", "not_applicable"):
+            expected = {
+                str(item.id)
+                for item in items_for(db, client_id)
+                if item.derive_display_status(today) == state
+            }
+            body = self._calendar(client, auth_headers, f"&display_status={state}&limit=1000")
+            assert body["total"] == len(expected), state
+            assert {row["id"] for row in body["items"]} == expected, state
+
+    def test_the_buckets_still_add_up_to_the_filtered_total(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = client_of_long_standing(client, auth_headers)
+        self._spread(db, client_id)
+
+        body = self._calendar(client, auth_headers, "&display_status=upcoming")
+        assert body["total"] > 0
+        assert sum(b["total"] for b in body["buckets"]) == body["total"]
+        assert sum(b["upcoming"] for b in body["buckets"]) == body["total"]
+
+    def test_paging_walks_the_window_without_repeating_or_dropping_a_row(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """Two filings of one client can share a deadline and a period, so the
+        order has to be total or a page boundary between them loses one."""
+        client_of_long_standing(client, auth_headers)
+        whole = self._calendar(client, auth_headers, "&limit=1000")
+        assert whole["total"] > 10
+
+        walked: list[str] = []
+        for offset in range(0, whole["total"], 5):
+            page = self._calendar(client, auth_headers, f"&limit=5&offset={offset}")
+            walked.extend(row["id"] for row in page["items"])
+
+        assert len(walked) == whole["total"]
+        assert len(set(walked)) == whole["total"]
+        assert walked == [row["id"] for row in whole["items"]]
+
+    def test_only_one_page_of_filings_is_read(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The point of the change, asserted directly.
+
+        The counts come back as aggregates and the rows come back bounded, so
+        the cost of this screen follows the page rather than the firm's whole
+        filing history.
+        """
+        client_of_long_standing(client, auth_headers)
+        statements: list[str] = []
+
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(" ".join(statement.split()).lower())
+
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            body = self._calendar(client, auth_headers, "&limit=5")
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+
+        assert body["total"] > 5, "expected more filings than one page holds"
+        assert len(body["items"]) == 5
+        reading_rows = [
+            sql
+            for sql in statements
+            if "from compliance_items" in sql and "count(" not in sql
+        ]
+        assert reading_rows, "the calendar never looked at the compliance items"
+        assert all("limit" in sql for sql in reading_rows), reading_rows
+
+
 class TestAnExplicitNullOnAFilingsRequiredFields:
     """A PATCH body is all optionals, and the optionality means two different
     things. ``notes`` is optional because a filing may not have any — ``null``
