@@ -421,7 +421,7 @@ def update_client(
         # ever ran for active clients, so a client away for six months has a
         # six-month hole no reopen can fill.
         restored = restore_shelved_items(db, client)
-        created = generate_compliance_items(db, client).created_count
+        created += generate_compliance_items(db, client).created_count
 
     registrations_changed = any(
         key in updates and before[key] != updates[key] for key in REGISTRATION_FLAGS
@@ -433,11 +433,21 @@ def update_client(
     # the client for the paperwork behind them. Only on an active client: while
     # one is off-boarded every open filing is already closed, and reinstating
     # here would undo that.
+    # Accumulated rather than assigned, because both branches can run on one
+    # save and this one runs second. Taking a client back on *and* correcting a
+    # registration in the same PATCH — which is the ordinary shape of it, since
+    # the reason they are back is usually that something about them changed —
+    # reported the count from this generation alone. That count is zero: the
+    # flags were applied before either branch, so the reactivation's own
+    # generation already materialised everything the new registrations call
+    # for. The firm was answered ``compliance_items_created: 0`` and the audit
+    # trail said nothing about the filings, on the one request that created a
+    # year of them.
     if registrations_changed and client.is_active:
         reconciled = reconcile_applicability(db, client)
         withdrawn = reconciled.withdrawn
         restored += reconciled.reinstated
-        created = generate_compliance_items(db, client).created_count
+        created += generate_compliance_items(db, client).created_count
 
     audit.record(
         db,

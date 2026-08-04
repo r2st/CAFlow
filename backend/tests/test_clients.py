@@ -2535,3 +2535,91 @@ class TestPagingClientsThatShareAName:
         assert client.get(f"{API}/clients", headers=auth_headers).status_code == 200
 
         assert paged_order_by(recorded_sql, "clients").endswith("clients.id")
+
+
+class TestOneSaveThatBothReactivatesAndChangesARegistration:
+    """The ordinary shape of taking a client back on.
+
+    A firm rarely reactivates a client and nothing else — the reason they are
+    back is usually that something about them changed, so the flag and the
+    registration move in one PATCH. Both branches of the handler then run, and
+    the second one reported over the first: the count came from its own
+    generation, which is zero, because the flags were applied before either
+    branch and the reactivation's generation had already materialised
+    everything the new registrations call for.
+
+    So the one request that creates a year of filings answered
+    ``compliance_items_created: 0``, and the audit line it wrote said nothing
+    about them at all.
+    """
+
+    def _off_boarded_non_gst_client(self, client: TestClient, auth_headers: dict) -> str:
+        created = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(gst_registered=False, gstin=None),
+        ).json()
+        client_id = created["client"]["id"]
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        return client_id
+
+    def _take_back_on_as_gst_registered(
+        self, client: TestClient, auth_headers: dict, client_id: str
+    ):
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={
+                "is_active": True,
+                "gst_registered": True,
+                "gstin": "27AABCN2345P1ZV",
+                "gst_filing_frequency": "monthly",
+            },
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_the_count_is_of_every_filing_the_save_created(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        client_id = self._off_boarded_non_gst_client(client, auth_headers)
+        before = len(items_of(db, uuid.UUID(client_id)))
+
+        response = self._take_back_on_as_gst_registered(client, auth_headers, client_id)
+
+        after = len(items_of(db, uuid.UUID(client_id)))
+        assert after > before, "the GST registration should have added filings"
+        assert response["compliance_items_created"] == after - before
+
+    def test_the_trail_says_the_filings_were_generated(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The summary is built from the same count, so it went silent too."""
+        client_id = self._off_boarded_non_gst_client(client, auth_headers)
+        self._take_back_on_as_gst_registered(client, auth_headers, client_id)
+
+        entries = client.get(
+            f"{API}/audit",
+            params={"action": "client.update", "entity_id": client_id},
+            headers=auth_headers,
+        ).json()["items"]
+        assert entries, "the update should have been recorded"
+        assert "new compliance item(s)" in entries[0]["summary"]
+
+    def test_a_plain_reactivation_still_reports_its_own_count(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Nothing was added to the branch that already worked."""
+        created = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()
+        client_id = created["client"]["id"]
+        client.delete(f"{API}/clients/{client_id}", headers=auth_headers)
+        before = len(items_of(db, uuid.UUID(client_id)))
+
+        response = client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": True}
+        ).json()
+
+        after = len(items_of(db, uuid.UUID(client_id)))
+        assert response["compliance_items_created"] == after - before
