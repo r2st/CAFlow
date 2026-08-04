@@ -762,6 +762,28 @@ def revenue_summary(
     return summary
 
 
+def open_invoice_ids(db: Session, firm_id: uuid.UUID | None = None) -> list[uuid.UUID]:
+    """The ids of every invoice still in one of the unpaid states, in a fixed order.
+
+    Ids rather than rows, because the one caller — the nightly status refresh —
+    re-reads each of them under its own lock before deciding anything from it;
+    see :func:`load_for_update`. Handing it loaded rows is what made that
+    impossible.
+
+    Unfiltered by balance, unlike :func:`unpaid_invoices`. That function answers
+    "who still owes us money", so a settled bill is rightly not on it; this one
+    answers "which rows might be labelled wrong", and an invoice sitting in
+    ``sent`` with nothing left to collect is exactly such a row.
+
+    Ordered, so two runs walk the queue the same way rather than crossing on
+    the locks.
+    """
+    stmt = select(Invoice.id).where(Invoice.status.in_(UNPAID_STATUSES))
+    if firm_id is not None:
+        stmt = stmt.where(Invoice.firm_id == firm_id)
+    return list(db.scalars(stmt.order_by(Invoice.id)).all())
+
+
 def unpaid_invoices(
     db: Session, firm_id: uuid.UUID | None = None, *, today: date | None = None
 ) -> list[Invoice]:

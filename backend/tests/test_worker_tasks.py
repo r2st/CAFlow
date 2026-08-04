@@ -36,7 +36,7 @@ from app.models.document import Document
 from app.models.firm import Firm
 from app.models.invoice import Invoice
 from app.models.reminder import Reminder
-from app.services import ai
+from app.services import ai, billing
 from app.services import reminders as reminder_service
 from app.worker import tasks
 from app.worker.celery_app import celery_app
@@ -1697,3 +1697,189 @@ class TestAChaseThatNoLongerStands:
             "retrying": 0,
             "withdrawn": 0,
         }
+
+
+# -------------------------------------------- refreshing a status from the row --
+
+
+class TestRefreshingAnInvoiceFromTheRowRatherThanACopy:
+    """The nightly status refresh was the fifth writer of ``Invoice.status``.
+
+    The other four — receipting, cancelling, editing and sending — each hold
+    the row while they decide from it. This one read every open invoice on the
+    deployment up front and wrote them all back at one commit, so anything
+    committed during the walk was overwritten by a derivation taken before it.
+
+    The competing write is made through a second session and committed, which
+    is what another request looks like from inside the sweep. SQLite will not
+    let a second connection write past an open read, so the sweep's own session
+    is committed first — which is exactly the point at which the real job has
+    read its work list and not yet decided anything.
+    """
+
+    def _billed(self, db, *, paid=0, status=InvoiceStatus.SENT) -> Invoice:
+        firm = make_firm(db)
+        record = make_client(db, firm)
+        invoice = Invoice(
+            firm_id=firm.id,
+            client_id=record.id,
+            invoice_number="INV/FY2026-27/0001",
+            issue_date=RUN_DATE - timedelta(days=40),
+            due_date=RUN_DATE - timedelta(days=10),
+            subtotal_paise=200_000,
+            tax_paise=36_000,
+            total_paise=236_000,
+            amount_paid_paise=paid,
+            status=status,
+        )
+        db.add(invoice)
+        db.flush()
+        db.commit()
+        return invoice
+
+    def _race(self, monkeypatch, change):
+        """Commit ``change`` in another session after the work list is read."""
+        from app.database import SessionLocal
+        from app.services import billing as billing_service
+
+        real = billing_service.open_invoice_ids
+
+        def racing(session, *args, **kwargs):
+            ids = real(session, *args, **kwargs)
+            # Let go of the read, so the competing connection can write.
+            session.commit()
+            other = SessionLocal()
+            try:
+                for invoice_id in ids:
+                    change(other, billing_service.load_for_update(other, invoice_id))
+                other.commit()
+            finally:
+                other.close()
+            return ids
+
+        monkeypatch.setattr(billing_service, "open_invoice_ids", racing)
+
+    def _reread(self, invoice_id):
+        from app.database import SessionLocal
+
+        fresh = SessionLocal()
+        try:
+            invoice = fresh.get(Invoice, invoice_id)
+            return invoice.status, invoice.amount_paid_paise
+        finally:
+            fresh.close()
+
+    def test_an_invoice_paid_during_the_run_is_not_marked_overdue(self, db, monkeypatch):
+        """The client paid in full at 02:31, and the sweep runs at 02:30.
+
+        Against a copy that still said nothing had been collected, the sweep
+        wrote ``overdue`` back over the ``paid`` the receipt had just recorded
+        — and it is the later write, so it is the one that lands.
+        """
+        invoice = self._billed(db)
+        invoice_id = invoice.id
+        self._race(
+            monkeypatch,
+            lambda session, inv: billing.record_payment(
+                inv, amount_paise=inv.total_paise, payment_date=RUN_DATE, today=RUN_DATE
+            ),
+        )
+
+        tasks.refresh_invoice_statuses_task(today=RUN_DATE.isoformat())
+
+        status_after, paid_after = self._reread(invoice_id)
+        assert status_after is InvoiceStatus.PAID
+        assert paid_after == 236_000
+
+    def test_an_invoice_cancelled_during_the_run_stays_cancelled(self, db, monkeypatch):
+        """The expensive direction, because cancelling releases the work.
+
+        ``refresh_status`` leaves a cancelled invoice alone — but only when it
+        can see that it is cancelled. Against a copy taken beforehand it read
+        ``sent``, and what landed was a withdrawn bill back in an owed state:
+        chased by the payment sweep for money the firm decided not to ask for,
+        while the filings it cites sit on the billable list to be invoiced
+        again.
+        """
+        invoice = self._billed(db)
+        invoice_id = invoice.id
+
+        def cancel(session, inv):
+            inv.status = InvoiceStatus.CANCELLED
+
+        self._race(monkeypatch, cancel)
+
+        tasks.refresh_invoice_statuses_task(today=RUN_DATE.isoformat())
+
+        assert self._reread(invoice_id)[0] is InvoiceStatus.CANCELLED
+
+    def test_an_invoice_that_has_gone_does_not_stop_the_run(self, db, monkeypatch):
+        """A client deleted mid-run cascades their invoices away.
+
+        Being unable to find a row is not a failure — there is nothing left to
+        relabel — and the rest of the queue still has to be walked.
+        """
+        firm = make_firm(db)
+        for index in (1, 2):
+            record = make_client(db, firm, name=f"Client {index}", email=f"c{index}@x.in")
+            db.add(
+                Invoice(
+                    firm_id=firm.id,
+                    client_id=record.id,
+                    invoice_number=f"INV/FY2026-27/000{index}",
+                    issue_date=RUN_DATE - timedelta(days=40),
+                    due_date=RUN_DATE - timedelta(days=10),
+                    subtotal_paise=100_000,
+                    tax_paise=18_000,
+                    total_paise=118_000,
+                    status=InvoiceStatus.SENT,
+                )
+            )
+        db.commit()
+
+        from app.database import SessionLocal
+        from app.services import billing as billing_service
+
+        real = billing_service.open_invoice_ids
+
+        def racing(session, *args, **kwargs):
+            ids = real(session, *args, **kwargs)
+            session.commit()
+            other = SessionLocal()
+            try:
+                other.delete(other.get(Invoice, ids[0]))
+                other.commit()
+            finally:
+                other.close()
+            return ids
+
+        monkeypatch.setattr(billing_service, "open_invoice_ids", racing)
+
+        result = tasks.refresh_invoice_statuses_task(today=RUN_DATE.isoformat())
+
+        # The survivor was still relabelled; the missing one was skipped.
+        assert result == {"updated": 1, "open": 2}
+
+    def test_the_ordinary_run_still_flips_a_late_invoice(self, db):
+        invoice = self._billed(db)
+
+        result = tasks.refresh_invoice_statuses_task(today=RUN_DATE.isoformat())
+
+        assert result == {"updated": 1, "open": 1}
+        assert self._reread(invoice.id)[0] is InvoiceStatus.OVERDUE
+
+    def test_a_settled_invoice_still_labelled_sent_is_reached(self, db):
+        """``unpaid_invoices`` drops it; ``open_invoice_ids`` does not.
+
+        That function answers "who still owes us money", so a settled bill is
+        rightly not on it. This one answers "which rows might be labelled
+        wrong", and one sitting in ``sent`` with nothing left to collect is
+        exactly such a row.
+        """
+        invoice = self._billed(db, paid=236_000)
+
+        assert tasks.refresh_invoice_statuses_task(today=RUN_DATE.isoformat()) == {
+            "updated": 1,
+            "open": 1,
+        }
+        assert self._reread(invoice.id)[0] is InvoiceStatus.PAID

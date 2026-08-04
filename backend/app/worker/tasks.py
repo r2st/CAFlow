@@ -485,16 +485,55 @@ def generate_tasks_task(today: str | None = None, horizon_days: int = 21) -> dic
 
 @celery_app.task(name="caflow.refresh_invoice_statuses")
 def refresh_invoice_statuses_task(today: str | None = None) -> dict[str, int]:
-    """Flip sent invoices to overdue once their due date passes."""
+    """Flip sent invoices to overdue once their due date passes.
+
+    Each invoice is claimed and decided one at a time, for the reason the four
+    endpoints that change one already are — see ``billing.load_for_update``.
+    This was the fifth writer of ``Invoice.status`` and the only one left
+    deciding from a copy: it read every open invoice on the deployment up
+    front, derived a status for each from what that copy said, and wrote them
+    all back at a single commit at the end of the walk.
+
+    The walk is the window. ``refresh_status`` is derived entirely from
+    ``total_paise``, ``amount_paid_paise`` and the due date, so a copy taken
+    before a concurrent request committed is a copy that derives the wrong
+    answer — and it is the *later* write, so it lands on top:
+
+    * a client pays in full at 02:31 and the sweep, holding a copy that says
+      nothing was paid, writes ``overdue`` back over the ``paid`` the receipt
+      had just recorded;
+    * an invoice cancelled inside the window is worse, because cancelling
+      releases the filings it covered back into the billable pool.
+      ``refresh_status`` leaves a cancelled invoice alone — but only when it
+      can see that it is cancelled, and a copy taken beforehand says ``sent``.
+      What lands is a withdrawn invoice back in an owed state, chased by the
+      payment sweep for money the firm decided not to ask for, while the work
+      it cites is also sitting on the billable list waiting to be invoiced
+      again.
+
+    Neither is a race that needs a busy deployment: 02:30 is when this runs and
+    the whole of it is one transaction, so the window is the length of the
+    walk rather than an instant.
+
+    The ids are read without a lock, because they are only a list of what to
+    look at; each row is then re-read under ``FOR UPDATE`` and committed on its
+    own, which keeps the hold to one invoice for the length of one derivation.
+    A row that has gone since the ids were read is simply skipped — the
+    foreign keys cascade, and there is nothing to relabel.
+    """
     run_date = date.fromisoformat(today) if today else clock.today()
+    changed = 0
     with SessionLocal() as db:
-        invoices = billing.unpaid_invoices(db, today=run_date)
-        changed = 0
-        for invoice in invoices:
-            before = invoice.status
-            billing.refresh_status(invoice, run_date)
-            if invoice.status != before:
-                changed += 1
-        db.commit()
-    logger.info("Refreshed %s invoice status(es) of %s open", changed, len(invoices))
-    return {"updated": changed, "open": len(invoices)}
+        invoice_ids = billing.open_invoice_ids(db)
+        for invoice_id in invoice_ids:
+            invoice = billing.load_for_update(db, invoice_id)
+            if invoice is not None:
+                before = invoice.status
+                billing.refresh_status(invoice, run_date)
+                if invoice.status != before:
+                    changed += 1
+            # Ends the transaction either way, so the lock is released and the
+            # next claim starts from what the database says now.
+            db.commit()
+    logger.info("Refreshed %s invoice status(es) of %s open", changed, len(invoice_ids))
+    return {"updated": changed, "open": len(invoice_ids)}
