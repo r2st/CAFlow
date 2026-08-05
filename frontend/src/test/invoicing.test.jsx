@@ -7,6 +7,7 @@ import {
   formToLines,
   linesToForm,
   totalsOf,
+  validateGstRate,
   validateLines,
 } from '../components/InvoiceEditor'
 import Billing from '../pages/Billing'
@@ -112,6 +113,48 @@ describe('Invoice line validation', () => {
 
   it('allows a rate of zero — a written-off line still belongs on the invoice', () => {
     expect(validateLines([{ ...good, rupees: '0' }])).toBeNull()
+  })
+})
+
+describe('The GST rate an invoice is raised at', () => {
+  /**
+   * The rate is the one value this form submits that nothing checked, and an
+   * empty box is not a rate: `Number('')` is 0, so a cleared field went out as
+   * `gst_rate_bps: 0` and the client was billed no GST at all. The server
+   * cannot catch it — zero is a rate a firm genuinely charges on exempt work,
+   * so it is accepted there — which leaves this the only place the difference
+   * between a chosen zero and an unfinished one still exists.
+   */
+  it('accepts the usual rate', () => {
+    expect(validateGstRate('18')).toBeNull()
+  })
+
+  it('accepts a deliberate zero — exempt and zero-rated work is real', () => {
+    expect(validateGstRate('0')).toBeNull()
+  })
+
+  it('accepts a fractional rate', () => {
+    expect(validateGstRate('2.5')).toBeNull()
+  })
+
+  it('refuses an empty box rather than reading it as nil-rated', () => {
+    expect(validateGstRate('')).toMatch(/Enter the GST rate/)
+  })
+
+  it('refuses a box holding only whitespace', () => {
+    expect(validateGstRate('   ')).toMatch(/Enter the GST rate/)
+  })
+
+  it('refuses a rate above 100% — the server caps gst_rate_bps at 10,000', () => {
+    expect(validateGstRate('150')).toMatch(/between 0 and 100/)
+  })
+
+  it('refuses a negative rate', () => {
+    expect(validateGstRate('-5')).toMatch(/between 0 and 100/)
+  })
+
+  it('accepts the ceiling itself', () => {
+    expect(validateGstRate('100')).toBeNull()
   })
 })
 
@@ -336,6 +379,53 @@ describe('Billing — ad-hoc invoices', () => {
     await waitFor(() =>
       expect(api.createInvoice).toHaveBeenCalledWith(
         expect.objectContaining({ gst_rate_bps: 500 }),
+      ),
+    )
+  })
+
+  it('will not submit an invoice whose GST box has been cleared', async () => {
+    /**
+     * Clearing the field to retype it is how the rate gets changed at all —
+     * the test above does exactly that. Submitting from the cleared state sent
+     * `gst_rate_bps: 0`, and the server takes it: zero is a rate a firm charges
+     * on exempt work, so it has no way to tell that one from this one. What
+     * went out was an invoice billing the client no GST, over the firm's own
+     * number series, already sent.
+     */
+    const user = userEvent.setup()
+    vi.spyOn(api, 'createInvoice').mockResolvedValue(invoiceDetail())
+    renderBilling()
+
+    const form = await openNewInvoice(user)
+    await user.selectOptions(form.getByLabelText('Client'), 'c-1')
+    await user.type(form.getByLabelText('Line 1 description'), 'Audit fee')
+    await user.type(form.getByLabelText('Line 1 rate in rupees'), '1000')
+    await user.clear(form.getByLabelText('GST %'))
+
+    expect(form.getByText(/Enter the GST rate/)).toBeInTheDocument()
+    expect(form.getByRole('button', { name: 'Create draft' })).toBeDisabled()
+
+    await user.click(form.getByRole('button', { name: 'Create draft' }))
+    expect(api.createInvoice).not.toHaveBeenCalled()
+  })
+
+  it('lets a deliberate zero through — exempt work is billed at nil', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'createInvoice').mockResolvedValue(invoiceDetail())
+    renderBilling()
+
+    const form = await openNewInvoice(user)
+    await user.selectOptions(form.getByLabelText('Client'), 'c-1')
+    await user.type(form.getByLabelText('Line 1 description'), 'Export advisory')
+    await user.type(form.getByLabelText('Line 1 rate in rupees'), '1000')
+    await user.clear(form.getByLabelText('GST %'))
+    await user.type(form.getByLabelText('GST %'), '0')
+
+    await user.click(form.getByRole('button', { name: 'Create draft' }))
+
+    await waitFor(() =>
+      expect(api.createInvoice).toHaveBeenCalledWith(
+        expect.objectContaining({ gst_rate_bps: 0 }),
       ),
     )
   })

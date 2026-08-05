@@ -77,6 +77,38 @@ export function validateLines(lines) {
   return null
 }
 
+/** The highest rate the server will take: `gst_rate_bps` is capped at 10,000. */
+const MAX_GST_PERCENT = 100
+
+/**
+ * What is wrong with the GST rate, or null if it is one the server will take.
+ *
+ * The rate is the other value this form submits, and it was the only one
+ * nothing checked. An empty box reads as `Number('') === 0`, which the form
+ * then sent as `gst_rate_bps: 0` — a nil-rated invoice, accepted by the server,
+ * because zero is a rate a firm legitimately charges on an export or an exempt
+ * supply and cannot be refused there.
+ *
+ * So it has to be refused *here*, where the difference between a rate somebody
+ * chose and a box they had not finished typing in still exists. Clearing the
+ * field to retype it is the ordinary way to change it — it is what the test
+ * for a non-default rate does — and submitting from that state billed the
+ * client no GST at all. The firm still owes the tax it did not collect, and
+ * the invoice is a document of record it has already sent.
+ *
+ * Zero itself stays allowed, deliberately typed. Only blank is not a rate.
+ */
+export function validateGstRate(gstRate) {
+  const rate = Number(gstRate)
+  if (String(gstRate).trim() === '' || !Number.isFinite(rate)) {
+    return 'Enter the GST rate — 18 for the usual rate, or 0 for exempt work.'
+  }
+  if (rate < 0 || rate > MAX_GST_PERCENT) {
+    return `The GST rate must be between 0 and ${MAX_GST_PERCENT}%.`
+  }
+  return null
+}
+
 /** Subtotal, GST and total, computed the same way the server does. */
 export function totalsOf(lines, gstRateBps) {
   const subtotal = lines.reduce((sum, line) => sum + lineAmountPaise(line), 0)
@@ -266,7 +298,12 @@ export function InvoiceForm({ clients, invoice, onSubmit, onCancel, busy }) {
   const gstRateBps = Math.round((Number(gstRate) || 0) * 100)
   const totals = useMemo(() => totalsOf(lines, gstRateBps), [lines, gstRateBps])
   const lineProblem = validateLines(lines)
-  const problem = !editing && !clientId ? 'Choose the client to bill.' : lineProblem
+  // Last of the three, so the message a person is shown is the one furthest up
+  // the form they still have to deal with: the client, then the lines they are
+  // typing, then the rate that sits above them and is usually already right.
+  const problem =
+    (!editing && !clientId ? 'Choose the client to bill.' : lineProblem) ??
+    validateGstRate(gstRate)
 
   function changeLine(index, next) {
     setLines((prev) => prev.map((line, i) => (i === index ? next : line)))
