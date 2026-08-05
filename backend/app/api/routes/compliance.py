@@ -315,6 +315,35 @@ def update_compliance_item(
                 "filed or delayed_filed item"
             ),
         )
+    # The other half of the same pair, and the one that was silent. ``filed_on``
+    # is deliberately clearable — reverting a filing is what clears it — but
+    # clearing it is only an instruction alongside a status that is not filed.
+    # Sent on an item that stays filed, ``_normalise_filing`` read the now-empty
+    # field, found nothing to keep, and filled it with *today*: the caller asked
+    # for the date to come off and the record was re-dated instead.
+    #
+    # That is a date of record being rewritten with nothing saying so. The
+    # filed/delayed split is derived from it, so a return lodged on the 18th
+    # against a deadline on the 20th, re-dated to today, becomes
+    # ``delayed_filed`` — the firm's own account of when a return was lodged,
+    # and the one an assessing officer asks about, now saying it was late.
+    # Nothing recovers it: there is one ``filed_on`` and the old value is gone.
+    #
+    # It is also not a shape a UI sends on purpose. It is what a client library
+    # serialising an absent field as ``null`` produces — the same road
+    # ``schemas.common.refuse_null`` was written for — so the answer is the same
+    # 422 naming the field that the reverse combination already gets.
+    if "filed_on" in updates and updates["filed_on"] is None and (
+        resulting_status in FILED_STATUSES
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"filed_on cannot be cleared while the status is "
+                f"'{resulting_status.value}' — a filed return keeps the date it "
+                "was lodged on. Revert the status to clear it."
+            ),
+        )
     # And on the same terms, for a stronger version of the same reason: a
     # filing date is at least a date, whereas an acknowledgement number is
     # issued by the statutory portal at the moment it accepts a return. One

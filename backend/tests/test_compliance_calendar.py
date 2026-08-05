@@ -2228,3 +2228,144 @@ class TestTwoGenerationsOfOneFirmAtOnce:
         assert result["firms"] == 3
         assert len(set(held)) == 3, "the sweep stopped covering every firm"
         assert held == sorted(held), "an undefined lock order lets two sweeps cross"
+
+
+class TestClearingTheDateAReturnWasLodgedOn:
+    """``filed_on: null`` on a filing that stays filed.
+
+    The field is deliberately clearable — reverting a filing is what clears it —
+    so ``not_clearable`` leaves it alone. But clearing it only means anything
+    alongside a status that is *not* filed. Sent on an item that stays filed,
+    ``_normalise_filing`` read the now-empty field, found nothing to keep, and
+    filled it with today: the caller asked for the date to come off and the
+    record was re-dated instead, with nothing saying so.
+
+    That is a date of record being rewritten. The filed/delayed split is
+    derived from it, so a return lodged inside its window and re-dated to today
+    becomes ``delayed_filed`` — the firm's own account of when it was lodged,
+    and the one an assessing officer asks about, now saying it was late. There
+    is one ``filed_on`` and nothing keeps what it was before.
+
+    And it is not a shape a UI sends on purpose: it is what a client library
+    serialising an absent field as ``null`` produces, which is the same road
+    ``TestAnExplicitNullOnAFilingsRequiredFields`` covers for the columns that
+    cannot hold one at all.
+    """
+
+    def _filed_item(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ) -> tuple[ComplianceItem, str]:
+        """A filing lodged on time, so a re-date to today would be visible."""
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        lodged = (item.due_date - timedelta(days=2)).isoformat()
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": lodged},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "filed"
+        return item, lodged
+
+    def test_it_is_refused_by_name_rather_than_re_dated(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        item, _ = self._filed_item(client, auth_headers, db)
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"filed_on": None},
+        )
+
+        assert response.status_code == 422, response.text
+        detail = response.json()["detail"]
+        assert "filed_on" in detail
+        assert "filed" in detail
+
+    def test_the_lodged_date_is_left_exactly_as_it_was(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        item, lodged = self._filed_item(client, auth_headers, db)
+
+        client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"filed_on": None},
+        )
+
+        stored = client.get(
+            f"{API}/compliance/items/{item.id}", headers=auth_headers
+        ).json()
+        assert stored["filed_on"] == lodged
+        # The half that costs the firm: re-dated to today the return would be
+        # past its own deadline and stored as a late filing.
+        assert stored["status"] == "filed"
+
+    def test_it_is_refused_alongside_a_status_that_is_also_filed(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Named or inherited, the status this patch *lands on* is what decides."""
+        item, _ = self._filed_item(client, auth_headers, db)
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "delayed_filed", "filed_on": None},
+        )
+
+        assert response.status_code == 422, response.text
+        assert "delayed_filed" in response.json()["detail"]
+
+    def test_reverting_a_filing_still_clears_the_date(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The reason the field is clearable at all, and the refusal must not
+        take it away: a return lodged in error goes back to pending and the
+        date goes with it."""
+        item, _ = self._filed_item(client, auth_headers, db)
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "pending", "filed_on": None},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["filed_on"] is None
+        assert response.json()["status"] == "pending"
+
+    def test_a_pending_filing_takes_the_null_without_complaint(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Nothing to rewrite, so nothing to refuse."""
+        client_id = create_client_record(client, auth_headers)
+        item = items_for(db, client_id)[0]
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"filed_on": None},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["filed_on"] is None
+
+    def test_correcting_the_date_is_untouched(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Only ``null`` is refused. Naming a different date is the ordinary
+        correction and still re-derives the filed/delayed split."""
+        item, _ = self._filed_item(client, auth_headers, db)
+        late = (item.due_date + timedelta(days=3)).isoformat()
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"filed_on": late},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["filed_on"] == late
+        assert response.json()["status"] == "delayed_filed"
