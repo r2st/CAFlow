@@ -509,7 +509,10 @@ def portal_upload(
         entity_type="document",
         entity_id=document.id,
         firm_id=client.firm_id,
-        actor_label=f"{client.name} (client portal)",
+        # Built rather than formatted, so a long client name gives way before
+        # the marker saying this was the client rather than the firm — see
+        # ``audit.bounded_label``.
+        actor_label=audit.bounded_label(client.name, " (client portal)"),
         summary=f"{client.name} uploaded {document.original_filename} via the portal",
     )
     db.commit()

@@ -25,6 +25,53 @@ from app.schemas.common import sanitize_text
 # what is kept here — a user agent identifies itself at the front.
 MAX_USER_AGENT = 512
 
+# What ``audit_log.actor_label`` holds, and the reason it has to be built
+# rather than formatted.
+#
+# The column is a ``VARCHAR(255)``. The label written for a practitioner is
+# ``"<full name> <email>"``, and both halves come from a caller: ``full_name``
+# is bounded at 255 characters by the schema and an address at the 254 an
+# ``EmailStr`` allows. So the ordinary format string is a 512-character value
+# going into a 255-character column — SQLite truncates it silently and
+# PostgreSQL, which is what the deployment runs, refuses the row.
+#
+# That refusal is not a failed audit entry. ``record`` is called inside the
+# transaction of the action it describes, so the ``DataError`` comes out of the
+# commit and takes the *action* with it: a practitioner whose name and address
+# are long enough could not file a return, raise an invoice, upload a document
+# or add a client — every mutating endpoint in the API writes here. The portal
+# label has the same shape on a smaller margin: ``"<client name> (client
+# portal)"`` is 271 characters for a client named at the 255 the schema allows,
+# and the endpoint that writes it is the client's own upload.
+#
+# Cut rather than refused, for the reason the user agent above is: the action
+# is genuine either way, and losing it over the length of a name would be the
+# worse answer. The *head* is what gives, not the tail — the trailing part is
+# the email address or the marker saying this was the portal, which is the half
+# that identifies the actor and the half a reader searches on.
+MAX_ACTOR_LABEL = 255
+
+
+def bounded_label(head: str | None, suffix: str = "") -> str:
+    """A label for ``audit_log.actor_label``, cut to what the column holds.
+
+    ``suffix`` is the part that survives: the email address in
+    ``"Anita Sharma <anita@sharma-ca.in>"``, or the ``" (client portal)"``
+    marker on a label naming a client rather than a practitioner. Only ``head``
+    is trimmed, and only when the two together do not fit.
+    """
+    room = MAX_ACTOR_LABEL - len(suffix)
+    if room < 1:
+        # The suffix alone is over the limit, which leaves nothing to trim
+        # around it. Keep its tail, which is where an address ends.
+        return suffix.strip()[-MAX_ACTOR_LABEL:]
+    return f"{(head or '').strip()[:room]}{suffix}"
+
+
+def practitioner_label(practitioner: Practitioner) -> str:
+    """``Anita Sharma <anita@sharma-ca.in>``, bounded. See :func:`bounded_label`."""
+    return bounded_label(practitioner.full_name, f" <{practitioner.email}>")
+
 
 def request_origin(request: Any) -> tuple[str | None, str | None]:
     """Who made this request, as the trail records it: address and user agent.
@@ -74,12 +121,20 @@ def record(
     user_agent: str | None = None,
 ) -> AuditLog:
     """Append one entry. ``actor_label`` names a non-practitioner actor —
-    a client acting through the portal, or a background job."""
+    a client acting through the portal, or a background job.
+
+    Whichever of the two names the actor is bounded to what the column holds;
+    see :data:`MAX_ACTOR_LABEL` for what an unbounded one costs. A caller that
+    has already composed its own label passes it through the same cut, so no
+    call site can reintroduce the problem by formatting its own string.
+    """
     entry = AuditLog(
         firm_id=firm_id or (actor.firm_id if actor else None),
         actor_practitioner_id=actor.id if actor else None,
         actor_label=(
-            f"{actor.full_name} <{actor.email}>" if actor else actor_label
+            practitioner_label(actor)
+            if actor
+            else (bounded_label(actor_label) if actor_label else actor_label)
         ),
         action=action,
         entity_type=entity_type,

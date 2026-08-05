@@ -886,3 +886,69 @@ class TestWhatTheLandingPageReadsToBuildItself:
 
         assert body["shared_documents"] == []
         assert body["my_uploads"] == []
+
+
+class TestAttributingAnUploadFromALongNamedClient:
+    """``audit_log.actor_label`` is a VARCHAR(255) and the portal's label is
+    ``"<client name> (client portal)"``.
+
+    A client name is 255 characters at the schema's limit, so the marker pushes
+    the label to 271 — and a CA's client list is full of names that run long:
+    "Shree Ganesh Textiles and Fabrics Private Limited (Unit II)" and the rest
+    of the register. SQLite truncates it silently; PostgreSQL, which the
+    deployment runs, refuses the row, and ``audit.record`` writes inside the
+    upload's own transaction — so the client's file was stored and the commit
+    that recorded it failed, leaving bytes on the volume with no row pointing
+    at them and the upload answering 500.
+
+    The name gives way, not the marker: an entry that no longer says the client
+    did this reads as the firm having uploaded it themselves.
+    """
+
+    def _upload_as(self, client, auth_headers, name: str):
+        created = client.post(
+            "/api/v1/clients",
+            headers=auth_headers,
+            json=make_client_payload(name=name, generate_compliance_items=False),
+        )
+        assert created.status_code == 201, created.text
+        token = issue_link(
+            client, auth_headers, created.json()["client"]["id"]
+        ).json()["token"]
+
+        return client.post(
+            "/api/v1/portal/documents",
+            files={"file": ("bank.pdf", io.BytesIO(PDF_BYTES), "application/pdf")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    def _entry(self, db):
+        from app.models.audit import AuditLog
+
+        return (
+            db.query(AuditLog)
+            .filter(AuditLog.action == "portal.document_upload")
+            .one()
+        )
+
+    def test_the_upload_goes_through(self, client, auth_headers, db):
+        from app.services import audit
+
+        response = self._upload_as(client, auth_headers, "Shree Ganesh Textiles " * 11)
+
+        assert response.status_code == 201, response.text
+        assert len(self._entry(db).actor_label) <= audit.MAX_ACTOR_LABEL
+
+    def test_the_marker_survives_rather_than_the_tail_of_the_name(
+        self, client, auth_headers, db
+    ):
+        self._upload_as(client, auth_headers, "Shree Ganesh Textiles " * 11)
+
+        label = self._entry(db).actor_label
+        assert label.endswith(" (client portal)")
+        assert label.startswith("Shree Ganesh Textiles")
+
+    def test_an_ordinary_name_is_recorded_whole(self, client, auth_headers, db):
+        self._upload_as(client, auth_headers, "Nimbus Textiles Pvt Ltd")
+
+        assert self._entry(db).actor_label == "Nimbus Textiles Pvt Ltd (client portal)"

@@ -744,3 +744,104 @@ class TestTheUserAgentARequestArrivesWith:
         )
         assert response.status_code == 200, response.text
         assert self._entry(db).user_agent is None
+
+
+class TestTheLabelNamingWhoActed:
+    """``audit_log.actor_label`` is a VARCHAR(255) built from two caller strings.
+
+    For a practitioner it is ``"<full name> <email>"``. The schema allows 255
+    characters of name and an ``EmailStr`` allows 254 of address, so the format
+    string could produce over 500 characters for a 255-character column.
+    SQLite truncates silently; PostgreSQL, which is what the deployment runs,
+    refuses the row — and ``record`` is called inside the transaction of the
+    action it describes, so that refusal takes the *action* down with it. Every
+    mutating endpoint in the API writes here, so the practitioner concerned
+    could not file, invoice, upload or add a client at all.
+
+    Cut rather than refused, and cut from the head: the address is the half
+    that identifies the account and the half a reader searches on.
+    """
+
+    def _long_name_headers(self, client: TestClient, auth_headers: dict) -> dict:
+        """Add a practitioner whose name and address fill both columns."""
+        response = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Vishwanathan " * 19 + "Rao",  # 250 characters
+                "email": "v" * 60 + "@" + "d" * 60 + ".example.in",
+                "password": "another-good-password",
+                "role": "manager",
+            },
+        )
+        assert response.status_code == 201, response.text
+        token = client.post(
+            f"{API}/auth/login",
+            json={
+                "email": response.json()["email"],
+                "password": "another-good-password",
+            },
+        ).json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_a_practitioner_label_is_cut_to_what_the_column_holds(
+        self, client: TestClient, db: Session, auth_headers: dict
+    ):
+        headers = self._long_name_headers(client, auth_headers)
+
+        response = client.post(
+            f"{API}/clients", json=make_client_payload(), headers=headers
+        )
+
+        assert response.status_code == 201, response.text
+        entry = db.scalars(
+            select(AuditLog).where(AuditLog.action == "client.create")
+        ).one()
+        assert len(entry.actor_label) <= audit.MAX_ACTOR_LABEL
+
+    def test_the_address_survives_the_cut_rather_than_the_name(
+        self, client: TestClient, db: Session, auth_headers: dict
+    ):
+        """The name is what gives. An entry naming nobody findable is no entry."""
+        headers = self._long_name_headers(client, auth_headers)
+        address = client.get(f"{API}/auth/me", headers=headers).json()["email"]
+
+        client.post(f"{API}/clients", json=make_client_payload(), headers=headers)
+
+        entry = db.scalars(
+            select(AuditLog).where(AuditLog.action == "client.create")
+        ).one()
+        assert entry.actor_label.endswith(f"<{address}>")
+
+    def test_an_ordinary_practitioner_is_named_in_full(
+        self, client: TestClient, db: Session, auth_headers: dict, created_client: dict
+    ):
+        entry = db.scalars(
+            select(AuditLog).where(AuditLog.action == "client.create")
+        ).one()
+
+        assert entry.actor_label == (
+            f"{FIRM_REGISTRATION['owner_full_name']} "
+            f"<{FIRM_REGISTRATION['owner_email']}>"
+        )
+
+    def test_a_label_a_caller_composed_is_cut_on_the_same_terms(self):
+        """Nothing reaches the column without going through the bound —
+        otherwise a second call site can reintroduce the problem by formatting
+        its own string, which is how the portal label got there."""
+        assert len(audit.bounded_label("N" * 400)) == audit.MAX_ACTOR_LABEL
+
+    def test_a_trailing_marker_is_kept_when_the_name_is_too_long(self):
+        """The portal's label is ``"<client name> (client portal)"``, and the
+        marker is the part that says this was the client rather than the firm."""
+        label = audit.bounded_label("Kumar Enterprises " * 30, " (client portal)")
+
+        assert len(label) == audit.MAX_ACTOR_LABEL
+        assert label.endswith(" (client portal)")
+
+    def test_a_suffix_longer_than_the_column_keeps_its_own_tail(self):
+        """Nothing left to trim around it, so the end of the address wins."""
+        label = audit.bounded_label("Anita", " <" + "a" * 400 + "@example.in>")
+
+        assert len(label) == audit.MAX_ACTOR_LABEL
+        assert label.endswith("@example.in>")
