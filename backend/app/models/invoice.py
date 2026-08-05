@@ -57,8 +57,24 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     extra: Mapped[dict] = mapped_column(JSONType, default=dict, nullable=False)
 
     client: Mapped[Client] = relationship()
+    # Ordered, because an invoice is a document of record and the order of its
+    # lines is part of what the client is holding a copy of. Nothing said what
+    # that order was: the relationship emitted a bare ``SELECT`` and took
+    # whatever came back, which on PostgreSQL is unspecified and free to differ
+    # between two reads of the same invoice.
+    #
+    # The order is not incidental either — it is the one thing about the lines
+    # a practitioner arranges by hand. ``set_lines`` writes them in exactly the
+    # order the editor submitted, and every reader then threw that away: the
+    # printed invoice, the client's copy in the portal, and the editor itself,
+    # which reloads a draft's lines into rows it keys by position.
+    #
+    # ``id`` closes the order for rows that predate ``position`` and share its
+    # backfilled default; see migration 0007.
     lines: Mapped[list[InvoiceLine]] = relationship(
-        back_populates="invoice", cascade="all, delete-orphan"
+        back_populates="invoice",
+        cascade="all, delete-orphan",
+        order_by="InvoiceLine.position, InvoiceLine.id",
     )
 
     @property
@@ -76,6 +92,9 @@ class InvoiceLine(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         UuidType, ForeignKey("compliance_items.id", ondelete="SET NULL")
     )
 
+    # Where this line sits on the invoice, counting from zero. Written from the
+    # order the caller submitted; see ``Invoice.lines``.
+    position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     description: Mapped[str] = mapped_column(String(512), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     unit_price_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)

@@ -656,6 +656,38 @@ class TestPortalBilling:
             ("Annual return", 1, 500_000),
         ]
 
+    def test_the_clients_copy_lists_the_lines_in_the_firms_order(
+        self, client, auth_headers, portal_headers, client_id
+    ):
+        """Two copies of one document of record must not disagree.
+
+        The portal loads the lines through the same relationship the firm's own
+        view does, and that relationship had no ``ORDER BY``: two reads were
+        free to come back in different orders, so the client could be looking
+        at an arrangement of the bill that nobody at the firm ever saw.
+        """
+        ordered = [
+            {"description": "Retainer for the quarter", "quantity": 1, "unit_price_paise": 500_000},
+            {"description": "Statutory audit fee", "quantity": 1, "unit_price_paise": 300_000},
+            {"description": "Out-of-pocket disbursements", "quantity": 1, "unit_price_paise": 12_500},
+        ]
+        invoice = make_invoice(client, auth_headers, client_id, lines=ordered).json()
+        # Rearranged before sending, which is the order the client must get.
+        moved = [ordered[2], ordered[0], ordered[1]]
+        client.patch(
+            f"/api/v1/invoices/{invoice['id']}", json={"lines": moved}, headers=auth_headers
+        )
+        send_invoice(client, auth_headers, invoice["id"])
+
+        shown = client.get("/api/v1/portal/me", headers=portal_headers).json()["invoices"][0]
+        firms_copy = client.get(
+            f"/api/v1/invoices/{invoice['id']}", headers=auth_headers
+        ).json()
+
+        expected = [line["description"] for line in moved]
+        assert [line["description"] for line in shown["lines"]] == expected
+        assert [line["description"] for line in firms_copy["lines"]] == expected
+
     def test_a_draft_invoice_stays_with_the_firm(
         self, client, auth_headers, portal_headers, client_id
     ):

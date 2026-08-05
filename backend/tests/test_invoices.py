@@ -3090,3 +3090,140 @@ class TestCountingTheRevenueSummaryInTheDatabase:
         ).json()
         assert summary["invoice_count"] == 0
         assert summary["draft_paise"] == 0
+
+
+class TestTheOrderAnInvoicesLinesAreIn:
+    """An invoice is a document of record, and line order is part of it.
+
+    The order is the one thing about the lines a practitioner arranges by hand,
+    and nothing was keeping it. The relationship loaded them with a bare
+    ``SELECT``, so the order was whatever the database happened to return —
+    stable enough to look fine, unspecified enough to change under a vacuum, an
+    update that moves a row, or a different scan.
+
+    What that costs is the same in three places: the rendered invoice, the
+    client's copy in the portal, and the editor, which reads a draft's lines
+    back into rows keyed by their position in the list. A practitioner who puts
+    the retainer above the disbursements has no way to make it stay there.
+    """
+
+    LINES = [
+        {"description": "Retainer for the quarter", "quantity": 1, "unit_price_paise": 500_000},
+        {"description": "Statutory audit fee", "quantity": 1, "unit_price_paise": 300_000},
+        {"description": "Out-of-pocket disbursements", "quantity": 1, "unit_price_paise": 12_500},
+        {"description": "Filing fees recovered", "quantity": 1, "unit_price_paise": 4_000},
+    ]
+
+    @staticmethod
+    def _descriptions(invoice: dict) -> list[str]:
+        return [line["description"] for line in invoice["lines"]]
+
+    def _fetch(self, client, auth_headers, invoice_id: str) -> dict:
+        return client.get(f"/api/v1/invoices/{invoice_id}", headers=auth_headers).json()
+
+    def test_a_new_invoice_keeps_the_order_it_was_written_in(
+        self, client, auth_headers, client_id
+    ):
+        created = make_invoice(
+            client, auth_headers, client_id, lines=self.LINES
+        ).json()
+
+        assert self._descriptions(created) == [line["description"] for line in self.LINES]
+
+    def test_reading_it_back_gives_the_same_order(self, client, auth_headers, client_id):
+        """The read path is the one that had no ``ORDER BY`` at all."""
+        created = make_invoice(client, auth_headers, client_id, lines=self.LINES).json()
+
+        fetched = self._fetch(client, auth_headers, created["id"])
+
+        assert self._descriptions(fetched) == [line["description"] for line in self.LINES]
+
+    def test_reordering_a_draft_is_a_change_that_sticks(
+        self, client, auth_headers, client_id
+    ):
+        """Moving a line and saving is the whole point of the column.
+
+        Without one, a PATCH that only reorders writes four rows that are
+        indistinguishable from the four already there, and the editor reloads
+        them in whatever order it had before.
+        """
+        created = make_invoice(client, auth_headers, client_id, lines=self.LINES).json()
+        reversed_lines = list(reversed(self.LINES))
+
+        response = client.patch(
+            f"/api/v1/invoices/{created['id']}",
+            json={"lines": reversed_lines},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+
+        fetched = self._fetch(client, auth_headers, created["id"])
+        assert self._descriptions(fetched) == [line["description"] for line in reversed_lines]
+
+    def test_the_position_written_is_the_index_in_the_submitted_list(
+        self, client, auth_headers, client_id, db
+    ):
+        """Read from the rows, because the API shape cannot show a gap or a tie.
+
+        Four lines all at position 0 would still come back in *an* order — the
+        ``id`` tiebreak — and the endpoint test above would pass while the
+        practitioner's arrangement was being thrown away.
+        """
+        created = make_invoice(client, auth_headers, client_id, lines=self.LINES).json()
+
+        rows = db.scalars(
+            select(InvoiceLine)
+            .where(InvoiceLine.invoice_id == uuid.UUID(created["id"]))
+            .order_by(InvoiceLine.position)
+        ).all()
+
+        assert [row.position for row in rows] == [0, 1, 2, 3]
+        assert [row.description for row in rows] == [
+            line["description"] for line in self.LINES
+        ]
+
+    def test_an_invoice_generated_from_filed_work_is_ordered_too(
+        self, client, auth_headers, client_id, db
+    ):
+        """Generation appends in its own order; that order has to be recorded."""
+        file_everything(client, auth_headers)
+        generated = client.post(
+            "/api/v1/invoices/generate", json={}, headers=auth_headers
+        ).json()["invoices"][0]
+
+        rows = db.scalars(
+            select(InvoiceLine)
+            .where(InvoiceLine.invoice_id == uuid.UUID(generated["id"]))
+            .order_by(InvoiceLine.position)
+        ).all()
+
+        assert len(rows) > 1
+        assert [row.position for row in rows] == list(range(len(rows)))
+
+    def test_a_reorder_survives_the_lines_being_rewritten_in_place(
+        self, client, auth_headers, client_id, db
+    ):
+        """``set_lines`` deletes every row and writes fresh ones.
+
+        So the new rows carry new ids, and an order that only held because the
+        ids happened to ascend does not survive the round trip. The positions
+        have to be renumbered from the list actually submitted.
+        """
+        created = make_invoice(client, auth_headers, client_id, lines=self.LINES).json()
+        moved = [self.LINES[2], self.LINES[0], self.LINES[3], self.LINES[1]]
+
+        client.patch(
+            f"/api/v1/invoices/{created['id']}",
+            json={"lines": moved},
+            headers=auth_headers,
+        )
+
+        rows = db.scalars(
+            select(InvoiceLine)
+            .where(InvoiceLine.invoice_id == uuid.UUID(created["id"]))
+            .order_by(InvoiceLine.position)
+        ).all()
+        assert [row.position for row in rows] == [0, 1, 2, 3]
+        assert [row.description for row in rows] == [
+            line["description"] for line in moved
+        ]

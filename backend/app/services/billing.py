@@ -321,9 +321,10 @@ def build_invoice(
             status=InvoiceStatus.DRAFT,
             notes=notes,
         )
-        for item in items:
+        for position, item in enumerate(items):
             invoice.lines.append(
                 InvoiceLine(
+                    position=position,
                     compliance_item_id=item.id,
                     description=line_description(item),
                     quantity=1,
@@ -561,7 +562,7 @@ def set_lines(db: Session, invoice: Invoice, lines, items: dict[uuid.UUID, Compl
     invoice.lines.clear()
 
     claimed_here: set[uuid.UUID] = set()
-    for line in lines:
+    for position, line in enumerate(lines):
         item = items.get(line.compliance_item_id) if line.compliance_item_id else None
         if item is not None:
             if item.id in claimed_here:
@@ -577,6 +578,7 @@ def set_lines(db: Session, invoice: Invoice, lines, items: dict[uuid.UUID, Compl
             claimed_here.add(item.id)
         invoice.lines.append(
             InvoiceLine(
+                position=position,
                 compliance_item_id=line.compliance_item_id,
                 description=line.description,
                 quantity=line.quantity,
