@@ -984,3 +984,168 @@ class TestAttributingAnUploadFromALongNamedClient:
         self._upload_as(client, auth_headers, "Nimbus Textiles Pvt Ltd")
 
         assert self._entry(db).actor_label == "Nimbus Textiles Pvt Ltd (client portal)"
+
+
+class TestWhenALinkWasIssued:
+    """Revocation is a cut-off instant, so the token's issue time is what decides.
+
+    ``create_magic_link_token`` stamps ``iat_ms`` precisely because whole
+    seconds are not enough: a link minted in the same second as the revocation
+    would otherwise be indistinguishable from one minted just before it. But
+    the check has to hold for a token that carries only the standard ``iat``,
+    and for one that carries no issue time at all — the first is a link issued
+    before ``iat_ms`` existed and still inside its twelve hours, and the second
+    is anything hand-assembled. Both reach the same decision, and both have to
+    fail closed rather than open.
+    """
+
+    def mint(self, client_id, firm_id, **claims) -> str:
+        payload = {
+            "sub": str(client_id),
+            "firm_id": str(firm_id),
+            "type": "magic_link",
+            "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
+        }
+        payload.update(claims)
+        return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
+
+    def reach_portal(self, client, token):
+        return client.get(
+            "/api/v1/portal/me", headers={"Authorization": f"Bearer {token}"}
+        )
+
+    def revoke_at(self, db, client_id, cutoff):
+        row = db.get(Client, uuid.UUID(client_id))
+        row.portal_token_valid_from = cutoff
+        db.commit()
+
+    def test_a_whole_second_token_from_inside_the_revocation_second_is_refused(
+        self, client, client_id, firm_id, db
+    ):
+        """Half a second of doubt is resolved against the link.
+
+        The cut-off falls halfway through the second the token claims to have
+        been minted in, and nothing in a whole-second ``iat`` says which side
+        of it the link was actually issued on. Read as the start of that second,
+        so the answer is the safe one.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(seconds=5)).replace(microsecond=500_000)
+        self.revoke_at(db, client_id, cutoff)
+
+        stale = self.mint(client_id, firm_id, iat=int(cutoff.timestamp()))
+        assert self.reach_portal(client, stale).status_code == 401
+
+    def test_a_whole_second_token_from_after_the_revocation_still_works(
+        self, client, client_id, firm_id, db
+    ):
+        """Failing closed must not mean failing on everything."""
+        cutoff = (datetime.now(UTC) - timedelta(seconds=5)).replace(microsecond=500_000)
+        self.revoke_at(db, client_id, cutoff)
+
+        fresh = self.mint(client_id, firm_id, iat=int(cutoff.timestamp()) + 1)
+        assert self.reach_portal(client, fresh).status_code == 200
+
+    def test_a_token_with_no_issue_time_is_refused_once_anything_is_revoked(
+        self, client, client_id, firm_id, db
+    ):
+        """A link that cannot say when it was issued cannot survive a cut-off."""
+        self.revoke_at(db, client_id, datetime.now(UTC))
+
+        undated = self.mint(client_id, firm_id)
+        assert self.reach_portal(client, undated).status_code == 401
+
+    def test_a_token_with_no_issue_time_works_while_nothing_is_revoked(
+        self, client, client_id, firm_id
+    ):
+        """There is no cut-off to be on the wrong side of, so the link stands."""
+        undated = self.mint(client_id, firm_id)
+        assert self.reach_portal(client, undated).status_code == 200
+
+    def test_the_cut_off_is_read_the_same_way_however_the_database_returns_it(
+        self, client, auth_headers, portal_headers, client_id, db
+    ):
+        """SQLite hands the column back without an offset on it.
+
+        The value written by the revoke is aware, so a request that still holds
+        the row it wrote compares two instants. A later one reads the column off
+        disk instead, and what comes back on SQLite carries no timezone at all —
+        so the comparison has to put one back before it is made.
+        """
+        assert client.get("/api/v1/portal/me", headers=portal_headers).status_code == 200
+        client.post(
+            f"/api/v1/clients/{client_id}/portal-access/revoke", headers=auth_headers
+        )
+
+        row = db.get(Client, uuid.UUID(client_id))
+        db.expire(row)
+        assert row.portal_token_valid_from is not None
+
+        assert client.get("/api/v1/portal/me", headers=portal_headers).status_code == 401
+
+
+class TestTheDoorsThatAreShutBeforeALinkIsMinted:
+    def test_an_off_boarded_client_gets_no_new_link(
+        self, client, auth_headers, client_id
+    ):
+        """A firm that has stopped acting for a client stops writing to them."""
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        response = issue_link(client, auth_headers, client_id)
+        assert response.status_code == 400, response.text
+        assert "inactive" in response.json()["detail"]
+
+
+class TestWhatThePortalWillNotAccept:
+    """The upload refusals, reached through the door outside the firm.
+
+    ``POST /portal/documents`` is the one write in this API a party who is not
+    a practitioner can reach, so the storage rules have to answer it in the
+    same words they answer the firm's own upload in.
+    """
+
+    def upload(self, client, portal_headers, name, payload, content_type):
+        return client.post(
+            "/api/v1/portal/documents",
+            files={"file": (name, io.BytesIO(payload), content_type)},
+            headers=portal_headers,
+        )
+
+    def test_a_file_over_the_limit_is_a_413(self, client, portal_headers, monkeypatch):
+        monkeypatch.setattr(settings, "max_upload_bytes", 64)
+        response = self.upload(
+            client, portal_headers, "ledger.pdf", b"%PDF-1.4\n" + b"x" * 200, "application/pdf"
+        )
+        assert response.status_code == 413, response.text
+        assert "limit" in response.json()["detail"]
+
+    def test_a_renamed_executable_is_a_415(self, client, portal_headers):
+        """The signature is evidence; the name and the declared type are claims."""
+        response = self.upload(
+            client, portal_headers, "bank-statement.pdf", b"MZ\x90\x00" + b"\x00" * 64, "application/pdf"
+        )
+        assert response.status_code == 415, response.text
+        assert "executable" in response.json()["detail"]
+
+    def test_a_document_whose_bytes_have_gone_is_a_410(
+        self, client, portal_headers, db
+    ):
+        """The row outlives the file if the storage volume is swapped or swept.
+
+        Reported as gone rather than as a server fault: nothing is wrong with
+        the request, and the client can be told plainly that the file is no
+        longer there.
+        """
+        uploaded = self.upload(
+            client, portal_headers, "ledger.pdf", PDF_BYTES, "application/pdf"
+        ).json()
+
+        from app.models.document import Document
+        from app.services import storage
+
+        row = db.get(Document, uuid.UUID(uploaded["id"]))
+        storage.resolve_stored(row.storage_path).unlink()
+
+        response = client.get(
+            f"/api/v1/portal/documents/{uploaded['id']}/download", headers=portal_headers
+        )
+        assert response.status_code == 410, response.text

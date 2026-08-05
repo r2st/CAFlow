@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
@@ -577,3 +579,107 @@ class TestForwardedChainsAreReadFromTheRight:
         request = fake_request({"x-forwarded-for": "203.0.113.7, 10.0.0.1,"})
 
         assert client_ip(request) == "203.0.113.7"
+
+
+class TestTheDatabaseFailuresCallersAreToldAbout:
+    """A database fault is not one shape, and the three it comes in read differently.
+
+    Every one of them is raised deep inside a request and none carries a
+    message safe to hand back: a driver error names columns, constraints,
+    hosts and sometimes the connection string. So each is mapped to the answer
+    a caller can actually act on, and the detail stays in the log beside the
+    request id.
+    """
+
+    def raising(self, exc):
+        """Mount a temporary route that raises ``exc``, and call it."""
+        path = "/api/v1/_database_fault_for_tests"
+
+        @app.get(path)
+        def fault():
+            raise exc
+
+        try:
+            with TestClient(app, raise_server_exceptions=False) as bare:
+                return bare.get(path)
+        finally:
+            app.router.routes = [
+                route
+                for route in app.router.routes
+                if getattr(route, "path", "") != path
+            ]
+
+    def test_a_constraint_violation_is_a_conflict_rather_than_a_fault(self):
+        """The row could not be written because of what is already there.
+
+        Nothing is broken and the caller has something to change, so a 409 with
+        a sentence they can read beats a 500 with a request id.
+        """
+        response = self.raising(
+            IntegrityError(
+                "INSERT INTO clients",
+                {},
+                Exception('duplicate key value violates unique constraint "uq_client_firm_pan"'),
+            )
+        )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "conflict"
+        # The constraint name is for the log, not for the client.
+        assert "uq_client_firm_pan" not in response.text
+
+    def test_a_database_that_is_not_answering_is_a_503_with_a_retry(self):
+        """The request was fine; come back shortly."""
+        response = self.raising(
+            OperationalError("SELECT 1", {}, Exception("connection refused"))
+        )
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "service_unavailable"
+        assert response.headers["Retry-After"] == "5"
+        assert "connection refused" not in response.text
+
+    def test_any_other_database_error_is_a_generic_500(self):
+        response = self.raising(SQLAlchemyError("mapper configuration is wrong"))
+        assert response.status_code == 500
+        assert response.json()["error"]["code"] == "server_error"
+        assert "mapper configuration" not in response.text
+        assert response.json()["error"]["request_id"]
+
+    def test_a_response_that_fails_its_own_model_is_our_bug_not_the_callers(self):
+        """A 422 here would blame the caller for something they cannot fix."""
+        response = self.raising(
+            ValidationError.from_exception_data("InvoiceOut", [])
+        )
+        assert response.status_code == 500
+        assert response.json()["error"]["code"] == "server_error"
+
+
+class TestStrictTransportSecurity:
+    def test_it_is_only_sent_where_there_is_tls_to_pin(
+        self, client: TestClient, monkeypatch
+    ):
+        """In development the app is served over plain HTTP, and an HSTS header
+        would pin a browser to an https origin that does not answer."""
+        assert "Strict-Transport-Security" not in client.get("/health").headers
+
+        monkeypatch.setattr(settings, "environment", "production")
+        header = client.get("/health").headers["Strict-Transport-Security"]
+        assert "max-age=31536000" in header
+        assert "includeSubDomains" in header
+
+
+class TestABodyWhoseDeclaredLengthIsNotANumber:
+    def test_the_header_is_ignored_rather_than_the_request_refused(
+        self, client: TestClient
+    ):
+        """A malformed ``Content-Length`` says nothing about the body's size.
+
+        The counting half of the limit still applies, so nothing is let through
+        unmeasured; what must not happen is a 500 out of ``int()`` on a header
+        the caller chose.
+        """
+        response = client.post(
+            "/api/v1/auth/login",
+            content=b'{"email":"nobody@example.test","password":"whatever-it-is"}',
+            headers={"Content-Type": "application/json", "Content-Length": "not-a-number"},
+        )
+        assert response.status_code in (401, 422), response.text

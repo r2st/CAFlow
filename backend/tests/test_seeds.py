@@ -27,6 +27,7 @@ import pytest
 from app.core.periods import periods_for_frequency
 from app.models.base import EntityType, GSTFilingFrequency
 from app.models.client import Client as ClientModel
+from app.seeds import compliance_types
 from app.seeds.compliance_types import COMPLIANCE_TYPE_SEEDS
 from app.services.applicability import APPLICABILITY_RULES, applies_to
 
@@ -148,3 +149,18 @@ class TestSeedShape:
                 f"{seed['code']} lists reminders out of order: {offsets}"
             )
             assert len(set(offsets)) == len(offsets), f"{seed['code']} repeats a reminder day"
+
+
+class TestLookingUpASeedByCode:
+    def test_a_code_the_calendar_carries_is_returned(self):
+        assert compliance_types.seed_by_code("GSTR3B_MONTHLY")["frequency"] == "monthly"
+
+    def test_a_code_it_does_not_carry_raises_rather_than_answering_none(self):
+        """A silent ``None`` would reach the caller as a missing due-date rule.
+
+        Every caller of this is naming a type it believes is seeded, so an
+        unknown code is a typo or a seed that has been renamed — and both want
+        to fail where they are, not several attributes later.
+        """
+        with pytest.raises(KeyError):
+            compliance_types.seed_by_code("GSTR3B_FORTNIGHTLY")

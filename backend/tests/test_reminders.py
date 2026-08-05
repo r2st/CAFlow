@@ -43,6 +43,11 @@ class TestChannelSelection:
     def test_sms_when_only_a_phone_is_on_file(self):
         client = Client(whatsapp=None, email=None, phone="+919000000000")
         assert reminder_service.preferred_channel(client) == ReminderChannel.SMS
+        # And the number is what an SMS is addressed to — the channel choosing
+        # itself is worth nothing if the recipient does not follow it.
+        assert reminder_service.recipient_for(client, ReminderChannel.SMS) == (
+            "+919000000000"
+        )
 
     def test_nine_am_ist_converts_to_utc(self):
         # IST is UTC+5:30, so 09:00 IST is 03:30 UTC the same morning.
@@ -1595,3 +1600,267 @@ class TestWhenAReminderTheFirmScheduledActuallyGoesOut:
         ).json()
 
         assert counts == {"scheduled": 2, "due_now": 1}
+
+
+class TestDraftingAgainstAnInvoice:
+    """A fee chase is drafted from the invoice, so the invoice has to be read.
+
+    ``POST /reminders/draft`` fills the context from whichever record the
+    caller cites, and the amount it quotes is the *balance* rather than the
+    total — a client who has part-paid is asked for what is left, not for what
+    the bill said before their money arrived.
+    """
+
+    @pytest.fixture
+    def sent_invoice(self, client, auth_headers, client_id) -> dict:
+        invoice = client.post(
+            "/api/v1/invoices",
+            json={
+                "client_id": client_id,
+                "issue_date": (clock.today() - timedelta(days=37)).isoformat(),
+                "due_date": (clock.today() - timedelta(days=7)).isoformat(),
+                "lines": [
+                    {"description": "GSTR-3B", "quantity": 1, "unit_price_paise": 200_000}
+                ],
+            },
+            headers=auth_headers,
+        ).json()
+        return client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+
+    def test_the_draft_is_about_the_invoice_that_was_cited(
+        self, client, auth_headers, client_id, sent_invoice
+    ):
+        response = client.post(
+            "/api/v1/reminders/draft",
+            json={
+                "client_id": client_id,
+                "purpose": "fee_reminder",
+                "invoice_id": sent_invoice["id"],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["subject"] == f"Invoice {sent_invoice['invoice_number']}"
+        assert sent_invoice["invoice_number"] in body["body"]
+        assert "2,360.00" in body["body"]
+
+    def test_a_part_paid_invoice_is_chased_for_the_balance(
+        self, client, auth_headers, client_id, sent_invoice
+    ):
+        """Quoting the total would ask for money the client has already sent."""
+        client.post(
+            f"/api/v1/invoices/{sent_invoice['id']}/payments",
+            json={"amount_paise": 100_000},
+            headers=auth_headers,
+        )
+
+        drafted = client.post(
+            "/api/v1/reminders/draft",
+            json={
+                "client_id": client_id,
+                "purpose": "fee_reminder",
+                "invoice_id": sent_invoice["id"],
+            },
+            headers=auth_headers,
+        ).json()
+        assert "1,360.00" in drafted["body"]
+        assert "2,360.00" not in drafted["body"]
+
+    def test_drafting_against_another_clients_invoice_is_a_400(
+        self, client, auth_headers, client_id, sent_invoice
+    ):
+        """The caller can see both, so the pair being wrong is theirs to fix."""
+        from tests.conftest import make_client_payload
+
+        other_id = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(name="Second Client", pan="BBBPC1234D"),
+            headers=auth_headers,
+        ).json()["client"]["id"]
+
+        response = client.post(
+            "/api/v1/reminders/draft",
+            json={
+                "client_id": other_id,
+                "purpose": "fee_reminder",
+                "invoice_id": sent_invoice["id"],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 400, response.text
+        assert "different client" in response.json()["detail"]
+
+    def test_drafting_for_a_client_this_firm_cannot_reach_is_a_404(
+        self, client, auth_headers
+    ):
+        response = client.post(
+            "/api/v1/reminders/draft",
+            json={"client_id": str(uuid.uuid4())},
+            headers=auth_headers,
+        )
+        assert response.status_code == 404, response.text
+
+
+class TestRunningTheSweepsOnDemand:
+    """*Queue reminders now* on the reminders screen, both kinds of it.
+
+    The nightly beat is one caller of these sweeps; a manager pressing the
+    button is the other, and the payment half of it had no test at all — which
+    is the half that quotes a client an amount.
+    """
+
+    def test_the_payment_sweep_can_be_run_from_the_screen(
+        self, client, auth_headers, client_id
+    ):
+        invoice = client.post(
+            "/api/v1/invoices",
+            json={
+                "client_id": client_id,
+                "issue_date": (clock.today() - timedelta(days=37)).isoformat(),
+                # Today, so it matches the first configured offset whatever the
+                # firm has set the rest of them to.
+                "due_date": clock.today().isoformat(),
+                "lines": [
+                    {"description": "GSTR-3B", "quantity": 1, "unit_price_paise": 200_000}
+                ],
+            },
+            headers=auth_headers,
+        ).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+
+        response = client.post(
+            "/api/v1/reminders/queue", json={"kind": "payment"}, headers=auth_headers
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["kind"] == "payment"
+        assert body["queued"] == 1
+        assert body["reminders"][0]["invoice_id"] == invoice["id"]
+        assert body["reminders"][0]["reminder_type"] == "payment"
+
+    def test_an_unrecognised_kind_is_refused_rather_than_guessed_at(
+        self, client, auth_headers
+    ):
+        response = client.post(
+            "/api/v1/reminders/queue", json={"kind": "filing"}, headers=auth_headers
+        )
+        assert response.status_code == 422, response.text
+
+
+class TestNarrowingTheReminderList:
+    """The filters the reminders screen sends, asserted through the endpoint."""
+
+    @pytest.fixture
+    def queued(self, client, auth_headers, client_id) -> dict:
+        return client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "reminder_type": "custom",
+                "channel": "email",
+                "subject": "About your return",
+                "body": "Please send it over.",
+            },
+            headers=auth_headers,
+        ).json()
+
+    def listed(self, client, auth_headers, **params):
+        return client.get(
+            "/api/v1/reminders", params=params, headers=auth_headers
+        ).json()
+
+    def test_by_client(self, client, auth_headers, client_id, queued):
+        assert self.listed(client, auth_headers, client_id=client_id)["total"] == 1
+        assert self.listed(client, auth_headers, client_id=str(uuid.uuid4()))["total"] == 0
+
+    def test_by_type(self, client, auth_headers, queued):
+        assert self.listed(client, auth_headers, reminder_type="custom")["total"] == 1
+        assert self.listed(client, auth_headers, reminder_type="payment")["total"] == 0
+
+    def test_by_status(self, client, auth_headers, queued):
+        assert self.listed(client, auth_headers, reminder_status="scheduled")["total"] == 1
+        assert self.listed(client, auth_headers, reminder_status="sent")["total"] == 0
+
+    def test_by_channel(self, client, auth_headers, queued):
+        assert self.listed(client, auth_headers, channel="email")["total"] == 1
+        assert self.listed(client, auth_headers, channel="sms")["total"] == 0
+
+
+class TestWhatTheSweepsLeaveAlone:
+    """The cases where there is nothing to chase, and nothing is queued."""
+
+    def test_a_firm_with_no_configured_offsets_is_not_swept(self, db, firm_id):
+        """An empty offsets list is a firm that has switched the chase off.
+
+        Read as "no days to fire on" rather than as "use the defaults", so
+        turning it off is something a firm can actually do.
+        """
+        assert (
+            reminder_service.queue_payment_reminders(
+                db, firm_id=uuid.UUID(firm_id), offsets=[]
+            )
+            == []
+        )
+        assert (
+            reminder_service.queue_document_reminders(
+                db, firm_id=uuid.UUID(firm_id), offsets=[]
+            )
+            == []
+        )
+
+    def test_an_invoice_with_no_due_date_is_never_late(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        """Lateness is counted from the due date, so there is nothing to count.
+
+        A sent invoice always has one — ``send_invoice`` fills it in from the
+        firm's terms — but the column is nullable and the sweep reads rows, not
+        the endpoint that wrote them.
+        """
+        from app.models.invoice import Invoice
+
+        invoice = client.post(
+            "/api/v1/invoices",
+            json={
+                "client_id": client_id,
+                "lines": [
+                    {"description": "GSTR-3B", "quantity": 1, "unit_price_paise": 200_000}
+                ],
+            },
+            headers=auth_headers,
+        ).json()
+        client.post(f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers)
+
+        row = db.get(Invoice, uuid.UUID(invoice["id"]))
+        row.due_date = None
+        db.commit()
+
+        assert (
+            reminder_service.queue_payment_reminders(
+                db, firm_id=uuid.UUID(firm_id), offsets=[0, 7, 15, 30]
+            )
+            == []
+        )
+
+
+class TestWhenTheThingBeingChasedHasGone:
+    """The foreign keys cascade, so the row a queued chase points at may not be there.
+
+    Being unable to check is not grounds for withholding a message the firm
+    asked for — the practitioner composed it, and a missing filing or invoice
+    says nothing about whether it should go out. Only a reason that can be read
+    withdraws a chase.
+    """
+
+    def test_a_filing_that_no_longer_exists_is_not_a_reason_to_withhold(self, db):
+        reminder = Reminder(
+            compliance_item_id=uuid.uuid4(), extra={"kind": "document"}
+        )
+        assert reminder_service.withdrawn_reason(db, reminder) is None
+
+    def test_an_invoice_that_no_longer_exists_is_not_a_reason_either(self, db):
+        reminder = Reminder(invoice_id=uuid.uuid4(), extra={"kind": "payment"})
+        assert reminder_service.withdrawn_reason(db, reminder) is None

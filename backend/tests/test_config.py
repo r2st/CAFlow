@@ -212,3 +212,18 @@ class TestStartupFailure:
             monkeypatch.delenv("JWT_ALGORITHM", raising=False)
             get_settings.cache_clear()
             get_settings()
+
+
+class TestTheTwoSettingsThatCannotBeHalfGiven:
+    def test_a_database_url_has_to_be_one(self):
+        """A bare host is not a SQLAlchemy URL, and the failure it produces
+        without this is a driver error deep inside the first request."""
+        with pytest.raises(ValueError, match="SQLAlchemy URL"):
+            Settings(_env_file=None, database_url="localhost:5432/caflow")
+
+    def test_configuring_smtp_without_a_sender_is_refused(self):
+        """A relay will not accept mail with no ``From``, so every reminder the
+        deployment queues would fail at the handshake — one at a time, at
+        nine in the morning, with nothing said at boot."""
+        with pytest.raises(ValueError, match="EMAIL_FROM_ADDRESS"):
+            Settings(_env_file=None, smtp_host="smtp.example.test", email_from_address="")

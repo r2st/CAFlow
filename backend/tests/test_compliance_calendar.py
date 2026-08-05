@@ -16,7 +16,12 @@ from app.models.base import ComplianceStatus, TaskPriority, TaskStatus
 from app.models.compliance import ComplianceItem
 from app.models.task import Task
 from app.services import tasks as task_service
-from tests.conftest import FIRM_REGISTRATION, make_client_payload
+from tests.conftest import (
+    FIRM_REGISTRATION,
+    first_item_of_type,
+    first_lapsed_item_of_type,
+    make_client_payload,
+)
 
 API = "/api/v1"
 
@@ -2369,3 +2374,54 @@ class TestClearingTheDateAReturnWasLodgedOn:
         assert response.status_code == 200, response.text
         assert response.json()["filed_on"] == late
         assert response.json()["status"] == "delayed_filed"
+
+
+class TestAnAcknowledgementNumberOnABatchThatIsNotFiled:
+    """An acknowledgement number is issued when a return is *accepted*.
+
+    The batch endpoint already refuses one across more than one filing — the
+    portal issues one per return, so writing the same one across a selection
+    puts a number belonging to one period onto every other period in it. This
+    is the other half of the same rule: a number cannot exist for a return that
+    was not lodged at all, so reverting a filing and stamping a number on it in
+    the same request is refused rather than half-applied.
+    """
+
+    def test_reverting_a_single_filing_cannot_carry_a_number(
+        self, client, auth_headers, client_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        response = client.post(
+            "/api/v1/compliance/items/bulk-status",
+            json={
+                "item_ids": [item["id"]],
+                "status": "pending",
+                "acknowledgement_number": "AA270725123456789",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+        assert "acknowledgement_number" in response.json()["detail"]
+
+    def test_the_same_number_alongside_a_filed_status_is_accepted(
+        self, client, auth_headers, long_standing_client_id
+    ):
+        """The refusal is about the status, so the ordinary case still works."""
+        item = first_lapsed_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        response = client.post(
+            "/api/v1/compliance/items/bulk-status",
+            json={
+                "item_ids": [item["id"]],
+                "status": "filed",
+                "filed_on": clock.today().isoformat(),
+                "acknowledgement_number": "AA270725123456789",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["updated"] == 1
+
+        stored = client.get(
+            f"/api/v1/compliance/items/{item['id']}", headers=auth_headers
+        ).json()
+        assert stored["acknowledgement_number"] == "AA270725123456789"

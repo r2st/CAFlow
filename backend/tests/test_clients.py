@@ -2623,3 +2623,125 @@ class TestOneSaveThatBothReactivatesAndChangesARegistration:
 
         after = len(items_of(db, uuid.UUID(client_id)))
         assert response["compliance_items_created"] == after - before
+
+
+class TestTheTaxDeductionAccountNumber:
+    """A TAN is the third statutory identifier a client record carries.
+
+    It is what a TDS return is filed under, so it is quoted back onto challans
+    and correspondence and is not a field anyone re-derives — a wrong one is
+    wrong for as long as the client is on the books. Validated on the same
+    terms as the PAN and the GSTIN: normalised where it is recognisable, and
+    refused where it is not, rather than stored as whatever was typed.
+    """
+
+    def test_a_tan_is_upper_cased_and_kept(self, client: TestClient, auth_headers: dict):
+        response = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload(tan="mumn12345c")
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["client"]["tan"] == "MUMN12345C"
+
+    def test_something_that_is_not_a_tan_is_refused(
+        self, client: TestClient, auth_headers: dict
+    ):
+        response = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload(tan="MUM123")
+        )
+        assert response.status_code == 422, response.text
+        assert any(
+            field["field"] == "tan" for field in response.json()["error"]["fields"]
+        )
+
+    def test_a_blank_tan_is_no_tan_rather_than_an_error(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """A form that submits an empty field means the client has not got one."""
+        response = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload(tan="")
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["client"]["tan"] is None
+
+    def test_a_tan_can_be_corrected_on_an_existing_client(
+        self, client: TestClient, auth_headers: dict, client_id: str
+    ):
+        assert (
+            client.patch(
+                f"{API}/clients/{client_id}", json={"tan": "MUMN12345C"}, headers=auth_headers
+            ).status_code
+            == 200
+        )
+        bad = client.patch(
+            f"{API}/clients/{client_id}", json={"tan": "nope"}, headers=auth_headers
+        )
+        assert bad.status_code == 422
+
+    def test_something_that_is_not_a_gstin_is_refused(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The other identifier whose refusal nothing exercised."""
+        response = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(gstin="27AABCN2345P1Q5", name="Other Co", pan=None),
+        )
+        assert response.status_code == 422, response.text
+
+
+class TestNarrowingTheClientList:
+    """Two filters on the client screen that nothing else covers."""
+
+    @pytest.fixture
+    def two_clients(self, client: TestClient, auth_headers: dict) -> dict[str, str]:
+        registered = client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload()
+        ).json()["client"]
+        unregistered = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(
+                name="Priya Menon",
+                entity_type="individual",
+                pan="AABCP1111Q",
+                gstin=None,
+                gst_registered=False,
+                roc_applicable=False,
+            ),
+        ).json()["client"]
+        return {"registered": registered["id"], "unregistered": unregistered["id"]}
+
+    def test_by_gst_registration(self, client: TestClient, auth_headers: dict, two_clients):
+        listed = client.get(
+            f"{API}/clients", params={"gst_registered": True}, headers=auth_headers
+        ).json()
+        assert [row["id"] for row in listed["items"]] == [two_clients["registered"]]
+
+        without = client.get(
+            f"{API}/clients", params={"gst_registered": False}, headers=auth_headers
+        ).json()
+        assert [row["id"] for row in without["items"]] == [two_clients["unregistered"]]
+
+    def test_by_who_owns_the_client(
+        self, client: TestClient, auth_headers: dict, registered_firm: dict, two_clients
+    ):
+        """"My clients" is the filter a practitioner opens the screen with."""
+        owner_id = registered_firm["practitioner"]["id"]
+        client.patch(
+            f"{API}/clients/{two_clients['registered']}",
+            json={"assigned_practitioner_id": owner_id},
+            headers=auth_headers,
+        )
+
+        mine = client.get(
+            f"{API}/clients", params={"assigned_to": owner_id}, headers=auth_headers
+        ).json()
+        assert [row["id"] for row in mine["items"]] == [two_clients["registered"]]
+        assert (
+            client.get(
+                f"{API}/clients",
+                params={"assigned_to": str(uuid.uuid4())},
+                headers=auth_headers,
+            ).json()["total"]
+            == 0
+        )

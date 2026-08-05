@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import logging
+import uuid
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -15,7 +16,7 @@ from app.models.base import DocumentCategory
 from app.models.document import Document
 from app.services import documents as document_service
 from app.services import storage
-from tests.conftest import first_item_of_type, paged_order_by
+from tests.conftest import first_item_of_type, make_client_payload, paged_order_by
 
 PDF_BYTES = b"%PDF-1.4\n% a pretend bank statement\n"
 
@@ -872,3 +873,263 @@ class TestPagingDocumentsUploadedTogether:
         assert client.get("/api/v1/documents", headers=auth_headers).status_code == 200
 
         assert paged_order_by(recorded_sql, "documents").endswith("documents.id DESC")
+
+
+class TestReachingOneDocument:
+    """The single-document reads, and the two ways they answer nothing."""
+
+    def test_a_document_can_be_read_on_its_own(self, client, auth_headers, client_id):
+        uploaded = upload(client, auth_headers, client_id=client_id).json()["document"]
+        response = client.get(
+            f"/api/v1/documents/{uploaded['id']}", headers=auth_headers
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["id"] == uploaded["id"]
+        assert body["client_name"] == "Nimbus Textiles Pvt Ltd"
+
+    def test_a_document_this_firm_cannot_reach_is_a_404(self, client, auth_headers):
+        assert (
+            client.get(
+                f"/api/v1/documents/{uuid.uuid4()}", headers=auth_headers
+            ).status_code
+            == 404
+        )
+
+    def test_a_checklist_for_a_filing_this_firm_cannot_reach_is_a_404(
+        self, client, auth_headers
+    ):
+        assert (
+            client.get(
+                f"/api/v1/documents/checklist/{uuid.uuid4()}", headers=auth_headers
+            ).status_code
+            == 404
+        )
+
+    def test_a_download_whose_bytes_have_gone_is_a_410(
+        self, client, auth_headers, client_id, db
+    ):
+        """The row outlives the file if the volume is swapped, restored or swept.
+
+        Reported as gone rather than as a server fault: there is nothing wrong
+        with the request, and a 500 would send a practitioner to support over a
+        file that is simply not there any more.
+        """
+        from app.models.document import Document
+
+        uploaded = upload(client, auth_headers, client_id=client_id).json()["document"]
+        row = db.get(Document, uuid.UUID(uploaded["id"]))
+        storage.resolve_stored(row.storage_path).unlink()
+
+        response = client.get(
+            f"/api/v1/documents/{uploaded['id']}/download", headers=auth_headers
+        )
+        assert response.status_code == 410, response.text
+        assert "no longer available" in response.json()["detail"]
+
+
+class TestNarrowingTheDocumentList:
+    def test_by_the_filing_a_document_belongs_to(
+        self, client, auth_headers, client_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        upload(
+            client,
+            auth_headers,
+            client_id=client_id,
+            filename="linked.pdf",
+            compliance_item_id=item["id"],
+        )
+        upload(client, auth_headers, client_id=client_id, filename="loose.pdf")
+
+        listed = client.get(
+            "/api/v1/documents",
+            params={"compliance_item_id": item["id"]},
+            headers=auth_headers,
+        ).json()
+        assert listed["total"] == 1
+        assert listed["items"][0]["original_filename"] == "linked.pdf"
+        assert listed["items"][0]["compliance_label"].startswith("GSTR-3B")
+
+    def test_by_who_sent_it(self, client, auth_headers, client_id):
+        """The firm's own working papers and what the client sent are different piles."""
+        upload(client, auth_headers, client_id=client_id, filename="workings.pdf")
+        token = client.post(
+            f"/api/v1/clients/{client_id}/portal-link", json={}, headers=auth_headers
+        ).json()["token"]
+        client.post(
+            "/api/v1/portal/documents",
+            files={"file": ("from-client.pdf", io.BytesIO(PDF_BYTES), "application/pdf")},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        from_client = client.get(
+            "/api/v1/documents",
+            params={"uploaded_via_portal": True},
+            headers=auth_headers,
+        ).json()
+        assert [row["original_filename"] for row in from_client["items"]] == [
+            "from-client.pdf"
+        ]
+
+        ours = client.get(
+            "/api/v1/documents",
+            params={"uploaded_via_portal": False},
+            headers=auth_headers,
+        ).json()
+        assert [row["original_filename"] for row in ours["items"]] == ["workings.pdf"]
+
+
+class TestRelinkingADocumentToAFiling:
+    """Attaching a document to the return it belongs to, after the fact.
+
+    A practitioner uploads first and files second at least as often as the
+    reverse, so the link is an edit. The filing has to be one this firm can
+    reach *and* one belonging to the same client — a document is the client's,
+    and moving it onto another client's return would satisfy their checklist
+    with somebody else's paperwork.
+    """
+
+    def test_the_link_satisfies_the_filings_checklist(
+        self, client, auth_headers, client_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        uploaded = upload(
+            client, auth_headers, client_id=client_id, filename="bank.pdf"
+        ).json()["document"]
+
+        response = client.patch(
+            f"/api/v1/documents/{uploaded['id']}",
+            json={"compliance_item_id": item["id"]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["compliance_item_id"] == item["id"]
+
+        checklist = client.get(
+            f"/api/v1/documents/checklist/{item['id']}", headers=auth_headers
+        ).json()
+        satisfied = [
+            state["requirement"] for state in checklist["requirements"] if state["satisfied"]
+        ]
+        assert "bank_statement" in satisfied
+
+    def test_linking_to_another_clients_filing_is_a_400(
+        self, client, auth_headers, client_id
+    ):
+        other_id = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(name="Second Client", pan="BBBPC1234D"),
+            headers=auth_headers,
+        ).json()["client"]["id"]
+        theirs = client.get(
+            "/api/v1/compliance/calendar",
+            params={
+                "from_date": "2020-01-01",
+                "to_date": "2035-12-31",
+                "client_id": other_id,
+                "limit": 1,
+            },
+            headers=auth_headers,
+        ).json()["items"][0]
+        uploaded = upload(client, auth_headers, client_id=client_id).json()["document"]
+
+        response = client.patch(
+            f"/api/v1/documents/{uploaded['id']}",
+            json={"compliance_item_id": theirs["id"]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400, response.text
+        assert "different client" in response.json()["detail"]
+
+    def test_linking_to_a_filing_this_firm_cannot_reach_is_a_404(
+        self, client, auth_headers, client_id
+    ):
+        uploaded = upload(client, auth_headers, client_id=client_id).json()["document"]
+        response = client.patch(
+            f"/api/v1/documents/{uploaded['id']}",
+            json={"compliance_item_id": str(uuid.uuid4())},
+            headers=auth_headers,
+        )
+        assert response.status_code == 404, response.text
+
+
+class TestTheChaseListNarrowsToOneClient:
+    def test_only_that_clients_filings_are_returned(
+        self, client, auth_headers, client_id
+    ):
+        other_id = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(name="Second Client", pan="BBBPC1234D"),
+            headers=auth_headers,
+        ).json()["client"]["id"]
+
+        whole_firm = client.get(
+            "/api/v1/documents/outstanding", headers=auth_headers
+        ).json()
+        assert {row["client_id"] for row in whole_firm["checklists"]} == {
+            client_id,
+            other_id,
+        }
+
+        narrowed = client.get(
+            "/api/v1/documents/outstanding",
+            params={"client_id": client_id},
+            headers=auth_headers,
+        ).json()
+        assert {row["client_id"] for row in narrowed["checklists"]} == {client_id}
+        assert narrowed["total_items"] < whole_firm["total_items"]
+
+
+class TestTheSmallPartsOfTheDocumentService:
+    def test_a_missing_content_type_stays_missing(self):
+        """An upload with no declared type records none, rather than an empty string."""
+        assert document_service.bounded_content_type(None) is None
+        assert document_service.bounded_content_type("   ") is None
+        assert document_service.bounded_content_type("application/pdf") == "application/pdf"
+
+    def test_a_checklist_counts_what_it_has_as_well_as_what_it_wants(
+        self, client, auth_headers, client_id, db
+    ):
+        """``satisfied_count`` is what a progress reading is built from."""
+        from app.models.compliance import ComplianceItem
+
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        row = db.get(ComplianceItem, uuid.UUID(item["id"]))
+
+        before = document_service.checklist_for_item(db, row)
+        assert before.satisfied_count == 0
+        assert not before.is_complete
+
+        upload(
+            client,
+            auth_headers,
+            client_id=client_id,
+            filename="bank.pdf",
+            compliance_item_id=item["id"],
+        )
+        after = document_service.checklist_for_item(db, row)
+        assert after.satisfied_count == len(after.requirements) - len(after.missing)
+        assert after.satisfied_count > 0
+
+
+class TestDeletingBytesThatAreNotThere:
+    """``delete_stored`` answers rather than raises, because the caller has nothing to do.
+
+    The row is already gone by the time it runs — see
+    :func:`~app.api.routes.documents.delete_document` — so a file that is
+    missing, or a path that does not resolve inside the storage root, is a
+    false rather than an exception the endpoint would have to swallow.
+    """
+
+    def test_a_file_that_has_already_gone(self, client, auth_headers, client_id, db):
+        from app.models.document import Document
+
+        uploaded = upload(client, auth_headers, client_id=client_id).json()["document"]
+        path = db.get(Document, uuid.UUID(uploaded["id"])).storage_path
+
+        assert storage.delete_stored(path) is True
+        assert storage.delete_stored(path) is False
+
+    def test_a_path_that_escapes_the_storage_root(self):
+        assert storage.delete_stored("../../etc/passwd") is False

@@ -8,6 +8,7 @@ filterable down to the history of a single record.
 from __future__ import annotations
 
 import io
+import uuid
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -845,3 +846,35 @@ class TestTheLabelNamingWhoActed:
 
         assert len(label) == audit.MAX_ACTOR_LABEL
         assert label.endswith("@example.in>")
+
+
+class TestRecordingAValueJsonCannotHold:
+    """The trail is a JSON column, so a diff has to survive being serialised.
+
+    Most of what moves is a string, a number, a date or a UUID. What is left is
+    whatever a model attribute happens to be — and a value that json cannot
+    represent would take the *action* down with it, since ``record`` runs inside
+    the transaction of the change it describes. Rendered with ``str`` rather
+    than refused: an approximate note in the trail beats a filing that could
+    not be saved.
+    """
+
+    def test_an_unrepresentable_value_is_rendered_rather_than_raised(self):
+        class Opaque:
+            def __str__(self) -> str:
+                return "a quarter"
+
+        changed = audit.diff({"share": None}, {"share": Opaque()})
+        assert changed["after"]["share"] == "a quarter"
+        assert changed["before"]["share"] is None
+
+    def test_the_kinds_that_have_their_own_rendering_keep_it(self):
+        identifier = uuid.uuid4()
+        moved = audit.diff(
+            {"id": None, "due_date": None}, {"id": identifier, "due_date": date(2026, 7, 20)}
+        )
+        assert moved["after"]["id"] == str(identifier)
+        assert moved["after"]["due_date"] == "2026-07-20"
+
+    def test_a_snapshot_that_did_not_move_records_nothing(self):
+        assert audit.diff({"name": "Nimbus"}, {"name": "Nimbus"}) == {}

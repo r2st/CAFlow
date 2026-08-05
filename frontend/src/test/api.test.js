@@ -406,3 +406,98 @@ describe('practitioner work endpoints', () => {
     expect(url).toContain('to_date=2027-03-31')
   })
 })
+
+/**
+ * What the app is reading when the reply did not come from the API.
+ *
+ * A request that reaches the network can still be answered by something that
+ * is not CAFlow: nginx returning its own 502 page while the API restarts, a
+ * captive portal on hotel wifi, a corporate proxy interposing an error. Every
+ * one of those answers with a status and a body of HTML, and `readBody` runs
+ * `JSON.parse` on it — so without a fallback the failure a practitioner is
+ * shown is a `SyntaxError` about an unexpected token, and the real status is
+ * lost with it.
+ */
+describe('a reply that is not the JSON the API sends', () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+    setToken('token-xyz')
+  })
+
+  function respondWith(status, text, ok = status < 400) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok, status, text: async () => text, blob: async () => new Blob() }),
+    )
+  }
+
+  it('shows the gateway’s own page rather than a parser error', async () => {
+    respondWith(502, '<html><body><h1>502 Bad Gateway</h1></body></html>')
+
+    await expect(api.listClients()).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 502,
+      message: '<html><body><h1>502 Bad Gateway</h1></body></html>',
+    })
+  })
+
+  it('falls back to the status when the body says nothing at all', async () => {
+    respondWith(500, '')
+
+    await expect(api.listClients()).rejects.toThrow('Request failed (500)')
+  })
+
+  it('falls back to the status when the body is JSON with no detail in it', async () => {
+    respondWith(503, JSON.stringify({ message: 'upstream unavailable' }))
+
+    await expect(api.listClients()).rejects.toThrow('Request failed (503)')
+  })
+
+  it('still drops a spent credential, whatever shape the 401 arrived in', async () => {
+    respondWith(401, '<html>Unauthorized</html>')
+
+    await expect(api.me()).rejects.toBeInstanceOf(ApiError)
+    expect(getToken()).toBeNull()
+  })
+
+  it('keeps a successful body that happens not to be JSON', async () => {
+    respondWith(200, 'pong')
+
+    await expect(api.me()).resolves.toEqual({ detail: 'pong' })
+  })
+})
+
+/**
+ * The query string is built from values a page holds in state, and two of
+ * those are falsy without being absent. `unpaid_only: false` and `offset: 0`
+ * are answers, not gaps — dropping them would silently change what was asked
+ * for, and an empty string genuinely is "no filter".
+ */
+describe('the falsy values a filter can legitimately hold', () => {
+  beforeEach(() => window.localStorage.clear())
+
+  it('keeps a zero', async () => {
+    const spy = mockFetch(200, { items: [], total: 0, limit: 25, offset: 0 })
+    await api.listInvoices({ offset: 0 })
+    expect(spy.mock.calls[0][0]).toContain('offset=0')
+  })
+
+  it('keeps an explicit false', async () => {
+    const spy = mockFetch(200, { items: [], total: 0, limit: 25, offset: 0 })
+    await api.listDocuments({ uploaded_via_portal: false })
+    expect(spy.mock.calls[0][0]).toContain('uploaded_via_portal=false')
+  })
+
+  it('drops an empty string, which is a filter nobody typed in', async () => {
+    const spy = mockFetch(200, { items: [], total: 0, limit: 25, offset: 0 })
+    await api.listClients({ search: '' })
+    expect(spy.mock.calls[0][0]).not.toContain('search')
+  })
+
+  it('drops a null as well as an undefined', async () => {
+    const spy = mockFetch(200, { items: [], total: 0, limit: 25, offset: 0 })
+    await api.listClients({ assigned_to: null, is_active: undefined })
+    expect(spy.mock.calls[0][0]).not.toContain('assigned_to')
+    expect(spy.mock.calls[0][0]).not.toContain('is_active')
+  })
+})

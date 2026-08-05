@@ -3227,3 +3227,361 @@ class TestTheOrderAnInvoicesLinesAreIn:
         assert [row.description for row in rows] == [
             line["description"] for line in moved
         ]
+
+
+class TestBillingOneClientAtATime:
+    """The unbilled pile narrows to one client, and so must what is drafted.
+
+    A client page links to the billing screen with ``?client_id=…`` and the
+    panel above the ledger then shows only that client's filed-but-unbilled
+    work. The button beside those totals has to bill the pile it is standing
+    next to. Drafting is not a preview — every invoice raised marks the filings
+    it covers ``is_billed``, so work billed by mistake leaves the pile a partner
+    reads to find revenue they have not yet asked for, and undoing it is one
+    cancel per invoice against numbers that stay burnt.
+
+    ``client_id`` reaches the query in :func:`billing.unbilled_items`, and both
+    doors into it — the pile and the generate — are asserted from end to end
+    rather than only at the point the filter is written.
+    """
+
+    def second_client(self, client, auth_headers) -> str:
+        response = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(
+                name="Kaveri Exports LLP",
+                entity_type="llp",
+                pan="AABCK7654L",
+                gstin="29AABCK7654L1Z9",
+                email="books@kaveri-exports.in",
+            ),
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["client"]["id"]
+
+    def test_the_billable_pile_narrows_to_the_client_asked_for(
+        self, client, auth_headers, client_id
+    ):
+        other_id = self.second_client(client, auth_headers)
+        file_everything(client, auth_headers)
+
+        whole_firm = client.get(
+            "/api/v1/invoices/billable", headers=auth_headers
+        ).json()
+        assert {group["client_id"] for group in whole_firm["clients"]} == {
+            client_id,
+            other_id,
+        }
+
+        narrowed = client.get(
+            "/api/v1/invoices/billable",
+            params={"client_id": client_id},
+            headers=auth_headers,
+        ).json()
+        assert [group["client_id"] for group in narrowed["clients"]] == [client_id]
+        assert narrowed["total_items"] < whole_firm["total_items"]
+        assert narrowed["total_paise"] < whole_firm["total_paise"]
+
+    def test_generating_for_one_client_bills_only_that_client(
+        self, client, auth_headers, client_id
+    ):
+        """The whole point: the other client's work stays in the pile."""
+        other_id = self.second_client(client, auth_headers)
+        file_everything(client, auth_headers)
+
+        response = client.post(
+            "/api/v1/invoices/generate",
+            json={"client_id": client_id},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["created"] == 1
+        assert [invoice["client_id"] for invoice in body["invoices"]] == [client_id]
+
+        remaining = client.get(
+            "/api/v1/invoices/billable", headers=auth_headers
+        ).json()
+        assert [group["client_id"] for group in remaining["clients"]] == [other_id]
+
+    def test_the_second_client_can_still_be_billed_afterwards(
+        self, client, auth_headers, client_id
+    ):
+        """Nothing about the first run may have marked the second one's filings."""
+        other_id = self.second_client(client, auth_headers)
+        file_everything(client, auth_headers)
+        client.post(
+            "/api/v1/invoices/generate",
+            json={"client_id": client_id},
+            headers=auth_headers,
+        )
+
+        second = client.post(
+            "/api/v1/invoices/generate",
+            json={"client_id": other_id},
+            headers=auth_headers,
+        ).json()
+        assert second["created"] == 1
+        assert second["total_paise"] > 0
+        assert client.get(
+            "/api/v1/invoices/billable", headers=auth_headers
+        ).json()["total_items"] == 0
+
+    def test_the_pile_can_be_cut_off_at_a_filing_date(
+        self, client, auth_headers, db, firm_id, client_id
+    ):
+        """Billing a month's work without reaching into the next one.
+
+        ``filed_upto`` is the bound for that, and it reads ``filed_on`` rather
+        than the deadline — which is the distinction that matters, since a
+        return lodged late belongs to the month it was lodged in and not to the
+        month it was owed for.
+        """
+        file_everything(client, auth_headers)
+        yesterday = clock.today() - timedelta(days=1)
+
+        pile = billing.unbilled_items(db, uuid.UUID(firm_id))
+        assert len(pile) > 1
+        pile[0].filed_on = yesterday
+        db.flush()
+
+        cut = billing.unbilled_items(db, uuid.UUID(firm_id), filed_upto=yesterday)
+        assert [item.id for item in cut] == [pile[0].id]
+
+
+class TestRefusalsOnTheMoneyItself:
+    """The states an invoice will not take money in, and the empty invoice."""
+
+    def test_a_payment_against_a_cancelled_invoice_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        """A withdrawn bill is not one the client was ever asked to pay.
+
+        Absorbing a receipt against it would leave the firm's books recording
+        money collected on an invoice its own trail says it withdrew.
+        """
+        draft = make_invoice(client, auth_headers, client_id).json()
+        assert (
+            client.post(
+                f"/api/v1/invoices/{draft['id']}/cancel", headers=auth_headers
+            ).status_code
+            == 200
+        )
+
+        response = client.post(
+            f"/api/v1/invoices/{draft['id']}/payments",
+            json={"amount_paise": 100_000},
+            headers=auth_headers,
+        )
+        assert response.status_code == 409, response.text
+        assert "cancelled" in response.json()["detail"]
+
+    def test_a_payment_of_nothing_is_refused(self):
+        """The schema stops this at the edge; the service refuses it anyway.
+
+        ``record_payment`` is reachable from the worker and from a future
+        endpoint, and a zero-paise receipt would stamp ``payment_date`` on an
+        invoice nobody has paid.
+        """
+        invoice = Invoice(
+            status=InvoiceStatus.SENT, total_paise=100_000, amount_paid_paise=0
+        )
+        with pytest.raises(billing.BillingError, match="must be positive"):
+            billing.record_payment(invoice, amount_paise=0)
+
+    def test_an_invoice_cannot_be_built_from_no_filings(
+        self, db, firm_id, client_id
+    ):
+        """An invoice with no lines is a number burnt on nothing."""
+        from app.models.client import Client as ClientRow
+
+        billed_client = db.get(ClientRow, uuid.UUID(client_id))
+        with pytest.raises(billing.BillingError, match="at least one"):
+            billing.build_invoice(
+                db, firm_id=uuid.UUID(firm_id), client=billed_client, items=[]
+            )
+
+    def test_an_invoice_with_no_lines_cannot_be_issued(
+        self, client, auth_headers, client_id, db
+    ):
+        """Sending starts the payment clock, so there has to be something to pay."""
+        draft = make_invoice(client, auth_headers, client_id).json()
+        row = db.get(Invoice, uuid.UUID(draft["id"]))
+        row.lines.clear()
+        db.commit()
+
+        response = client.post(
+            f"/api/v1/invoices/{draft['id']}/send", headers=auth_headers
+        )
+        assert response.status_code == 422, response.text
+        assert "no lines" in response.json()["detail"]
+
+    def test_creating_an_invoice_for_a_client_this_firm_cannot_reach_is_a_404(
+        self, client, auth_headers
+    ):
+        """Unreachable and non-existent answer identically, so neither is probeable."""
+        response = make_invoice(client, auth_headers, str(uuid.uuid4()))
+        assert response.status_code == 404, response.text
+
+
+class TestNarrowingTheLedger:
+    """The filters the billing screen sends, asserted through the endpoint."""
+
+    def test_the_ledger_can_be_narrowed_to_one_client(
+        self, client, auth_headers, client_id
+    ):
+        other_id = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(
+                name="Kaveri Exports LLP",
+                pan="AABCK7654L",
+                gstin="29AABCK7654L1Z9",
+                email="books@kaveri-exports.in",
+            ),
+            headers=auth_headers,
+        ).json()["client"]["id"]
+        mine = make_invoice(client, auth_headers, client_id).json()
+        theirs = make_invoice(client, auth_headers, other_id).json()
+
+        listed = client.get(
+            "/api/v1/invoices", params={"client_id": client_id}, headers=auth_headers
+        ).json()
+        numbers = [row["invoice_number"] for row in listed["items"]]
+        assert mine["invoice_number"] in numbers
+        assert theirs["invoice_number"] not in numbers
+        assert listed["total"] == 1
+
+    def test_the_ledger_can_be_narrowed_by_issue_date(
+        self, client, auth_headers, client_id
+    ):
+        """A window running forwards keeps what is inside it and drops the rest."""
+        today = clock.today()
+        recent = make_invoice(
+            client, auth_headers, client_id, issue_date=today.isoformat()
+        ).json()
+        older = make_invoice(
+            client,
+            auth_headers,
+            client_id,
+            issue_date=(today - timedelta(days=120)).isoformat(),
+        ).json()
+
+        listed = client.get(
+            "/api/v1/invoices",
+            params={"from_date": (today - timedelta(days=30)).isoformat()},
+            headers=auth_headers,
+        ).json()
+        numbers = [row["invoice_number"] for row in listed["items"]]
+        assert recent["invoice_number"] in numbers
+        assert older["invoice_number"] not in numbers
+
+    def test_the_open_queue_can_be_narrowed_to_one_firm(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        """The nightly status refresh sweeps every firm; a firm can ask for its own."""
+        draft = make_invoice(client, auth_headers, client_id).json()
+        client.post(f"/api/v1/invoices/{draft['id']}/send", headers=auth_headers)
+
+        assert billing.open_invoice_ids(db, uuid.UUID(firm_id)) == [
+            uuid.UUID(draft["id"])
+        ]
+        assert billing.open_invoice_ids(db, uuid.uuid4()) == []
+
+
+class TestRedatingADraftIntoANumberSomebodyElseJustTook:
+    """The renumber has the same race the insert does, and the same answer.
+
+    Moving a draft's issue date across the financial year boundary reallocates
+    its number into the series that date belongs to — read the numbers already
+    used, pick the next free one, write it. Between the read and the write sits
+    every other request, and the one that matters is another practitioner
+    raising an ordinary invoice in the new year: they take ``0001``, and the
+    redate then collides on a unique constraint.
+
+    Given up and retried rather than raised. What a practitioner did was change
+    a date on a draft; being told the change "conflicts with an existing
+    record" for a number they never saw is not something they can act on, and
+    the number they should have had is sitting free one along.
+    """
+
+    @staticmethod
+    def committed_by_another_request(firm_id, client_id, number, issue_date):
+        from app.database import SessionLocal
+
+        other = SessionLocal()
+        try:
+            other.add(
+                Invoice(
+                    firm_id=uuid.UUID(firm_id),
+                    client_id=uuid.UUID(client_id),
+                    invoice_number=number,
+                    issue_date=issue_date,
+                    gst_rate_bps=1800,
+                    status=InvoiceStatus.DRAFT,
+                )
+            )
+            other.commit()
+        finally:
+            other.close()
+
+    def old_year_draft(self, db, firm_id, client_id) -> Invoice:
+        def build(number: str) -> Invoice:
+            invoice = Invoice(
+                firm_id=uuid.UUID(firm_id),
+                client_id=uuid.UUID(client_id),
+                invoice_number=number,
+                issue_date=date(2026, 3, 31),
+                gst_rate_bps=1800,
+                status=InvoiceStatus.DRAFT,
+            )
+            invoice.lines.append(
+                InvoiceLine(description="Advisory", quantity=1, unit_price_paise=100_000)
+            )
+            return billing.recalculate(invoice)
+
+        invoice = billing.insert_numbered(
+            db, firm_id=uuid.UUID(firm_id), issue_date=date(2026, 3, 31), build=build
+        )
+        db.commit()
+        return invoice
+
+    def test_the_taken_number_is_given_up_and_the_next_one_taken(
+        self, db, firm_id, client_id, monkeypatch
+    ):
+        invoice = self.old_year_draft(db, firm_id, client_id)
+        assert invoice.invoice_number == "INV/FY2025-26/0001"
+
+        taken = "INV/FY2026-27/0001"
+        self.committed_by_another_request(firm_id, client_id, taken, date(2026, 4, 2))
+
+        offered = []
+        real = billing.next_invoice_number
+
+        def as_read_a_moment_ago(session, fid, issue_date=None):
+            offered.append(1)
+            return taken if len(offered) == 1 else real(session, fid, issue_date)
+
+        monkeypatch.setattr(billing, "next_invoice_number", as_read_a_moment_ago)
+        moved = billing.renumber_for_issue_date(db, invoice, date(2026, 4, 15))
+        db.commit()
+
+        assert moved is True
+        assert len(offered) == 2
+        assert invoice.invoice_number == "INV/FY2026-27/0002"
+        # The other request keeps 0001; nothing was overwritten to make room.
+        assert db.query(Invoice).count() == 2
+
+    def test_a_failure_that_is_not_the_number_is_reported_as_it_happened(
+        self, db, firm_id, client_id, monkeypatch
+    ):
+        """Retrying a foreign-key violation four times and then blaming the
+        numbering would hide what actually went wrong."""
+        invoice = self.old_year_draft(db, firm_id, client_id)
+
+        def not_a_numbering_problem(session, fid, issue_date=None):
+            raise IntegrityError("INSERT", {}, Exception("FOREIGN KEY constraint failed"))
+
+        monkeypatch.setattr(billing, "next_invoice_number", not_a_numbering_problem)
+        with pytest.raises(IntegrityError, match="FOREIGN KEY"):
+            billing.renumber_for_issue_date(db, invoice, date(2026, 4, 15))

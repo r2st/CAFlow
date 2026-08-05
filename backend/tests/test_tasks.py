@@ -1846,3 +1846,127 @@ class TestPagingTasksRaisedByOneSweep:
         assert client.get("/api/v1/tasks", headers=auth_headers).status_code == 200
 
         assert paged_order_by(recorded_sql, "tasks").endswith("tasks.id")
+
+
+class TestATaskThatNamesSomethingThisFirmCannotReach:
+    """A client and a filing are addressable by id alone, so both are checked.
+
+    Reported as a 400 rather than a 404: the endpoint is creating a task, and
+    what is wrong is a field in the body rather than the resource being
+    addressed. The message names which of the two it was, because a caller
+    holding a stale id from the wrong screen cannot otherwise tell.
+    """
+
+    def test_an_unreachable_client_is_refused(self, client, auth_headers):
+        response = client.post(
+            "/api/v1/tasks",
+            json={"title": "Draft the reply", "client_id": str(uuid.uuid4())},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400, response.text
+        assert "Client not found" in response.json()["detail"]
+
+    def test_an_unreachable_filing_is_refused(self, client, auth_headers):
+        response = client.post(
+            "/api/v1/tasks",
+            json={
+                "title": "Draft the reply",
+                "compliance_item_id": str(uuid.uuid4()),
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 400, response.text
+        assert "Compliance item not found" in response.json()["detail"]
+
+
+class TestNarrowingTheBoardFurther:
+    """Two filters the board sends that nothing else covers."""
+
+    @pytest.fixture
+    def board(self, client, auth_headers, client_id) -> list[dict]:
+        soon = client.post(
+            "/api/v1/tasks",
+            json={
+                "title": "File the GST return",
+                "client_id": client_id,
+                "status": "in_progress",
+                "due_date": (clock.today() + timedelta(days=2)).isoformat(),
+            },
+            headers=auth_headers,
+        ).json()
+        later = client.post(
+            "/api/v1/tasks",
+            json={
+                "title": "Prepare the audit file",
+                "client_id": client_id,
+                "status": "todo",
+                "due_date": (clock.today() + timedelta(days=60)).isoformat(),
+            },
+            headers=auth_headers,
+        ).json()
+        return [soon, later]
+
+    def test_by_status(self, client, auth_headers, board):
+        listed = client.get(
+            "/api/v1/tasks", params={"task_status": "in_progress"}, headers=auth_headers
+        ).json()
+        assert [row["id"] for row in listed["items"]] == [board[0]["id"]]
+
+    def test_by_a_deadline_to_get_through_by(self, client, auth_headers, board):
+        """"What has to be done this week" is a bound on the date, not a status."""
+        listed = client.get(
+            "/api/v1/tasks",
+            params={"due_before": (clock.today() + timedelta(days=7)).isoformat()},
+            headers=auth_headers,
+        ).json()
+        assert [row["id"] for row in listed["items"]] == [board[0]["id"]]
+
+
+class TestGeneratingWhenThereIsNothingDue:
+    def test_a_firm_with_no_filings_in_the_horizon_creates_nothing(
+        self, client, auth_headers, db, firm_id
+    ):
+        """The nightly sweep runs against every firm, including the quiet ones.
+
+        Returning early rather than walking on matters: what follows the read
+        is a second query for the tasks already raised and a third for who may
+        be assigned them, and a firm with nothing due should cost neither.
+        """
+        created = task_service.create_tasks_for_due_items(
+            db, uuid.UUID(firm_id), horizon_days=21
+        )
+        assert created == []
+
+
+class TestAnExplicitNullOnAFieldThatIsGenuinelyOptional:
+    """``null`` means "not given" where the field has no cleared state to reach.
+
+    ``not_clearable`` refuses a null on the columns that cannot hold one, and
+    the two dates below are deliberately *not* on that list: an onboarding date
+    and a send time both have a default the caller may want. A client library
+    serialising an absent field as ``null`` is the ordinary way either arrives,
+    and it has to mean the same thing as leaving the field out.
+    """
+
+    def test_an_onboarding_date_falls_back_to_today(self, client, auth_headers):
+        response = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(onboarded_on=None),
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["client"]["onboarded_on"] == clock.today().isoformat()
+
+    def test_a_send_time_falls_back_to_now(self, client, auth_headers, client_id):
+        response = client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "subject": "About your return",
+                "body": "Please send it over.",
+                "scheduled_for": None,
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["scheduled_for"] is not None

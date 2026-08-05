@@ -998,3 +998,120 @@ class TestAnExplicitNullOnATeamMembersRequiredFields:
         assert response.json()["full_name"] == "Temp Staff"
         assert response.json()["role"] == "junior"
         assert response.json()["is_active"] is True
+
+
+class TestEditingATeamMember:
+    """The three refusals that stand between an admin and the firm's own standing."""
+
+    @pytest.fixture
+    def partner_headers(self, client, auth_headers) -> dict[str, str]:
+        client.post(
+            "/api/v1/auth/practitioners",
+            json={
+                "full_name": "Devika Iyer",
+                "email": "devika@sharma-ca.in",
+                "password": "another-correct-horse",
+                "role": "partner",
+            },
+            headers=auth_headers,
+        )
+        token = client.post(
+            "/api/v1/auth/login",
+            json={"email": "devika@sharma-ca.in", "password": "another-correct-horse"},
+        ).json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_a_practitioner_this_firm_cannot_reach_is_a_404(self, client, auth_headers):
+        """Another firm's member and one that never existed answer identically."""
+        response = client.patch(
+            f"/api/v1/auth/practitioners/{uuid.uuid4()}",
+            json={"full_name": "Someone Else"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 404, response.text
+
+    def test_a_partner_cannot_edit_the_owner(
+        self, client, auth_headers, partner_headers, registered_firm
+    ):
+        """The owner is the account nobody else may reach.
+
+        A partner is a firm admin and may edit every other member, so without
+        this the one account that cannot be locked out could be renamed,
+        demoted or switched off by somebody the owner appointed.
+        """
+        owner_id = registered_firm["practitioner"]["id"]
+        response = client.patch(
+            f"/api/v1/auth/practitioners/{owner_id}",
+            json={"full_name": "Not Anita"},
+            headers=partner_headers,
+        )
+        assert response.status_code == 403, response.text
+        assert "owner" in response.json()["detail"].lower()
+
+    def test_the_owner_can_still_edit_their_own_details(
+        self, client, auth_headers, registered_firm
+    ):
+        """Frozen standing is not a frozen record."""
+        owner_id = registered_firm["practitioner"]["id"]
+        response = client.patch(
+            f"/api/v1/auth/practitioners/{owner_id}",
+            json={"phone": "+919812345679"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["phone"] == "+919812345679"
+
+    def test_nobody_can_be_promoted_to_owner(self, client, auth_headers):
+        """A firm has one owner, and the role is not something a patch confers."""
+        member = client.post(
+            "/api/v1/auth/practitioners",
+            json={
+                "full_name": "Devika Iyer",
+                "email": "devika@sharma-ca.in",
+                "password": "another-correct-horse",
+                "role": "manager",
+            },
+            headers=auth_headers,
+        ).json()
+
+        response = client.patch(
+            f"/api/v1/auth/practitioners/{member['id']}",
+            json={"role": "owner"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400, response.text
+        assert "one owner" in response.json()["detail"]
+
+
+class TestATokenThatNamesTheWrongFirm:
+    """The firm is carried in the token as well as on the row, and both are read.
+
+    A token is signed, so its claims cannot be edited — but a practitioner
+    moved between firms, or a token minted against a firm id that is no longer
+    theirs, would otherwise be accepted and scoped by the *row*. The two
+    disagreeing is a credential that no longer describes the account it names,
+    and the safe reading of that is to refuse it.
+    """
+
+    def test_the_claim_has_to_match_the_practitioners_own_firm(
+        self, client, registered_firm
+    ):
+        mismatched = create_access_token(
+            practitioner_id=registered_firm["practitioner"]["id"],
+            firm_id=uuid.uuid4(),
+            role="owner",
+        )
+        response = client.get(
+            "/api/v1/auth/me", headers={"Authorization": f"Bearer {mismatched}"}
+        )
+        assert response.status_code == 401, response.text
+
+
+class TestWhoMayAdministerAFirm:
+    def test_owners_and_partners_may_manage_it(self):
+        for role in (PractitionerRole.OWNER, PractitionerRole.PARTNER):
+            assert Practitioner(role=role).can_manage_firm is True
+
+    def test_managers_and_juniors_may_not(self):
+        for role in (PractitionerRole.MANAGER, PractitionerRole.JUNIOR):
+            assert Practitioner(role=role).can_manage_firm is False
