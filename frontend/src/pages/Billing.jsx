@@ -350,9 +350,25 @@ export default function Billing() {
       return `${cancelled.invoice_number} cancelled.`
     })
 
+  /**
+   * Draft invoices from the unbilled pile shown above the ledger.
+   *
+   * Narrowed to the same client the panel is. The pile already filters — a
+   * client page links here with `?client_id=…` and the panel then shows only
+   * that client's filed-but-unbilled work — but the button beside those totals
+   * asked the server to bill *every* client with outstanding work.
+   *
+   * What a practitioner clicked was "1 item · ₹4,000 — Draft invoices" on the
+   * one client they had opened. What they got was a draft for every client of
+   * the firm, and drafting is not a preview: each one marks the filings it
+   * covers `is_billed`, so that work leaves the billable pile and the "unbilled"
+   * figure the partner reads to find money not yet asked for drops to nothing.
+   * Undoing it is one cancel per invoice, and the numbers those drafts burned
+   * are gone from the series a GST return is reconciled against.
+   */
   const generate = () =>
     act(async () => {
-      const result = await api.generateInvoices({})
+      const result = await api.generateInvoices({ client_id: clientFilter || undefined })
       return result.created === 0
         ? 'Nothing to invoice right now.'
         : `Drafted ${result.created} invoice${result.created === 1 ? '' : 's'} worth ${formatRupees(result.total_paise)}.`

@@ -258,6 +258,58 @@ describe('Billing', () => {
     expect(await screen.findByText('Drafted 1 invoice worth ₹4,000.')).toBeInTheDocument()
   })
 
+  it('drafts for every client when the ledger is not narrowed to one', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'generateInvoices').mockResolvedValue({
+      created: 2,
+      total_paise: 400000,
+      invoices: [],
+    })
+    renderPage(<Billing />)
+
+    await user.click(await screen.findByRole('button', { name: 'Draft invoices' }))
+
+    await waitFor(() =>
+      expect(api.generateInvoices).toHaveBeenCalledWith({ client_id: undefined }),
+    )
+  })
+
+  it('drafts only for the client the unbilled pile is showing', async () => {
+    // The panel and the button have to mean the same thing. Drafting is not a
+    // preview — every invoice it raises marks the filings it covers billed —
+    // so billing the whole firm from a one-client view is not undone by
+    // reloading the page.
+    const user = userEvent.setup()
+    vi.spyOn(api, 'generateInvoices').mockResolvedValue({
+      created: 1,
+      total_paise: 400000,
+      invoices: [],
+    })
+    renderPage(<Billing />, { route: '/billing?client_id=c-1' })
+
+    await user.click(await screen.findByRole('button', { name: 'Draft invoices' }))
+
+    await waitFor(() => expect(api.generateInvoices).toHaveBeenCalledWith({ client_id: 'c-1' }))
+  })
+
+  it('follows the client picker rather than the URL it was opened with', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'generateInvoices').mockResolvedValue({
+      created: 1,
+      total_paise: 400000,
+      invoices: [],
+    })
+    renderPage(<Billing />, { route: '/billing?client_id=c-1' })
+
+    await user.selectOptions(await screen.findByLabelText('Client'), '')
+    await waitFor(() => expect(api.billableWork).toHaveBeenCalledWith({ client_id: undefined }))
+    await user.click(screen.getByRole('button', { name: 'Draft invoices' }))
+
+    await waitFor(() =>
+      expect(api.generateInvoices).toHaveBeenCalledWith({ client_id: undefined }),
+    )
+  })
+
   it('lists invoices with their balance and status', async () => {
     renderPage(<Billing />)
 
