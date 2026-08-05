@@ -397,3 +397,110 @@ class TestTheCountIsPerFirm:
         # And the neighbour's owner is not counted into this firm's seats.
         neighbour = db.scalars(select(Firm).where(Firm.name == "Neighbour & Co")).one()
         assert firms.active_user_count(db, neighbour.id) == 1
+
+
+class TestWhichRefusalAFullFirmIsGiven:
+    """A firm at its ceiling still has to be told what actually stopped it.
+
+    ``claim_client_slot`` used to run first, so every other thing wrong with
+    the request was answered as a plan limit: "the solo plan allows 1 clients.
+    Upgrade to add more", on a request that would have been refused anyway.
+
+    That is the one refusal in this module that sends a practitioner somewhere
+    else — to a pricing page — and neither of the two below is fixed by paying.
+    Re-entering a client the firm already has under that PAN is a duplicate,
+    and it is what a practitioner does when the search box did not find someone
+    who is right there; naming an assignee who has been switched off is a stale
+    id from a screen listing a member who has since left. Both were reported as
+    money.
+
+    ``add_practitioner`` already ordered these the other way round, for exactly
+    this reason. The client endpoints are the same decision by the same door.
+    """
+
+    def add_client(self, client: TestClient, auth_headers: dict, **overrides):
+        return client.post(
+            f"{API}/clients", headers=auth_headers, json=make_client_payload(**overrides)
+        )
+
+    def test_a_duplicate_pan_is_a_conflict_rather_than_a_plan_limit(
+        self, client: TestClient, auth_headers: dict, one_client_plan
+    ):
+        first = self.add_client(client, auth_headers, name="Kumar Enterprises", pan="AABCK1234A")
+        assert first.status_code == 201, first.text
+
+        response = self.add_client(
+            client, auth_headers, name="Kumar Enterprises", pan="AABCK1234A"
+        )
+
+        assert response.status_code == 409, response.text
+        assert "AABCK1234A" in response.json()["detail"]
+
+    def test_an_assignee_who_has_left_is_a_bad_request_rather_than_a_plan_limit(
+        self, client: TestClient, auth_headers: dict, one_client_plan, db: Session
+    ):
+        added = client.post(
+            f"{API}/auth/practitioners",
+            headers=auth_headers,
+            json={
+                "full_name": "Meera Iyer",
+                "email": "meera@sharma-ca.in",
+                "password": "another-good-password",
+                "role": "junior",
+            },
+        )
+        assert added.status_code == 201, added.text
+        client.patch(
+            f"{API}/auth/practitioners/{added.json()['id']}",
+            headers=auth_headers,
+            json={"is_active": False},
+        )
+        assert self.add_client(client, auth_headers, name="First Co", pan="AABCF1234A").status_code == 201
+
+        response = self.add_client(
+            client,
+            auth_headers,
+            name="Second Co",
+            pan="AABCS2345B",
+            assigned_practitioner_id=added.json()["id"],
+        )
+
+        assert response.status_code == 400, response.text
+        assert "Meera Iyer" in response.json()["detail"]
+
+    def test_a_full_firm_with_nothing_else_wrong_still_gets_the_plan_limit(
+        self, client: TestClient, auth_headers: dict, one_client_plan
+    ):
+        """The reordering must not blunt the cap itself."""
+        assert self.add_client(client, auth_headers, name="First Co", pan="AABCF1234A").status_code == 201
+
+        response = self.add_client(client, auth_headers, name="Second Co", pan="AABCS2345B")
+
+        assert response.status_code == 402, response.text
+        assert "Upgrade" in response.json()["detail"]
+
+    def test_reactivating_names_the_real_refusal_too(
+        self, client: TestClient, auth_headers: dict, two_client_plan
+    ):
+        """The patch reaches the same claim by the other door, and it can carry
+        a duplicate PAN in the very same request."""
+        first = self.add_client(client, auth_headers, name="First Co", pan="AABCF1234A")
+        assert first.status_code == 201, first.text
+        second = self.add_client(client, auth_headers, name="Second Co", pan="AABCS2345B")
+        assert second.status_code == 201, second.text
+
+        client.patch(
+            f"{API}/clients/{first.json()['client']['id']}",
+            headers=auth_headers,
+            json={"is_active": False},
+        )
+        assert self.add_client(client, auth_headers, name="Third Co", pan="AABCT3456C").status_code == 201
+
+        response = client.patch(
+            f"{API}/clients/{first.json()['client']['id']}",
+            headers=auth_headers,
+            json={"is_active": True, "pan": "AABCS2345B"},
+        )
+
+        assert response.status_code == 409, response.text
+        assert "AABCS2345B" in response.json()["detail"]

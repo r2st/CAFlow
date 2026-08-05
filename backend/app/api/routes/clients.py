@@ -246,8 +246,6 @@ def create_client(
     GST-registered monthly filer gets GSTR-1 and GSTR-3B for every month,
     a TDS deductor gets quarterly returns, a company gets ROC filings, and so on.
     """
-    _claim_client_slot(db, firm)
-
     if payload.pan:
         duplicate = db.scalar(
             select(Client).where(Client.firm_id == firm.id, Client.pan == payload.pan)
@@ -259,6 +257,16 @@ def create_client(
             )
 
     _validate_assignee(db, firm.id, payload.assigned_practitioner_id)
+
+    # Last of the three checks, which is the position ``add_practitioner``
+    # already takes and for the same reason: a firm that is both full and
+    # re-entering a client it already has is told which of the two actually
+    # stopped it. Claiming first answered 402 — "the plan allows 50 clients,
+    # upgrade to add more" — for a client sitting on the firm's own books under
+    # that PAN, and for an assignee who had merely been switched off. Neither
+    # is fixed by paying, and 402 is the one refusal here that sends a
+    # practitioner to a pricing page instead of back to the form.
+    _claim_client_slot(db, firm)
 
     data = payload.model_dump(exclude={"generate_compliance_items", "onboarded_on"})
     client = Client(
@@ -384,8 +392,6 @@ def update_client(
     # its calendar, watched them go overdue, and had no way to clear them
     # short of deactivating an already-deactivated client.
     deactivating = updates.get("is_active") is False and client.is_active
-    if reactivating:
-        _claim_client_slot(db, firm)
 
     if "assigned_practitioner_id" in updates:
         _validate_assignee(db, client.firm_id, updates["assigned_practitioner_id"])
@@ -402,6 +408,13 @@ def update_client(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"A client with PAN {updates['pan']} already exists",
             )
+
+    # After the two checks above and still before the flag is applied, so the
+    # count is of what the firm holds without this one while the refusal a
+    # caller is given is the one that actually stopped them; see
+    # :func:`create_client` for what claiming first reported instead.
+    if reactivating:
+        _claim_client_slot(db, firm)
 
     before = audit.snapshot(client, updates)
     for key, value in updates.items():
