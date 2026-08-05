@@ -148,7 +148,28 @@ class OpenRouterClient:
                 )
                 response.raise_for_status()
                 return _answer(response.json())
-            except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+            # ``TypeError`` is the shape the others do not cover, and it is the
+            # one that escapes every fallback below it. The three lookups in
+            # ``_answer`` assume the envelope is objects all the way down;
+            # a 200 whose body is a list, or whose ``message`` is a bare
+            # string, subscripts a value that does not take a key and raises
+            # ``TypeError`` instead — which is not a shape a *model* produces,
+            # but is exactly what a gateway, a captive portal or a proxy error
+            # page returns while still answering 200 with valid JSON.
+            #
+            # Uncaught, it did not merely skip the fallback model: it left this
+            # method entirely, past callers that catch only ``OpenRouterError``
+            # and its siblings. ``categorise_document`` then raised out of
+            # ``ingest_upload`` and into a 500 — with the file already written
+            # to the storage volume and no row pointing at it, which is the one
+            # thing categorisation is not allowed to cost. ``draft_client_message``
+            # raised out of a queueing sweep, and the whole run is one
+            # transaction, so every reminder built before that point was thrown
+            # away — the loss ``DraftingBudget`` exists to prevent, arriving by
+            # a different road. Both of those are the failures :func:`_answer`
+            # was written for; this is the same envelope going wrong one level
+            # further out.
+            except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
                 logger.warning("OpenRouter call failed on model %s: %s", model, exc)
                 last_error = exc
         raise OpenRouterError(f"All OpenRouter models failed: {last_error}")

@@ -1032,3 +1032,100 @@ class TestAnExtractedFieldThatCouldNotBeStored:
         # carrying either is refused outright rather than stored oddly.
         json.dumps(document.extracted_data, allow_nan=False)
         assert storage.resolve_stored(document.storage_path).exists()
+
+
+class TestAnEnvelopeThatIsNotTheShapeItShouldBe:
+    """A 200 whose body is valid JSON of the wrong shape.
+
+    :func:`ai._answer` reads ``payload["choices"][0]["message"]["content"]``,
+    which assumes objects all the way down. A body that is a list, or one whose
+    ``message`` is a bare string, subscripts a value that does not take a key —
+    and that raises ``TypeError``, which none of the other failures here do.
+
+    It is not a shape a *model* produces. It is what a gateway, a captive
+    portal or a proxy's own error page returns while still answering 200 with
+    a content type that parses: the deployment reaches OpenRouter over the
+    public internet, and everything between here and there can answer instead
+    of it.
+
+    Uncaught, it did not merely skip the fallback model — it left the client
+    entirely, past every caller that catches ``OpenRouterError`` and its
+    siblings, which is the same escape :class:`TestAReplyWithNothingInIt`
+    covers one level further in.
+    """
+
+    # Each is a 200 with a valid JSON body that ``_answer`` cannot walk.
+    MISSHAPEN = [
+        pytest.param([{"message": {"content": "hi"}}], id="body-is-a-list"),
+        pytest.param({"choices": [["message", "content"]]}, id="choice-is-a-list"),
+        pytest.param({"choices": [{"message": "the answer"}]}, id="message-is-a-string"),
+        pytest.param({"choices": [{"message": {"content": {"text": "hi"}}}]},
+                     id="content-is-an-object"),
+    ]
+
+    # Non-empty: ``_StubResponse`` reads a falsy payload as an empty object,
+    # which is a *different* failure (a missing key) and not the one under test.
+    BODY_IS_A_LIST = [{"message": {"content": "hi"}}]
+
+    def _reply(self, payload):
+        return _StubResponse(payload)
+
+    @pytest.mark.parametrize("payload", MISSHAPEN)
+    def test_it_is_a_failure_of_that_model(self, capture_posts, payload):
+        _, queue = capture_posts
+        queue.extend([self._reply(payload), self._reply(payload)])
+
+        with pytest.raises(OpenRouterError, match="All OpenRouter models failed"):
+            OpenRouterClient(api_key="sk-or-test").complete("sys", "user")
+
+    def test_the_fallback_model_is_asked(self, capture_posts):
+        """The second model has not answered yet and may well be reachable by a
+        route that is not broken."""
+        calls, queue = capture_posts
+        queue.extend(
+            [self._reply(self.BODY_IS_A_LIST), _StubResponse(_content("the fallback answered"))]
+        )
+
+        assert (
+            OpenRouterClient(api_key="sk-or-test").complete("sys", "user")
+            == "the fallback answered"
+        )
+        assert len(calls) == 2
+
+    def test_an_upload_still_keeps_its_file(self, capture_posts):
+        """Categorising a document is the one part of an upload allowed to be
+        wrong; it is not allowed to lose the file. The bytes are written before
+        this runs, so a 500 here leaves them on the storage volume with no row
+        pointing at them and nothing to sweep them by."""
+        _, queue = capture_posts
+        queue.extend([self._reply(self.BODY_IS_A_LIST), self._reply(self.BODY_IS_A_LIST)])
+
+        result = categorise_document(
+            "hdfc-bank-statement.pdf",
+            "PAN AABCN2345P",
+            OpenRouterClient(api_key="sk-or-test"),
+        )
+
+        assert result.source == "heuristic"
+        assert result.category == DocumentCategory.BANK_STATEMENT
+        assert result.extracted["pan"] == "AABCN2345P"
+
+    def test_a_sweep_still_queues_its_reminders(self, capture_posts):
+        """The whole run is one transaction, so an exception escaping the
+        drafting throws away every reminder built before it — the loss
+        ``DraftingBudget`` exists to prevent, arriving by a different road."""
+        _, queue = capture_posts
+        misshapen = {"choices": [{"message": "the answer"}]}
+        queue.extend([self._reply(misshapen), self._reply(misshapen)])
+
+        message = draft_client_message(
+            purpose="fee_reminder",
+            client_name="Ravi Traders",
+            context={"invoice_number": "INV-0042", "amount_inr": "25,000.00"},
+            llm=OpenRouterClient(api_key="sk-or-test"),
+            firm_name="Sharma & Associates",
+        )
+
+        assert message.startswith("Dear Ravi Traders,")
+        assert "INV-0042" in message
+        assert message.endswith("Sharma & Associates")
