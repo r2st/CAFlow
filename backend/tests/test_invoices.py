@@ -1570,6 +1570,80 @@ class TestLinesCitingFilings:
         assert second.status_code == 409
         assert "already on another invoice" in second.json()["detail"]
 
+    def test_one_invoice_cannot_cite_the_same_filing_twice(
+        self, client, auth_headers, client_id
+    ):
+        """And is told that is what it did, rather than sent hunting for a bill.
+
+        The first line claims the filing, so the second meets ``is_billed``
+        already true — the same flag a *different* invoice would have set. Told
+        it was "already on another invoice", a practitioner searches the ledger
+        for a bill that does not exist; both offending lines are on the form in
+        front of them.
+        """
+        file_everything(client, auth_headers)
+        cited = self._billable(client, auth_headers)["clients"][0]["items"][0]
+        line = {
+            "description": "Billed once",
+            "quantity": 1,
+            "unit_price_paise": 100_000,
+            "compliance_item_id": cited["compliance_item_id"],
+        }
+
+        response = make_invoice(
+            client, auth_headers, client_id, lines=[line, {**line, "description": "Again"}]
+        )
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "on this invoice twice" in detail
+        assert "another invoice" not in detail
+
+    def test_a_draft_edited_to_cite_one_filing_twice_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        """The editor is the other door to it, and the filing stays claimed.
+
+        The refusal rolls the whole PATCH back, so the draft still bills the
+        work it did before — the alternative is a filing released into the
+        billable pile by an edit that was rejected.
+        """
+        file_everything(client, auth_headers)
+        generated = client.post(
+            "/api/v1/invoices/generate", json={}, headers=auth_headers
+        ).json()["invoices"][0]
+        draft = client.get(
+            f"/api/v1/invoices/{generated['id']}", headers=auth_headers
+        ).json()
+        cited = next(line for line in draft["lines"] if line["compliance_item_id"])
+
+        response = client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={
+                "lines": [
+                    {
+                        "description": cited["description"],
+                        "quantity": 1,
+                        "unit_price_paise": cited["unit_price_paise"],
+                        "compliance_item_id": cited["compliance_item_id"],
+                    },
+                    {
+                        "description": "The same filing again",
+                        "quantity": 1,
+                        "unit_price_paise": 1_000,
+                        "compliance_item_id": cited["compliance_item_id"],
+                    },
+                ]
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 409
+        assert "on this invoice twice" in response.json()["detail"]
+        assert cited["compliance_item_id"] not in [
+            item["compliance_item_id"]
+            for group in self._billable(client, auth_headers)["clients"]
+            for item in group["items"]
+        ]
+
     def test_resending_a_drafts_own_lines_does_not_release_its_work(
         self, client, auth_headers, client_id
     ):

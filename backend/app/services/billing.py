@@ -545,19 +545,36 @@ def set_lines(db: Session, invoice: Invoice, lines, items: dict[uuid.UUID, Compl
     the lock ``insert_numbered`` takes; editing a draft was not, and two
     managers each adding the same filed return to their own draft both saw it
     unbilled, both claimed it, and both invoices went out citing it.
+
+    Two lines of *this* invoice citing one filing is the other way to reach the
+    same refusal, and it needs its own words. The first line claims the filing,
+    so the second one meets ``is_billed`` already true and was told the filing
+    "is already on another invoice" — of an invoice that does not exist, on the
+    request that was creating this one. A practitioner reading that goes
+    looking through the ledger for the bill that supposedly has it, finds
+    nothing, and has no way to see that both offending lines are on the form in
+    front of them. Named here from the lines actually submitted rather than
+    from the flag, so the message says which of the two situations it is.
     """
     firms.lock_firm(db, invoice.firm_id)
     release_items(db, invoice)
     invoice.lines.clear()
 
+    claimed_here: set[uuid.UUID] = set()
     for line in lines:
         item = items.get(line.compliance_item_id) if line.compliance_item_id else None
         if item is not None:
+            if item.id in claimed_here:
+                raise BillingError(
+                    f"{line_description(item)} is on this invoice twice — "
+                    "a filing is billed on one line"
+                )
             if item.is_billed:
                 raise BillingError(
                     f"{line_description(item)} is already on another invoice"
                 )
             item.is_billed = True
+            claimed_here.add(item.id)
         invoice.lines.append(
             InvoiceLine(
                 compliance_item_id=line.compliance_item_id,
