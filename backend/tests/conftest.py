@@ -203,7 +203,18 @@ def gstin_for(pan: str, state_code: str = "27", entity_digit: str = "1") -> str:
 
 
 def make_client_payload(**overrides) -> dict:
-    """A sensible default client body; override the registration flags per test."""
+    """A sensible default client body; override the registration flags per test.
+
+    Overriding the PAN alone re-derives the GSTIN to wrap it. A GSTIN carries
+    the holder's PAN inside it, so the default one paired with somebody else's
+    PAN is a record the API now refuses — see
+    :func:`~app.schemas.common.check_pan_gstin_agreement` — and a test that
+    only wanted two clients to have different PANs should not have to know
+    that. A test passing both is taken at its word, including the tests whose
+    subject *is* the mismatch.
+    """
+    if "pan" in overrides and "gstin" not in overrides:
+        overrides["gstin"] = gstin_for(overrides["pan"]) if overrides["pan"] else None
     payload = {
         "name": "Nimbus Textiles Pvt Ltd",
         "entity_type": "private_limited",

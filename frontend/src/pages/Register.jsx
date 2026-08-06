@@ -8,6 +8,8 @@ const INITIAL = {
   icai_registration_number: '',
   firm_email: '',
   firm_phone: '',
+  pan: '',
+  gstin: '',
   city: '',
   state: '',
   plan: 'solo',
@@ -90,6 +92,36 @@ export default function Register() {
             <div className="field">
               <label htmlFor="firm_phone">Firm phone</label>
               <input id="firm_phone" value={form.firm_phone} onChange={update('firm_phone')} />
+            </div>
+            <div className="field">
+              <label htmlFor="pan">PAN</label>
+              <input
+                id="pan"
+                className="mono"
+                placeholder="AAACS1234F"
+                value={form.pan}
+                onChange={update('pan')}
+              />
+            </div>
+            {/*
+              Asked for here because it is what decides whether an invoice
+              carries CGST + SGST or IGST, and a practice that skips it raises
+              every bill under the intra-state fallback. It is optional — a firm
+              below the registration threshold has none — and firm settings can
+              add it later.
+            */}
+            <div className="field">
+              <label htmlFor="gstin">GSTIN</label>
+              <input
+                id="gstin"
+                className="mono"
+                placeholder="27AAACS1234F1ZS"
+                value={form.gstin}
+                onChange={update('gstin')}
+              />
+              <span className="small muted">
+                Sets the GST on your invoices. You can add it later in firm settings.
+              </span>
             </div>
             <div className="field">
               <label htmlFor="city">City</label>

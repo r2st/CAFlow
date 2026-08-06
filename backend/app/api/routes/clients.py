@@ -10,6 +10,7 @@ from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentFirm, CurrentPractitioner, DbSession, Manager
+from app.api.routes import reject_mismatched_pan_gstin
 from app.core import clock
 from app.core.search import LIKE_ESCAPE, contains_pattern
 from app.models.base import ComplianceStatus
@@ -409,7 +410,23 @@ def update_client(
                 detail=f"A client with PAN {updates['pan']} already exists",
             )
 
-    # After the two checks above and still before the flag is applied, so the
+    # Against the pair this patch leaves behind, not against what the caller
+    # happened to send. The schema compares the two only when one request
+    # carries both, and the ordinary way to break the pair is to move one of
+    # them: correcting a client's GSTIN alone, against a PAN already on the
+    # record, is exactly the mismatch that reconciles the firm's GSTR-1 against
+    # a different taxpayer. See ``check_pan_gstin_agreement``.
+    #
+    # After the duplicate check, because a PAN that another client already
+    # holds has to change whatever the GSTIN says, and being told that a GSTIN
+    # they did not touch disagrees with it sends them looking in the wrong
+    # place. The same ordering the three refusals below are in, for the reason
+    # :func:`create_client` sets out.
+    reject_mismatched_pan_gstin(
+        updates.get("pan", client.pan), updates.get("gstin", client.gstin)
+    )
+
+    # After the checks above and still before the flag is applied, so the
     # count is of what the firm holds without this one while the refusal a
     # caller is given is the one that actually stopped them; see
     # :func:`create_client` for what claiming first reported instead.

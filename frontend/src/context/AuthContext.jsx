@@ -108,6 +108,22 @@ export function AuthProvider({ children }) {
     return result
   }, [])
 
+  /**
+   * Save the firm's own particulars, and keep everything reading them current.
+   *
+   * The firm lives here rather than on the page that edits it, because more
+   * than one screen reads it — the team page shows the plan and the seat
+   * count, and the settings page shows which state the practice's supplies are
+   * taxed from. Patching the server and leaving this copy alone would leave
+   * those disagreeing with the record until the next reload, and the field
+   * that most needs to be right is the one deciding CGST/SGST against IGST.
+   */
+  const updateFirm = useCallback(async (payload) => {
+    const updated = await api.updateFirm(payload)
+    setFirm(updated)
+    return updated
+  }, [])
+
   // Signing out deliberately is not an expiry, and saying so would be a lie.
   const logout = useCallback(() => {
     setToken(null)
@@ -131,6 +147,7 @@ export function AuthProvider({ children }) {
       login,
       register,
       logout,
+      updateFirm,
     }),
     [
       practitioner,
@@ -142,6 +159,7 @@ export function AuthProvider({ children }) {
       login,
       register,
       logout,
+      updateFirm,
     ],
   )
 

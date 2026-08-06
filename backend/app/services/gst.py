@@ -196,6 +196,37 @@ def gstin_checksum_valid(gstin: str) -> bool:
         return False
 
 
+# Where the holder's PAN sits inside a GSTIN: characters 3 to 12 of the fifteen.
+PAN_IN_GSTIN = slice(2, 12)
+
+
+def pan_of_gstin(gstin: str | None) -> str | None:
+    """The PAN a GSTIN is built around, or None if it is not a GSTIN.
+
+    A GSTIN is not an identifier in its own right. It is the holder's PAN with
+    a state code in front of it and a registration serial, a fixed ``Z`` and a
+    check digit behind::
+
+        27 AAACR5055K 1 Z 5
+        ^^ ^^^^^^^^^^ ^ ^ ^
+        |  PAN        |  | check digit
+        |             |  literal Z
+        |             registration serial within the state
+        state code
+
+    That construction is what makes the two cross-checkable, and cross-checking
+    them is the only way either can be caught being wrong. Each is separately
+    well-formed — the PAN matches its pattern, the GSTIN matches its own and
+    passes its own check digit — so nothing about either one alone says that
+    the pair cannot both belong to one person. See
+    :func:`~app.schemas.common.check_pan_gstin_agreement` for why that pair
+    being wrong is expensive.
+    """
+    if not gstin or len(gstin) != 15:
+        return None
+    return gstin[PAN_IN_GSTIN]
+
+
 def client_place_of_supply(client) -> str | None:
     """Where a client's supply is placed, as a state code.
 

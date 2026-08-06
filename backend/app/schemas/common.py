@@ -13,6 +13,7 @@ from pydantic import (
     Field,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 from app.core.security import MAX_PASSWORD_BYTES
@@ -22,6 +23,7 @@ T = TypeVar("T")
 PAN_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$")
 TAN_RE = re.compile(r"^[A-Z]{4}[0-9]{5}[A-Z]$")
+PINCODE_RE = re.compile(r"^[1-9][0-9]{5}$")
 
 # C0/C1 controls except tab and newline, plus DEL. These have no business in a
 # client name or an invoice note: they corrupt log lines, CSV exports and
@@ -148,6 +150,23 @@ def validate_pan(value: str | None) -> str | None:
     return value
 
 
+def validate_pincode(value: str | None) -> str | None:
+    """Six digits, the first of which is not zero.
+
+    An Indian PIN is exactly that, and this one is not decorative: the firm's
+    address is a mandatory particular of a tax invoice under Rule 46(b), so
+    whatever is stored here is printed on every bill the practice issues. A
+    five-digit slip is the kind of thing nobody re-reads on their own
+    letterhead.
+    """
+    if value is None or value == "":
+        return None
+    value = value.strip().replace(" ", "")
+    if not PINCODE_RE.match(value):
+        raise ValueError("PIN code must be six digits, and cannot start with a zero")
+    return value
+
+
 def validate_gstin(value: str | None) -> str | None:
     """Check a GSTIN's shape, its state code, and its own check digit.
 
@@ -196,6 +215,72 @@ def validate_gstin(value: str | None) -> str | None:
             "the other fourteen, so at least one of them has been mistyped"
         )
     return value
+
+
+def check_pan_gstin_agreement(pan: str | None, gstin: str | None) -> None:
+    """Refuse a PAN and a GSTIN that cannot both belong to one person.
+
+    A GSTIN carries the holder's own PAN inside it — see
+    :func:`~app.services.gst.pan_of_gstin` — so the two fields on a record are
+    not independent. Each was validated alone and each passed: the PAN matches
+    its pattern, the GSTIN matches its own and clears its check digit. Nothing
+    up to here can notice that they name two different people.
+
+    Which is precisely what a mis-paste produces, and the ordinary way to reach
+    it is copying a GSTIN out of the previous client's record while entering
+    this one — the two fields sit next to each other on the form and the second
+    is fifteen characters nobody re-reads. The result is a record that looks
+    complete and validates clean, and both halves of it are used:
+
+    * the GSTIN goes onto the firm's GSTR-1 as the counterparty of every
+      invoice raised to this client. It belongs to a real, different taxpayer,
+      so it does not fail at the portal — it reconciles against *them*. The
+      client cannot claim the credit for a bill they have paid, and the other
+      taxpayer finds a supply they never received sitting in their 2B;
+    * the PAN is what the TDS return and every income-tax filing are keyed on,
+      and what this system already refuses to let two clients share.
+
+    Neither is recoverable from anything the firm holds, because there is no
+    third field to arbitrate between them. Caught at entry it is one character
+    to re-read; caught later it is a revised return.
+
+    Which of the two is wrong is the practitioner's to decide, so the refusal
+    names both and asserts neither. Nothing is checked when either is absent —
+    a client with only one of the two is ordinary and says nothing about the
+    other.
+    """
+    if not pan or not gstin:
+        return
+
+    # Imported here for the reason :func:`validate_gstin` imports it here.
+    from app.services.gst import pan_of_gstin
+
+    embedded = pan_of_gstin(gstin)
+    if embedded is None or embedded == pan:
+        return
+    raise ValueError(
+        f"GSTIN {gstin} is registered against PAN {embedded}, but the PAN on this "
+        f"record is {pan} — a GSTIN is the holder's own PAN with a state code in "
+        "front of it, so one of the two belongs to somebody else"
+    )
+
+
+def pan_matches_gstin(pan_field: str = "pan", gstin_field: str = "gstin"):
+    """A model validator refusing a PAN and GSTIN that disagree.
+
+    Attached to the schemas that carry both. Only the values actually supplied
+    are compared, which on a PATCH schema leaves the half the caller did not
+    send unexamined — an omitted field is ``None`` here and indistinguishable
+    from one being cleared. That half is checked against what is stored, at the
+    point the patch is applied, where the record is in hand; this catches the
+    single-request case immediately and with the field names attached.
+    """
+
+    def check(self):
+        check_pan_gstin_agreement(getattr(self, pan_field, None), getattr(self, gstin_field, None))
+        return self
+
+    return model_validator(mode="after")(check)
 
 
 def validate_tan(value: str | None) -> str | None:

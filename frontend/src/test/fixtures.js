@@ -21,14 +21,21 @@ export const FIRM = {
   phone: null,
   pan: null,
   gstin: null,
+  address_line1: null,
+  address_line2: null,
   city: 'Pune',
   state: 'Maharashtra',
+  pincode: null,
   plan: 'practice',
   is_active: true,
   created_at: '2026-01-01T00:00:00Z',
   // Derived from the plan by the server; null means unlimited.
   user_limit: 5,
   client_limit: 200,
+  // Resolved by the server exactly as an invoice resolves it — from the GSTIN
+  // if there is one, and the typed state otherwise. Null means nothing named a
+  // state, and every invoice then falls back to intra-state CGST/SGST.
+  place_of_supply_label: '27-Maharashtra',
 }
 
 /** A team member. Defaults to a junior, since that is the common case. */

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import EmailStr, Field, field_validator
+from pydantic import EmailStr, Field, computed_field, field_validator
 
 from app.models.base import FirmPlan, PractitionerRole
 from app.schemas.common import (
@@ -13,8 +13,10 @@ from app.schemas.common import (
     Password,
     SanitizedModel,
     not_clearable,
+    pan_matches_gstin,
     validate_gstin,
     validate_pan,
+    validate_pincode,
 )
 
 
@@ -25,8 +27,14 @@ class FirmRegisterRequest(SanitizedModel):
     firm_phone: str | None = Field(default=None, max_length=20)
     pan: str | None = None
     gstin: str | None = None
+    # The supplier's address, which is a mandatory particular of a tax invoice
+    # under Rule 46(b). The columns were always there and sign-up never asked,
+    # so every firm reached its first invoice without one.
+    address_line1: str | None = Field(default=None, max_length=255)
+    address_line2: str | None = Field(default=None, max_length=255)
     city: str | None = Field(default=None, max_length=100)
     state: str | None = Field(default=None, max_length=100)
+    pincode: str | None = None
     plan: FirmPlan = FirmPlan.SOLO
 
     # The first practitioner — becomes the firm owner.
@@ -37,6 +45,60 @@ class FirmRegisterRequest(SanitizedModel):
 
     _validate_pan = field_validator("pan")(validate_pan)
     _validate_gstin = field_validator("gstin")(validate_gstin)
+    _validate_pincode = field_validator("pincode")(validate_pincode)
+    _pan_matches_gstin = pan_matches_gstin()
+
+
+class FirmUpdate(SanitizedModel):
+    """The firm's own profile, as its owner or a partner may correct it.
+
+    Everything here was write-once until now: the firm was built from the
+    sign-up form and no endpoint could touch it again. That is a stranger gap
+    than it sounds, because two of these fields are not description — they
+    decide the tax on every invoice the practice raises.
+
+    :func:`~app.services.gst.resolve_supply` compares the firm's state with the
+    client's to decide whether a supply is taxed as CGST plus SGST or as IGST,
+    and it takes the firm's state from its GSTIN first. Sign-up never asked for
+    a GSTIN, so no firm had one, and none could be added: every supply was
+    undetermined, every invoice fell back to intra-state, and a practice billing
+    a client in the next state issued CGST/SGST on what is an IGST supply. The
+    client cannot claim that credit. They find out from their own 2B, months
+    later, and it is the firm's invoice that has to be revised.
+
+    The address is the same shape of problem in a quieter place: Rule 46
+    requires the supplier's address and PIN code on a tax invoice, and there
+    was nowhere to put either.
+
+    What is deliberately *not* here is the plan and the standing. ``plan`` is
+    what the client and user limits are read from, so accepting it on this
+    endpoint would let any firm admin lift their own limits by sending a
+    field — the plan changes when it is paid for, not when it is patched.
+    ``is_active`` switches the whole firm off, and every sign-in checks it:
+    a firm that patched its own flag to false would lock out its owner along
+    with everyone else, with no one left holding the standing to undo it.
+    """
+
+    name: str | None = Field(default=None, min_length=2, max_length=255)
+    icai_registration_number: str | None = Field(default=None, max_length=64)
+    email: EmailStr | None = None
+    phone: str | None = Field(default=None, max_length=20)
+    pan: str | None = None
+    gstin: str | None = None
+    address_line1: str | None = Field(default=None, max_length=255)
+    address_line2: str | None = Field(default=None, max_length=255)
+    city: str | None = Field(default=None, max_length=100)
+    state: str | None = Field(default=None, max_length=100)
+    pincode: str | None = None
+
+    _validate_pan = field_validator("pan")(validate_pan)
+    _validate_gstin = field_validator("gstin")(validate_gstin)
+    _validate_pincode = field_validator("pincode")(validate_pincode)
+    # Only catches a patch carrying both halves; one that moves a single half is
+    # checked against what is stored, in ``update_firm``.
+    _pan_matches_gstin = pan_matches_gstin()
+    # A firm always has a name and a contact address; the rest may be emptied.
+    _no_nulls = not_clearable("name", "email")
 
 
 class LoginRequest(SanitizedModel):
@@ -90,8 +152,11 @@ class FirmOut(ORMModel):
     phone: str | None
     pan: str | None
     gstin: str | None
+    address_line1: str | None
+    address_line2: str | None
     city: str | None
     state: str | None
+    pincode: str | None
     plan: FirmPlan
     is_active: bool
     created_at: datetime
@@ -100,6 +165,32 @@ class FirmOut(ORMModel):
     # by being refused at the point of adding someone. ``None`` is unlimited.
     user_limit: int | None
     client_limit: int | None
+
+    @computed_field
+    @property
+    def place_of_supply_label(self) -> str | None:
+        """``"27-Maharashtra"`` — the state this firm's supplies are made from.
+
+        The same resolution every invoice is taxed by, answered here so a firm
+        can see it before it is printed on one rather than afterwards. It is
+        the GSTIN's own state code when there is a GSTIN, and the typed state
+        name otherwise; see :func:`~app.services.gst.firm_state_code`.
+
+        ``None`` means neither field named a state, which is not cosmetic: with
+        no supplier state there is nothing to compare a client's against, so
+        every invoice the firm raises falls back to intra-state CGST/SGST
+        whatever the client's own state says. Sent so the settings screen can
+        say that plainly, since the alternative is a firm discovering it from a
+        client who could not claim the credit.
+
+        Resolved by ``firm_state_code`` itself rather than by repeating what it
+        does, so this cannot answer one thing while an invoice is taxed by
+        another. It reads ``.gstin`` and ``.state``, which this schema carries
+        under the same names as the model does.
+        """
+        from app.services.gst import firm_state_code, place_of_supply_label
+
+        return place_of_supply_label(firm_state_code(self))
 
 
 class TokenResponse(SanitizedModel):

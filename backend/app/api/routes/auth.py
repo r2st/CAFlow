@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentFirm, CurrentPractitioner, DbSession, FirmAdmin
+from app.api.routes import reject_mismatched_pan_gstin
 from app.config import settings
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.base import PractitionerRole
@@ -17,6 +18,7 @@ from app.models.firm import Firm, Practitioner
 from app.schemas.auth import (
     FirmOut,
     FirmRegisterRequest,
+    FirmUpdate,
     LoginRequest,
     PractitionerCreate,
     PractitionerOut,
@@ -111,8 +113,11 @@ def register_firm(payload: FirmRegisterRequest, request: Request, db: DbSession)
         phone=payload.firm_phone,
         pan=payload.pan,
         gstin=payload.gstin,
+        address_line1=payload.address_line1,
+        address_line2=payload.address_line2,
         city=payload.city,
         state=payload.state,
+        pincode=payload.pincode,
         plan=payload.plan,
     )
     db.add(firm)
@@ -194,6 +199,48 @@ def read_me(practitioner: CurrentPractitioner):
 
 @router.get("/firm", response_model=FirmOut, summary="The signed-in practitioner's firm")
 def read_firm(firm: CurrentFirm):
+    return firm
+
+
+@router.patch("/firm", response_model=FirmOut, summary="Update the firm's own profile")
+def update_firm(payload: FirmUpdate, admin: FirmAdmin, firm: CurrentFirm, db: DbSession):
+    """Correct the firm's own particulars. Restricted to owners and partners.
+
+    Owners and partners rather than managers, which is where the rest of firm
+    administration already sits. A manager commits the firm to individual
+    things — an invoice, a client, a payment — while this decides how *every*
+    invoice is taxed and what address is printed on all of them, which is the
+    same standing as team management and the audit trail.
+
+    See :class:`~app.schemas.auth.FirmUpdate` for what is editable and, more
+    to the point, what is not: the plan and the firm's standing are not fields
+    a firm may set on itself.
+    """
+    updates = payload.model_dump(exclude_unset=True)
+    # Against the pair the patch leaves behind rather than what it carried. A
+    # firm entering its GSTIN for the first time — which is the ordinary use of
+    # this endpoint — sends that field alone, and the PAN it has to agree with
+    # is the one already on the record.
+    reject_mismatched_pan_gstin(updates.get("pan", firm.pan), updates.get("gstin", firm.gstin))
+
+    before = audit.snapshot(firm, updates)
+    for key, value in updates.items():
+        setattr(firm, key, value.lower() if key == "email" else value)
+
+    audit.record(
+        db,
+        action="firm.update",
+        entity_type="firm",
+        entity_id=firm.id,
+        actor=admin,
+        summary=f"Updated the firm profile for {firm.name}",
+        # Read off the record after the patch, not off the request body, for
+        # the reason every other handler here does: the email is lowercased on
+        # the way in, so the payload is not what was stored.
+        changes=audit.diff(before, audit.snapshot(firm, updates)),
+    )
+    db.commit()
+    db.refresh(firm)
     return firm
 
 

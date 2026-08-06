@@ -271,3 +271,188 @@ class TestRecalculateCarriesTheSplit:
             == invoice.tax_paise
         )
         assert invoice.subtotal_paise + invoice.tax_paise == invoice.total_paise
+
+
+class TestThePanInsideAGstin:
+    """A GSTIN is the holder's PAN with a state code in front of it.
+
+    Which makes the PAN and GSTIN on one record two statements of the same
+    fact, and a record carrying two different ones has a mistake in it that
+    neither field can be caught making alone.
+    """
+
+    def test_the_pan_is_read_out_of_a_gstin(self):
+        assert gst.pan_of_gstin("27AAPFU0939F1ZV") == "AAPFU0939F"
+
+    @pytest.mark.parametrize("gstin", VALID_GSTINS)
+    def test_what_comes_out_is_always_a_well_formed_pan(self, gstin: str):
+        """The slice is not an approximation — a GSTIN's shape guarantees it."""
+        from app.schemas.common import PAN_RE
+
+        assert PAN_RE.match(gst.pan_of_gstin(gstin))
+
+    @pytest.mark.parametrize("value", [None, "", "27AAPFU0939F1Z", "nonsense"])
+    def test_anything_that_is_not_a_gstin_yields_nothing(self, value):
+        """Rather than a confident slice of a string that is not one."""
+        assert gst.pan_of_gstin(value) is None
+
+    def test_a_gstin_built_around_a_pan_agrees_with_it(self):
+        from tests.conftest import gstin_for
+
+        pan = "AABCN2345P"
+        assert gst.pan_of_gstin(gstin_for(pan)) == pan
+
+
+class TestAPanAndGstinThatDisagree:
+    """Both are separately valid; only together are they wrong.
+
+    The ordinary way to produce this is pasting a GSTIN from the previous
+    client's record. It validates clean — the pattern matches, the state code
+    is real, the check digit is right — and then reconciles the firm's GSTR-1
+    against a taxpayer who is not this client.
+    """
+
+    def test_a_matching_pair_is_accepted(self):
+        from app.schemas.common import check_pan_gstin_agreement
+
+        check_pan_gstin_agreement("AAPFU0939F", "27AAPFU0939F1ZV")
+
+    def test_a_mismatched_pair_is_refused(self):
+        from app.schemas.common import check_pan_gstin_agreement
+
+        with pytest.raises(ValueError, match="belongs to somebody else"):
+            check_pan_gstin_agreement("AABCN2345P", "27AAPFU0939F1ZV")
+
+    def test_the_refusal_names_both_pans_rather_than_choosing_one(self):
+        """Which of the two is wrong is the practitioner's to decide."""
+        from app.schemas.common import check_pan_gstin_agreement
+
+        with pytest.raises(ValueError) as excinfo:
+            check_pan_gstin_agreement("AABCN2345P", "27AAPFU0939F1ZV")
+        message = str(excinfo.value)
+        assert "AAPFU0939F" in message and "AABCN2345P" in message
+
+    @pytest.mark.parametrize(
+        ("pan", "gstin"),
+        [
+            (None, "27AAPFU0939F1ZV"),
+            ("AAPFU0939F", None),
+            (None, None),
+            ("", ""),
+        ],
+    )
+    def test_one_of_the_two_alone_says_nothing_about_the_other(self, pan, gstin):
+        """A client holding only one of them is ordinary, not a contradiction."""
+        from app.schemas.common import check_pan_gstin_agreement
+
+        check_pan_gstin_agreement(pan, gstin)
+
+    def test_a_client_cannot_be_created_with_the_pair_broken(self, client, auth_headers):
+        from tests.conftest import make_client_payload
+
+        response = client.post(
+            f"{API}/clients",
+            json=make_client_payload(pan="AABCN2345P", gstin="27AAPFU0939F1ZV"),
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+        assert "belongs to somebody else" in response.text
+
+    def test_a_firm_cannot_register_with_the_pair_broken(self, client):
+        from tests.conftest import FIRM_REGISTRATION
+
+        response = client.post(
+            f"{API}/auth/register",
+            json={**FIRM_REGISTRATION, "pan": "AAACS1234F", "gstin": "27AAPFU0939F1ZV"},
+        )
+        assert response.status_code == 422, response.text
+
+    def test_moving_only_the_gstin_is_checked_against_the_stored_pan(
+        self, client, auth_headers, client_id
+    ):
+        """The half the schema cannot see.
+
+        The request carries one field, so nothing in it contradicts anything in
+        it. The contradiction is with the record, and this is the shape the
+        mistake actually arrives in — correcting a client's GSTIN months after
+        the PAN was entered.
+        """
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            json={"gstin": "27AAPFU0939F1ZV"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+        assert "belongs to somebody else" in response.text
+
+    def test_moving_only_the_pan_is_checked_against_the_stored_gstin(
+        self, client, auth_headers, client_id
+    ):
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            json={"pan": "AAPFU0939F"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+
+    def test_moving_both_together_is_allowed(self, client, auth_headers, client_id):
+        """A client re-registering under a new PAN changes both, and must be able to."""
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            json={"pan": "AAPFU0939F", "gstin": "27AAPFU0939F1ZV"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["client"]["gstin"] == "27AAPFU0939F1ZV"
+
+    def test_a_patch_touching_neither_is_unaffected(
+        self, client, auth_headers, client_id
+    ):
+        """The check reads the stored pair, so every other edit passes through it."""
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            json={"notes": "Renewal due in March"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+    def test_clearing_the_gstin_leaves_nothing_to_disagree_with(
+        self, client, auth_headers, client_id
+    ):
+        """A client surrendering their registration keeps their PAN."""
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            json={"gstin": None, "gst_registered": False},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["client"]["gstin"] is None
+
+    def test_a_pan_another_client_holds_is_reported_before_the_gstin(
+        self, client, auth_headers, client_id
+    ):
+        """Which of two refusals a caller is given.
+
+        Setting a PAN that another client already has breaks the stored GSTIN
+        too, so both are true at once. The duplicate is the one that stopped
+        them: the PAN has to change whatever the GSTIN says, and being sent to
+        look at a field they never touched is being sent to the wrong place.
+        """
+        from tests.conftest import make_client_payload
+
+        assert (
+            client.post(
+                f"{API}/clients",
+                json=make_client_payload(name="Kaveri Exports LLP", pan="AAPFU0939F"),
+                headers=auth_headers,
+            ).status_code
+            == 201
+        )
+
+        response = client.patch(
+            f"{API}/clients/{client_id}",
+            json={"pan": "AAPFU0939F"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 409, response.text
+        assert "already exists" in response.json()["detail"]

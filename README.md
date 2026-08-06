@@ -173,9 +173,41 @@ does the day-to-day work — updating filing status, uploading documents, creati
 and updating tasks. `manager` adds the paths that commit the firm to something:
 creating and deactivating clients, granting and revoking portal access, issuing
 invoices and recording payments, generating tasks, queueing and cancelling
-reminders. `partner` and `owner` additionally reach team management and the
-audit trail. Role checks live in `api/deps.py` as dependency factories, so an
-endpoint declares who may call it in its signature rather than in its body.
+reminders. `partner` and `owner` additionally reach team management, the firm's
+own profile, and the audit trail. Role checks live in `api/deps.py` as
+dependency factories, so an endpoint declares who may call it in its signature
+rather than in its body.
+
+**The firm's own particulars decide the tax on its invoices.** `resolve_supply`
+compares the firm's state with the client's to choose between CGST plus SGST
+and IGST, and it takes the firm's state from its GSTIN before the typed state
+name. The firm was built from the sign-up form and no endpoint could touch it
+afterwards — while the form never asked for a GSTIN at all, so no firm had one
+and none could be added. Every supply was therefore undetermined, and a practice
+billing a client across a state line issued CGST/SGST on what is an IGST supply:
+credit the client cannot take, surfacing months later against *them*. `PATCH
+/auth/firm` closes it, along with the address and PIN code Rule 46 requires on a
+tax invoice and which had nowhere to be entered either. `FirmOut` carries the
+resolved `place_of_supply_label` so a firm reads its own tax position off the
+settings screen rather than off a client's complaint.
+
+The plan and the firm's standing are deliberately absent from `FirmUpdate`.
+`plan` is where the client and user limits are read from, so accepting it would
+let any firm admin lift its own limits by sending a field; `is_active` is
+checked on every sign-in, so a firm patching its own flag would lock out its
+owner with nobody left holding the standing to undo it.
+
+**A GSTIN carries a PAN inside it.** Characters 3 to 12 are the holder's own
+PAN, which makes the two fields on a client or firm record two statements of
+one fact. Each validates cleanly alone — the pattern matches, the state code is
+real, the check digit agrees — so a GSTIN pasted from the previous client's
+record produces a complete-looking record that reconciles the firm's GSTR-1
+against a different taxpayer, and the client cannot claim credit for a bill they
+have paid. `check_pan_gstin_agreement` refuses the pair at entry and names both
+without asserting which is wrong. A PATCH moving one half alone is checked
+against the stored other half, in the route, since that is the only place the
+pair is whole — and it runs *after* the duplicate-PAN check, because a PAN
+another client already holds has to change whatever the GSTIN says.
 
 **Audit trail.** Every mutating endpoint appends to `audit_log` through
 `services.audit`, recording the actor, the action, the record touched and a

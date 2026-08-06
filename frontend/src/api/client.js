@@ -257,6 +257,7 @@ export const api = {
     request('/auth/login', { method: 'POST', body: { email, password }, auth: false }),
   me: () => request('/auth/me'),
   firm: () => request('/auth/firm'),
+  updateFirm: (payload) => request('/auth/firm', { method: 'PATCH', body: payload }),
   listPractitioners: () => request('/auth/practitioners'),
   addPractitioner: (payload) => request('/auth/practitioners', { method: 'POST', body: payload }),
   updatePractitioner: (id, payload) =>

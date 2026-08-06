@@ -16,6 +16,7 @@ from app.schemas.common import (
     SanitizedModel,
     ServiceFees,
     not_clearable,
+    pan_matches_gstin,
     validate_gstin,
     validate_pan,
     validate_tan,
@@ -99,6 +100,9 @@ class ClientBase(SanitizedModel):
     _validate_pan = field_validator("pan")(validate_pan)
     _validate_gstin = field_validator("gstin")(validate_gstin)
     _validate_tan = field_validator("tan")(validate_tan)
+    # Both are on the form, and a GSTIN carries a PAN inside it. See
+    # :func:`~app.schemas.common.check_pan_gstin_agreement`.
+    _pan_matches_gstin = pan_matches_gstin()
 
 
 class ClientCreate(ClientBase):
@@ -140,6 +144,10 @@ class ClientUpdate(SanitizedModel):
     _validate_pan = field_validator("pan")(validate_pan)
     _validate_gstin = field_validator("gstin")(validate_gstin)
     _validate_tan = field_validator("tan")(validate_tan)
+    # Only catches a patch carrying both. One that moves a single half is
+    # checked against the stored other half in ``update_client``, which is the
+    # only place the pair is whole.
+    _pan_matches_gstin = pan_matches_gstin()
     # The identity and registration fields back ``NOT NULL`` columns, so a null
     # here is not "clear it" — there is nothing to clear it to. The contact
     # fields above are genuinely optional and stay clearable.

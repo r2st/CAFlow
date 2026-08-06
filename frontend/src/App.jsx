@@ -17,6 +17,7 @@ import Login from './pages/Login'
 import Portal from './pages/Portal'
 import Register from './pages/Register'
 import Reminders from './pages/Reminders'
+import Settings from './pages/Settings'
 import Tasks from './pages/Tasks'
 import Team from './pages/Team'
 
@@ -71,6 +72,10 @@ export default function App() {
           {/* Readable by the whole firm — everyone benefits from knowing who
               is on the team. The controls that change it are the admin's. */}
           <Route path="/team" element={<Team />} />
+          {/* Reachable by everyone for the same reason the audit trail is:
+              the page itself explains who may change the firm's particulars,
+              which is more use than a redirect pretending it is not there. */}
+          <Route path="/settings" element={<Settings />} />
           {/* The server is the authority on who may read this; the route
               stays reachable so a 403 explains itself rather than a redirect
               silently pretending the page does not exist. */}

@@ -57,6 +57,9 @@ export default function Layout() {
           {/* Offered only to the roles the API will actually serve — a link
               that always 403s is worse than no link. */}
           {isFirmAdmin && <NavLink to="/audit">Audit trail</NavLink>}
+          {/* Same condition, and the same reason: the firm's registration and
+              address are a partner's to change. */}
+          {isFirmAdmin && <NavLink to="/settings">Firm settings</NavLink>}
         </nav>
 
         <div className="sidebar-footer">
