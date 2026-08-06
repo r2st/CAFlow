@@ -37,6 +37,13 @@ const ROUTE_TITLES = [
   ['/billing', 'Billing'],
   ['/team', 'Team'],
   ['/audit', 'Audit trail'],
+  // Both were missing, and a missing entry is not a cosmetic one: the tab title
+  // stays on the bare "CAFlow" so the history entry cannot be told from any
+  // other, and the live region is set to the empty string — so navigating here
+  // announces nothing at all and a screen-reader user is left on a page that
+  // never said what it was.
+  ['/settings', 'Firm settings'],
+  ['/account', 'Your account'],
   ['/', 'Dashboard'],
 ]
 

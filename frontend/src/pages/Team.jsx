@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import api from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import {
@@ -190,11 +190,93 @@ function AddMemberForm({ onAdd, onCancel, busy }) {
   )
 }
 
-function MemberRow({ member, isSelf, canManage, onChangeRole, onSetActive, busy }) {
+/**
+ * Set a new password for a member who cannot sign in.
+ *
+ * A forgotten password had one route back before this endpoint existed, and it
+ * was not one: deactivate the account and create a fresh one, which loses the
+ * member's sign-in identity, hands their clients and open filings back to
+ * unassigned, and spends a plan seat on the duplicate.
+ *
+ * Offered only where the server will serve it, which is the rule the rest of
+ * this page follows. Never on the owner — a partner setting the owner's password
+ * would be a partner taking the firm — and never on yourself, because a reset
+ * asks for no current password and pointing it at your own account is a way
+ * around the one check that protects it. Your own is on the account page.
+ */
+function ResetPasswordForm({ member, onReset, onCancel, busy }) {
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+
+  const submit = async (event) => {
+    event.preventDefault()
+    setError('')
+    if (password.length < 8) {
+      setError('The password needs at least 8 characters.')
+      return
+    }
+    try {
+      await onReset(member, password)
+      setPassword('')
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  return (
+    <tr>
+      <td colSpan={6}>
+        <form className="card-body" onSubmit={submit}>
+          <Alert kind="error" onDismiss={() => setError('')}>
+            {error}
+          </Alert>
+          <div className="field">
+            <label htmlFor={`reset-${member.id}`}>New password for {member.full_name}</label>
+            <input
+              id={`reset-${member.id}`}
+              type="password"
+              required
+              minLength={8}
+              autoComplete="new-password"
+              value={password}
+              disabled={busy}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+            <span className="small muted">
+              At least 8 characters. Share it with them directly, and ask them to change it on
+              their account page. Everywhere {member.full_name} is currently signed in will be
+              signed out.
+            </span>
+          </div>
+          <div className="button-row">
+            <button type="submit" disabled={busy}>
+              {busy ? 'Setting…' : 'Set password'}
+            </button>
+            <button type="button" className="secondary" onClick={onCancel} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </td>
+    </tr>
+  )
+}
+
+function MemberRow({
+  member,
+  isSelf,
+  canManage,
+  onChangeRole,
+  onSetActive,
+  onStartReset,
+  busy,
+}) {
   // The server refuses to let anyone edit the owner, and refuses to let the
   // owner edit their own standing. Either way the controls would only produce
   // an error, so the row states the reason instead of offering them.
   const locked = member.role === 'owner'
+  // The server refuses a reset on the owner and on the caller's own account.
+  const resettable = canManage && !locked && !isSelf
 
   return (
     <tr className={member.is_active ? '' : 'muted'}>
@@ -239,14 +321,26 @@ function MemberRow({ member, isSelf, canManage, onChangeRole, onSetActive, busy 
         {!canManage || locked ? (
           <span className="small muted">{locked ? 'Firm owner' : '—'}</span>
         ) : (
-          <button
-            type="button"
-            className="secondary small"
-            disabled={busy}
-            onClick={() => onSetActive(member, !member.is_active)}
-          >
-            {member.is_active ? 'Deactivate' : 'Reactivate'}
-          </button>
+          <div className="button-row">
+            <button
+              type="button"
+              className="secondary small"
+              disabled={busy}
+              onClick={() => onSetActive(member, !member.is_active)}
+            >
+              {member.is_active ? 'Deactivate' : 'Reactivate'}
+            </button>
+            {resettable && (
+              <button
+                type="button"
+                className="secondary small"
+                disabled={busy}
+                onClick={() => onStartReset(member)}
+              >
+                Reset password
+              </button>
+            )}
+          </div>
         )}
       </td>
     </tr>
@@ -260,6 +354,9 @@ export default function Team() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [adding, setAdding] = useState(false)
+  // The member whose password is being reset, if any — one at a time, so the
+  // form is unambiguously about the row it is under.
+  const [resetting, setResetting] = useState(null)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
@@ -330,6 +427,27 @@ export default function Team() {
     [patchMember],
   )
 
+  // The failure is rethrown rather than swallowed into the page alert: the form
+  // is what the admin is looking at, and it keeps the password they typed.
+  const resetPassword = useCallback(
+    async (member, password) => {
+      setBusy(true)
+      setError('')
+      setNotice('')
+      try {
+        await api.resetPractitionerPassword(member.id, password)
+        setResetting(null)
+        setNotice(
+          `${member.full_name} can sign in with the new password. Everywhere they were signed in has been signed out.`,
+        )
+        await load()
+      } finally {
+        setBusy(false)
+      }
+    },
+    [load],
+  )
+
   const activeCount = (members ?? []).filter((member) => member.is_active).length
   const limit = firm?.user_limit ?? null
   const seatsFull = limit !== null && activeCount >= limit
@@ -398,15 +516,25 @@ export default function Team() {
               </thead>
               <tbody>
                 {members.map((member) => (
-                  <MemberRow
-                    key={member.id}
-                    member={member}
-                    isSelf={member.id === practitioner?.id}
-                    canManage={canManage}
-                    onChangeRole={changeRole}
-                    onSetActive={setActive}
-                    busy={busy}
-                  />
+                  <Fragment key={member.id}>
+                    <MemberRow
+                      member={member}
+                      isSelf={member.id === practitioner?.id}
+                      canManage={canManage}
+                      onChangeRole={changeRole}
+                      onSetActive={setActive}
+                      onStartReset={setResetting}
+                      busy={busy}
+                    />
+                    {resetting?.id === member.id && (
+                      <ResetPasswordForm
+                        member={member}
+                        onReset={resetPassword}
+                        onCancel={() => setResetting(null)}
+                        busy={busy}
+                      />
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

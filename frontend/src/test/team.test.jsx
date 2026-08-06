@@ -304,3 +304,108 @@ describe('Loading and failure', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Service unavailable')
   })
 })
+
+describe('Resetting a member’s password', () => {
+  /**
+   * The control is offered exactly where the server will serve it. A reset asks
+   * for no current password, which is why it is fenced on three sides: firm
+   * admins only, never the owner — a partner setting the owner's password would
+   * be a partner taking the firm — and never your own, which would be a way
+   * round the one check protecting a stolen token from taking the account.
+   */
+
+  it('is offered on another member’s row', async () => {
+    renderTeam()
+
+    const row = await rowFor('Vikram Rao')
+    expect(within(row).getByRole('button', { name: 'Reset password' })).toBeInTheDocument()
+  })
+
+  it('is not offered on your own row', async () => {
+    renderTeam({ me: PARTNER, roster: [OWNER, PARTNER, JUNIOR] })
+
+    const row = await rowFor('Meera Iyer')
+    expect(within(row).queryByRole('button', { name: 'Reset password' })).toBeNull()
+  })
+
+  it('is not offered on the owner’s row', async () => {
+    renderTeam({ me: PARTNER, roster: [OWNER, PARTNER] })
+
+    const row = await rowFor('Anita Sharma')
+    expect(within(row).queryByRole('button', { name: 'Reset password' })).toBeNull()
+  })
+
+  it('is not offered to someone who cannot manage the team', async () => {
+    renderTeam({ me: JUNIOR, roster: [OWNER, JUNIOR] })
+
+    await rowFor('Anita Sharma')
+    expect(screen.queryByRole('button', { name: 'Reset password' })).toBeNull()
+  })
+
+  it('sends the new password for that member', async () => {
+    const user = userEvent.setup()
+    const reset = vi.spyOn(api, 'resetPractitionerPassword').mockResolvedValue(JUNIOR)
+    renderTeam()
+
+    const row = await rowFor('Vikram Rao')
+    await user.click(within(row).getByRole('button', { name: 'Reset password' }))
+    await user.type(
+      screen.getByLabelText('New password for Vikram Rao'),
+      'a-fresh-temporary-one',
+    )
+    await user.click(screen.getByRole('button', { name: 'Set password' }))
+
+    expect(reset).toHaveBeenCalledWith(JUNIOR.id, 'a-fresh-temporary-one')
+  })
+
+  it('says their live sessions have ended', async () => {
+    /** A reset is what a firm does about an account it thinks is compromised. */
+    const user = userEvent.setup()
+    vi.spyOn(api, 'resetPractitionerPassword').mockResolvedValue(JUNIOR)
+    renderTeam()
+
+    const row = await rowFor('Vikram Rao')
+    await user.click(within(row).getByRole('button', { name: 'Reset password' }))
+    await user.type(
+      screen.getByLabelText('New password for Vikram Rao'),
+      'a-fresh-temporary-one',
+    )
+    await user.click(screen.getByRole('button', { name: 'Set password' }))
+
+    expect(await screen.findByText(/has been signed out/i)).toBeInTheDocument()
+  })
+
+  it('refuses a short password without calling the server', async () => {
+    const user = userEvent.setup()
+    const reset = vi.spyOn(api, 'resetPractitionerPassword')
+    renderTeam()
+
+    const row = await rowFor('Vikram Rao')
+    await user.click(within(row).getByRole('button', { name: 'Reset password' }))
+    await user.type(screen.getByLabelText('New password for Vikram Rao'), 'short')
+    await user.click(screen.getByRole('button', { name: 'Set password' }))
+
+    expect(reset).not.toHaveBeenCalled()
+  })
+
+  it('keeps a refusal on the form rather than losing what was typed', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'resetPractitionerPassword').mockRejectedValue(
+      new Error('The firm owner’s password cannot be reset by anyone else'),
+    )
+    renderTeam()
+
+    const row = await rowFor('Vikram Rao')
+    await user.click(within(row).getByRole('button', { name: 'Reset password' }))
+    await user.type(
+      screen.getByLabelText('New password for Vikram Rao'),
+      'a-fresh-temporary-one',
+    )
+    await user.click(screen.getByRole('button', { name: 'Set password' }))
+
+    expect(await screen.findByText(/cannot be reset by anyone else/)).toBeInTheDocument()
+    expect(screen.getByLabelText('New password for Vikram Rao')).toHaveValue(
+      'a-fresh-temporary-one',
+    )
+  })
+})

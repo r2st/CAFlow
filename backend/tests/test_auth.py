@@ -1115,3 +1115,435 @@ class TestWhoMayAdministerAFirm:
     def test_managers_and_juniors_may_not(self):
         for role in (PractitionerRole.MANAGER, PractitionerRole.JUNIOR):
             assert Practitioner(role=role).can_manage_firm is False
+
+
+class TestAPasswordCanBeChanged:
+    """The credential half of the system had no moving parts at all.
+
+    A password was chosen once — by the owner at sign-up, or by an admin typing
+    one into the *Add team member* form — and nothing could ever replace it. So
+    whoever created an account went on knowing its password for the life of the
+    account, and a credential that leaked could be answered only by deactivating
+    the person it belonged to.
+    """
+
+    def test_a_member_can_replace_their_own_password(self, client, auth_headers):
+        response = client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": FIRM_REGISTRATION["owner_password"],
+                "new_password": "a-quite-different-passphrase",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+        signed_in = client.post(
+            f"{API}/auth/login",
+            json={
+                "email": FIRM_REGISTRATION["owner_email"],
+                "password": "a-quite-different-passphrase",
+            },
+        )
+        assert signed_in.status_code == 200, signed_in.text
+
+    def test_the_old_password_stops_working(self, client, auth_headers):
+        client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": FIRM_REGISTRATION["owner_password"],
+                "new_password": "a-quite-different-passphrase",
+            },
+            headers=auth_headers,
+        )
+        refused = client.post(
+            f"{API}/auth/login",
+            json={
+                "email": FIRM_REGISTRATION["owner_email"],
+                "password": FIRM_REGISTRATION["owner_password"],
+            },
+        )
+        assert refused.status_code == 401, refused.text
+
+    def test_the_wrong_current_password_is_refused(self, client, auth_headers):
+        """A bearer token is not proof of knowing the password.
+
+        A token is handed over on every request and is exactly what gets taken.
+        Without this check whoever holds one locks the real member out of their
+        own account with a single request.
+        """
+        response = client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": "not-the-password",
+                "new_password": "a-quite-different-passphrase",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 401, response.text
+        assert "Current password" in response.json()["detail"]
+
+        # And nothing moved: the password in force is still the original.
+        assert (
+            client.post(
+                f"{API}/auth/login",
+                json={
+                    "email": FIRM_REGISTRATION["owner_email"],
+                    "password": FIRM_REGISTRATION["owner_password"],
+                },
+            ).status_code
+            == 200
+        )
+
+    def test_reusing_the_same_password_is_refused(self, client, auth_headers):
+        """Answering 200 would report a rotation that did not happen."""
+        response = client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": FIRM_REGISTRATION["owner_password"],
+                "new_password": FIRM_REGISTRATION["owner_password"],
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+        assert "same as the current one" in response.json()["detail"]
+
+    def test_a_short_new_password_is_refused_by_the_schema(self, client, auth_headers):
+        response = client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": FIRM_REGISTRATION["owner_password"],
+                "new_password": "short",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+
+    def test_a_current_password_keeps_its_whitespace(self, client, auth_headers):
+        """Secrets are exempt from the inbound sanitiser; both halves must be.
+
+        ``SanitizedModel`` strips every inbound string, and a password chosen
+        with a leading or trailing space would then never match the hash it was
+        stored under — the member would be told their own password is wrong on
+        the one screen that exists to change it.
+        """
+        spaced = "  a-spaced-passphrase  "
+        client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": FIRM_REGISTRATION["owner_password"],
+                "new_password": spaced,
+            },
+            headers=auth_headers,
+        )
+        fresh = client.post(
+            f"{API}/auth/login",
+            json={"email": FIRM_REGISTRATION["owner_email"], "password": spaced},
+        )
+        assert fresh.status_code == 200, fresh.text
+
+        again = client.post(
+            f"{API}/auth/change-password",
+            json={"current_password": spaced, "new_password": "yet-another-passphrase"},
+            headers={"Authorization": f"Bearer {fresh.json()['access_token']}"},
+        )
+        assert again.status_code == 200, again.text
+
+    def test_it_needs_a_signed_in_caller(self, client):
+        response = client.post(
+            f"{API}/auth/change-password",
+            json={"current_password": "x", "new_password": "a-long-enough-one"},
+        )
+        assert response.status_code == 401, response.text
+
+
+class TestChangingAPasswordEndsTheOldSessions:
+    """Rotating a credential has to reach the tokens already issued.
+
+    An access token lives twelve hours. Without a cut-off, someone who took the
+    old password and signed in keeps that session for the rest of the day —
+    which is precisely the window changing a password exists to close.
+    """
+
+    def test_a_token_minted_before_the_change_is_refused(self, client, auth_headers):
+        assert client.get(f"{API}/auth/me", headers=auth_headers).status_code == 200
+
+        client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": FIRM_REGISTRATION["owner_password"],
+                "new_password": "a-quite-different-passphrase",
+            },
+            headers=auth_headers,
+        )
+
+        stale = client.get(f"{API}/auth/me", headers=auth_headers)
+        assert stale.status_code == 401, stale.text
+
+    def test_the_caller_gets_a_working_token_back(self, client, auth_headers):
+        """Otherwise changing your password signs you out of the tab you did it in.
+
+        The replacement is minted after the cut-off is stamped, and both carry
+        millisecond resolution — with whole seconds a token issued in the same
+        second as the revocation would be indistinguishable from one issued
+        before it.
+        """
+        response = client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": FIRM_REGISTRATION["owner_password"],
+                "new_password": "a-quite-different-passphrase",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+        replacement = {"Authorization": f"Bearer {response.json()['access_token']}"}
+        assert client.get(f"{API}/auth/me", headers=replacement).status_code == 200
+
+    def test_an_access_token_carries_millisecond_issue_time(self):
+        payload = decode_token(
+            create_access_token(practitioner_id="1", firm_id="2", role="owner")
+        )
+        assert payload["iat_ms"] == pytest.approx(payload["iat"] * 1000, abs=1000)
+
+    def test_a_token_predating_iat_ms_fails_closed_inside_the_cut_off_second(self, db):
+        """A token that cannot say when it was minted cannot be shown to postdate.
+
+        Tokens issued before ``iat_ms`` existed carry whole seconds only, and
+        ``issued_at_ms`` widens those to the start of their second — so one
+        minted inside the revocation second reads as earlier than the cut-off
+        and is refused, rather than slipping through.
+        """
+        from datetime import UTC, datetime
+
+        from app.services.credentials import sessions_are_current
+
+        cutoff = datetime(2026, 8, 6, 12, 0, 0, 500_000, tzinfo=UTC)
+        member = Practitioner(credentials_valid_from=cutoff)
+        second_start = int(datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC).timestamp()) * 1000
+
+        assert sessions_are_current(member, second_start) is False
+        assert sessions_are_current(member, second_start + 1000) is True
+        assert sessions_are_current(member, None) is False
+        assert sessions_are_current(Practitioner(), None) is True
+
+    def test_other_members_are_untouched(self, client, auth_headers):
+        """The cut-off is per account, not per firm."""
+        client.post(
+            f"{API}/auth/practitioners",
+            json={
+                "full_name": "Devika Iyer",
+                "email": "devika@sharma-ca.in",
+                "password": "another-correct-horse",
+                "role": "manager",
+            },
+            headers=auth_headers,
+        )
+        theirs = {
+            "Authorization": "Bearer "
+            + client.post(
+                f"{API}/auth/login",
+                json={"email": "devika@sharma-ca.in", "password": "another-correct-horse"},
+            ).json()["access_token"]
+        }
+
+        client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": FIRM_REGISTRATION["owner_password"],
+                "new_password": "a-quite-different-passphrase",
+            },
+            headers=auth_headers,
+        )
+        assert client.get(f"{API}/auth/me", headers=theirs).status_code == 200
+
+
+class TestAnAdminCanResetALockedOutMember:
+    """The other half, and the half a firm reaches for on a Monday morning.
+
+    A member who has forgotten their password had one route back before this,
+    and it was not one: deactivate the account and create a new one, which loses
+    their identity, takes their clients and open filings off them, and spends a
+    plan seat on the duplicate.
+    """
+
+    @pytest.fixture
+    def member(self, client, auth_headers) -> dict:
+        return client.post(
+            f"{API}/auth/practitioners",
+            json={
+                "full_name": "Devika Iyer",
+                "email": "devika@sharma-ca.in",
+                "password": "another-correct-horse",
+                "role": "manager",
+            },
+            headers=auth_headers,
+        ).json()
+
+    @pytest.fixture
+    def member_headers(self, client, member) -> dict[str, str]:
+        token = client.post(
+            f"{API}/auth/login",
+            json={"email": "devika@sharma-ca.in", "password": "another-correct-horse"},
+        ).json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_the_member_can_sign_in_with_the_new_password(
+        self, client, auth_headers, member
+    ):
+        response = client.post(
+            f"{API}/auth/practitioners/{member['id']}/reset-password",
+            json={"new_password": "a-fresh-temporary-one"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200, response.text
+
+        assert (
+            client.post(
+                f"{API}/auth/login",
+                json={"email": "devika@sharma-ca.in", "password": "a-fresh-temporary-one"},
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                f"{API}/auth/login",
+                json={"email": "devika@sharma-ca.in", "password": "another-correct-horse"},
+            ).status_code
+            == 401
+        )
+
+    def test_it_ends_the_members_live_sessions(
+        self, client, auth_headers, member, member_headers
+    ):
+        """A reset is what a firm does about an account it thinks is compromised.
+
+        Leaving the sessions the old password opened alive would make it a
+        gesture: whoever is in stays in for the rest of the token's twelve
+        hours.
+        """
+        assert client.get(f"{API}/auth/me", headers=member_headers).status_code == 200
+        client.post(
+            f"{API}/auth/practitioners/{member['id']}/reset-password",
+            json={"new_password": "a-fresh-temporary-one"},
+            headers=auth_headers,
+        )
+        assert client.get(f"{API}/auth/me", headers=member_headers).status_code == 401
+
+    def test_no_password_comes_back_in_the_response(self, client, auth_headers, member):
+        response = client.post(
+            f"{API}/auth/practitioners/{member['id']}/reset-password",
+            json={"new_password": "a-fresh-temporary-one"},
+            headers=auth_headers,
+        )
+        assert "a-fresh-temporary-one" not in response.text
+        assert "password" not in response.json()
+
+    def test_a_manager_may_not_reset_anyone(self, client, auth_headers, member_headers):
+        """Team management is a firm admin's, and a credential more so."""
+        others = client.get(f"{API}/auth/practitioners", headers=auth_headers).json()
+        owner_id = next(m["id"] for m in others if m["role"] == "owner")
+        response = client.post(
+            f"{API}/auth/practitioners/{owner_id}/reset-password",
+            json={"new_password": "a-fresh-temporary-one"},
+            headers=member_headers,
+        )
+        assert response.status_code == 403, response.text
+
+    def test_a_partner_cannot_reset_the_owner(self, client, auth_headers, registered_firm):
+        """Otherwise a partner takes the firm.
+
+        A partner is a firm admin, so without this rule the one account nobody
+        else may deactivate or demote could have its password set by somebody
+        the owner appointed — who then signs in as them.
+        """
+        client.post(
+            f"{API}/auth/practitioners",
+            json={
+                "full_name": "Devika Iyer",
+                "email": "devika@sharma-ca.in",
+                "password": "another-correct-horse",
+                "role": "partner",
+            },
+            headers=auth_headers,
+        )
+        partner_headers = {
+            "Authorization": "Bearer "
+            + client.post(
+                f"{API}/auth/login",
+                json={"email": "devika@sharma-ca.in", "password": "another-correct-horse"},
+            ).json()["access_token"]
+        }
+
+        owner_id = registered_firm["practitioner"]["id"]
+        response = client.post(
+            f"{API}/auth/practitioners/{owner_id}/reset-password",
+            json={"new_password": "taking-over-the-firm"},
+            headers=partner_headers,
+        )
+        assert response.status_code == 403, response.text
+        assert "owner" in response.json()["detail"].lower()
+
+        # And the owner's own password is untouched.
+        assert (
+            client.post(
+                f"{API}/auth/login",
+                json={
+                    "email": FIRM_REGISTRATION["owner_email"],
+                    "password": FIRM_REGISTRATION["owner_password"],
+                },
+            ).status_code
+            == 200
+        )
+
+    def test_an_admin_cannot_reset_their_own(self, client, auth_headers, registered_firm):
+        """A reset asks for no current password, which is the whole point of it.
+
+        Pointed at yourself it becomes a password change that skips the one
+        check protecting a stolen token from being used to take the account.
+        """
+        owner_id = registered_firm["practitioner"]["id"]
+        response = client.post(
+            f"{API}/auth/practitioners/{owner_id}/reset-password",
+            json={"new_password": "a-fresh-temporary-one"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400, response.text
+        assert "Change password" in response.json()["detail"]
+
+    def test_another_firms_member_is_a_404(self, client, auth_headers):
+        response = client.post(
+            f"{API}/auth/practitioners/{uuid.uuid4()}/reset-password",
+            json={"new_password": "a-fresh-temporary-one"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 404, response.text
+
+    def test_both_password_endpoints_are_recorded(self, client, auth_headers, member):
+        """The trail is what a firm reads after an account is thought compromised."""
+        client.post(
+            f"{API}/auth/practitioners/{member['id']}/reset-password",
+            json={"new_password": "a-fresh-temporary-one"},
+            headers=auth_headers,
+        )
+        changed = client.post(
+            f"{API}/auth/change-password",
+            json={
+                "current_password": FIRM_REGISTRATION["owner_password"],
+                "new_password": "a-quite-different-passphrase",
+            },
+            headers=auth_headers,
+        )
+        # Read with the replacement token, because the change has just revoked
+        # the one this fixture is holding — which is the point of it.
+        current = {"Authorization": f"Bearer {changed.json()['access_token']}"}
+
+        entries = client.get(
+            f"{API}/audit", params={"limit": 100}, headers=current
+        ).json()["items"]
+        actions = {entry["action"] for entry in entries}
+        assert "practitioner.password_reset" in actions
+        assert "practitioner.password_change" in actions
+        # And never the secret itself, on either line.
+        assert "a-fresh-temporary-one" not in str(entries)
+        assert "a-quite-different-passphrase" not in str(entries)

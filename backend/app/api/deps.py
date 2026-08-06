@@ -10,12 +10,13 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from app.core.security import TokenError, decode_token
+from app.core.security import TokenError, decode_token, issued_at_ms
 from app.database import get_db
 from app.models.base import PractitionerRole
 from app.models.client import Client
 from app.models.firm import Firm, Practitioner
-from app.services.portal import issued_at_ms, token_is_current
+from app.services.credentials import sessions_are_current
+from app.services.portal import token_is_current
 
 # Two schemes over the same header, so the reference shows which token each
 # endpoint wants. auto_error is off because a missing header should produce
@@ -85,6 +86,13 @@ def get_current_practitioner(
     if practitioner is None or not practitioner.is_active:
         raise CREDENTIALS_EXCEPTION
     if str(practitioner.firm_id) != payload.get("firm_id"):
+        raise CREDENTIALS_EXCEPTION
+    # A password change ends the sessions the previous password opened. Without
+    # this the rotation reaches only the *next* sign-in: a token lives twelve
+    # hours, so whoever took the old credential and used it keeps that session
+    # for the rest of the day — which is the whole window a member changes their
+    # password to close. See :mod:`app.services.credentials`.
+    if not sessions_are_current(practitioner, issued_at_ms(payload)):
         raise CREDENTIALS_EXCEPTION
     # Checked here rather than only in ``get_current_firm``: an access token
     # lives twelve hours, and most endpoints have no reason to ask for the firm

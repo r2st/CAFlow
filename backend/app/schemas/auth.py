@@ -7,6 +7,7 @@ from datetime import datetime
 
 from pydantic import EmailStr, Field, computed_field, field_validator
 
+from app.core.security import MAX_PASSWORD_BYTES
 from app.models.base import FirmPlan, PractitionerRole
 from app.schemas.common import (
     ORMModel,
@@ -129,6 +130,37 @@ class PractitionerUpdate(SanitizedModel):
 
     # A team member always has a name, a role and a standing.
     _no_nulls = not_clearable("full_name", "role", "is_active")
+
+
+class PasswordChangeRequest(SanitizedModel):
+    """A member replacing their own password.
+
+    The current one is required, and it is what separates this from a reset. A
+    bearer token is a credential a browser hands over on every request, and a
+    token that has been taken is precisely the case a password change is the
+    remedy for — so a change that needed only the token would let whoever took
+    it lock the real member out of their own account. Knowing the password in
+    force is the proof the token alone does not carry.
+
+    Not ``Password`` for the current one, for the reason
+    :class:`LoginRequest` gives: it is being checked rather than set, and a
+    length its own account could never hold is simply a wrong password.
+    """
+
+    current_password: str = Field(min_length=1, max_length=MAX_PASSWORD_BYTES)
+    new_password: Password
+
+
+class PasswordResetRequest(SanitizedModel):
+    """A firm admin setting a password for a member who cannot sign in.
+
+    No current password, because the point of this is that nobody has it —
+    which is exactly why it is restricted to owners and partners, refuses the
+    firm owner, and is refused on the caller's own account. See
+    :func:`~app.api.routes.auth.reset_practitioner_password`.
+    """
+
+    new_password: Password
 
 
 class PractitionerOut(ORMModel):

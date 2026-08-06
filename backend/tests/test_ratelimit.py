@@ -54,6 +54,34 @@ class TestBucketSelection:
         assert authenticated.name == "default"
         assert anonymous.limit < authenticated.limit
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/v1/auth/change-password",
+            "/api/v1/auth/practitioners/"
+            "11111111-1111-1111-1111-111111111111/reset-password",
+        ],
+    )
+    def test_setting_a_password_shares_the_credential_bucket(self, path):
+        """Both write a credential, and one of them checks the password in force.
+
+        ``/auth/change-password`` asks the same question sign-in does, but from
+        inside a session — so without this it counted against the generous
+        ``default`` bucket, where the caller is authenticated. Someone holding a
+        token they should not have is precisely who guesses at a password there,
+        and a few hundred attempts a minute is not a rate at which bcrypt's cost
+        buys anything.
+        """
+        bucket = bucket_for(path, "POST", authenticated=True)
+        assert bucket.name == "auth"
+        assert bucket.limit == settings.rate_limit_auth_per_minute
+
+    def test_reading_a_password_route_is_not_a_credential_attempt(self):
+        assert (
+            bucket_for("/api/v1/auth/change-password", "GET", authenticated=True).name
+            == "default"
+        )
+
     def test_the_prefix_is_not_baked_in(self):
         # Buckets are chosen before routing, so the match is a path suffix and
         # survives a change to API_V1_PREFIX.

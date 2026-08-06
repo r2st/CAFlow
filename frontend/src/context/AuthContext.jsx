@@ -124,6 +124,28 @@ export function AuthProvider({ children }) {
     return updated
   }, [])
 
+  /**
+   * Change your own password, and keep this tab signed in.
+   *
+   * The server ends every session opened before the change — which includes
+   * the token this request was signed with — and hands back a replacement
+   * minted after the cut-off. Storing it here is the whole reason this lives
+   * in the context rather than on the page: without it the very next request
+   * 401s, the API client drops the credential, and changing your password
+   * looks exactly like being kicked out for having got it wrong.
+   *
+   * The practitioner is refreshed from the same response rather than left as
+   * it was, so nothing downstream is reading a copy from before the change.
+   */
+  const changePassword = useCallback(async (currentPassword, newPassword) => {
+    const result = await api.changePassword(currentPassword, newPassword)
+    setToken(result.access_token)
+    setPractitioner(result.practitioner)
+    setFirm(result.firm)
+    setSessionExpired(false)
+    return result
+  }, [])
+
   // Signing out deliberately is not an expiry, and saying so would be a lie.
   const logout = useCallback(() => {
     setToken(null)
@@ -148,6 +170,7 @@ export function AuthProvider({ children }) {
       register,
       logout,
       updateFirm,
+      changePassword,
     }),
     [
       practitioner,
@@ -160,6 +183,7 @@ export function AuthProvider({ children }) {
       register,
       logout,
       updateFirm,
+      changePassword,
     ],
   )
 

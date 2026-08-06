@@ -98,6 +98,13 @@ class Practitioner(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Session cut-off: an access token minted before this instant is refused.
+    # Set (not cleared) when the password changes, so the sessions the old one
+    # opened die without a token blacklist — the same mechanism
+    # ``Client.portal_token_valid_from`` uses for magic links. Null on an
+    # account whose password has never been changed, which is every account
+    # until it is.
+    credentials_valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     firm: Mapped[Firm] = relationship(back_populates="practitioners")
 

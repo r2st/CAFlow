@@ -286,3 +286,60 @@ class TestTheColumnIsTheApplicationsToSet:
         steps = [step[0] for step in self._recorded()]
 
         assert steps.index("add") < steps.index("execute") < steps.index("alter")
+
+
+class TestTheRevisionChainIsOneUnbrokenLine:
+    """A mistyped ``down_revision`` is a deploy that stops, and it stops on the box.
+
+    Alembic resolves the chain at ``upgrade head``, so a revision pointing at an
+    id that does not exist, or two revisions claiming the same parent, is not
+    caught by anything until the deploy runs it — at which point the API is
+    already down for the restart and the migration refuses to move. Nothing else
+    in the suite reads the chain: the other tests here each exercise one
+    migration's own logic.
+
+    Read off the files rather than through Alembic's script directory, so this
+    needs no database, no config and no environment.
+    """
+
+    @staticmethod
+    def _revisions() -> dict[str, str | None]:
+        chain: dict[str, str | None] = {}
+        for path in sorted(VERSIONS.glob("[0-9]*.py")):
+            module = _load(path.name)
+            chain[module.revision] = module.down_revision
+        return chain
+
+    def test_every_parent_named_actually_exists(self):
+        chain = self._revisions()
+        for revision, parent in chain.items():
+            assert parent is None or parent in chain, (
+                f"{revision} descends from {parent!r}, which is not a revision here"
+            )
+
+    def test_there_is_exactly_one_base_and_one_head(self):
+        chain = self._revisions()
+        bases = [rev for rev, parent in chain.items() if parent is None]
+        parents = {parent for parent in chain.values() if parent is not None}
+        heads = [rev for rev in chain if rev not in parents]
+
+        assert len(bases) == 1, f"expected one base revision, found {sorted(bases)}"
+        assert len(heads) == 1, (
+            f"expected one head, found {sorted(heads)} — two migrations share a parent, "
+            "and `alembic upgrade head` refuses to pick between them"
+        )
+
+    def test_the_chain_reaches_every_revision(self):
+        """No orphan branch: walking from the base has to visit all of them."""
+        chain = self._revisions()
+        children = {parent: rev for rev, parent in chain.items()}
+
+        walked, current = 0, None
+        while current in children:
+            current = children[current]
+            walked += 1
+
+        assert walked == len(chain), (
+            f"walked {walked} of {len(chain)} revisions from the base — the rest are "
+            "on a branch nothing reaches"
+        )

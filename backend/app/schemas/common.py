@@ -36,7 +36,15 @@ CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 INVISIBLE_CHARS = re.compile(r"[​-‏‪-‮⁦-⁩﻿]")
 
 # Whitespace is meaningful in a secret, so these are passed through untouched.
-UNSANITISED_FIELDS = frozenset({"password", "owner_password", "new_password", "token"})
+#
+# ``current_password`` belongs here as much as the rest: it is checked against a
+# stored hash, and stripping it would make a password chosen with a leading or
+# trailing space unusable through the one endpoint that asks for it — the
+# member would be told their own password is wrong, on the screen they went to
+# because they wanted to change it.
+UNSANITISED_FIELDS = frozenset(
+    {"password", "owner_password", "current_password", "new_password", "token"}
+)
 
 # ₹1,000 crore, as an upper bound on any single amount a client can send.
 #

@@ -146,11 +146,40 @@ describe('naming the current page', () => {
     ['/billing', 'Billing'],
     ['/team', 'Team'],
     ['/audit', 'Audit trail'],
+    ['/settings', 'Firm settings'],
+    ['/account', 'Your account'],
     ['/login', 'Sign in'],
     ['/register', 'Register your firm'],
     ['/portal', 'Your documents and filings'],
   ])('calls %s "%s"', (path, expected) => {
     expect(titleForPath(path)).toBe(expected)
+  })
+
+  it('leaves no reachable page unnamed', () => {
+    /**
+     * An unnamed page sets the tab title to a bare "CAFlow" — so every history
+     * entry and bookmark reads the same — and sets the live region to the empty
+     * string, which announces nothing. Both `/settings` and `/account` were
+     * missing, so the route table is checked against the routes rather than
+     * trusted to have kept up with them.
+     */
+    const reachable = [
+      '/',
+      '/calendar',
+      '/clients',
+      '/documents',
+      '/tasks',
+      '/reminders',
+      '/billing',
+      '/team',
+      '/settings',
+      '/account',
+      '/audit',
+      '/login',
+      '/register',
+      '/portal',
+    ]
+    expect(reachable.filter((path) => titleForPath(path) === null)).toEqual([])
   })
 
   it('does not mistake the new-client form for a client', () => {

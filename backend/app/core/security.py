@@ -70,6 +70,16 @@ def create_access_token(
     role: str,
     expires_minutes: int | None = None,
 ) -> str:
+    """A practitioner's bearer token.
+
+    Carries ``iat_ms`` alongside the standard ``iat`` for the reason
+    :func:`create_magic_link_token` does, and now for a second party: changing a
+    password ends every session opened before it, and that comparison is against
+    a cut-off instant. One-second resolution would let a token minted in the
+    same second as the change outlive it — which is the one second that matters,
+    because a self-service change mints its replacement immediately after
+    stamping the cut-off.
+    """
     now = datetime.now(UTC)
     expire = now + timedelta(minutes=expires_minutes or settings.access_token_expire_minutes)
     payload: dict[str, Any] = {
@@ -78,6 +88,7 @@ def create_access_token(
         "role": role,
         "type": "access",
         "iat": int(now.timestamp()),
+        "iat_ms": int(now.timestamp() * 1000),
         "exp": int(expire.timestamp()),
     }
     return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
@@ -114,3 +125,37 @@ def decode_token(token: str, *, expected_type: str = "access") -> dict[str, Any]
     if payload.get("type") != expected_type:
         raise TokenError("Unexpected token type")
     return payload
+
+
+# ------------------------------------------------ revoking without a blacklist --
+# Two credentials are killed the same way: a cut-off instant on the row the
+# token speaks for, and a token accepted only if it was minted at or after it.
+# ``Client.portal_token_valid_from`` does it for magic links and
+# ``Practitioner.credentials_valid_from`` for sign-in sessions. The comparison
+# is the same both times, so it is written once.
+
+
+def issued_at_ms(payload: dict[str, Any]) -> int | None:
+    """A token's issue time in milliseconds, tolerating one minted before ``iat_ms``."""
+    if (precise := payload.get("iat_ms")) is not None:
+        return int(precise)
+    if (seconds := payload.get("iat")) is not None:
+        # Whole-second tokens fail closed inside the revocation second.
+        return int(seconds) * 1000
+    return None
+
+
+def issued_after(cutoff: datetime | None, minted_at_ms: int | None) -> bool:
+    """Was a token minted at ``minted_at_ms`` issued at or after ``cutoff``?
+
+    No cut-off means nothing has been revoked, so every token passes. A cut-off
+    with no issue time to compare fails closed: a token that cannot say when it
+    was minted cannot be shown to postdate the revocation.
+    """
+    if cutoff is None:
+        return True
+    if minted_at_ms is None:
+        return False
+    if cutoff.tzinfo is None:  # SQLite hands back naive datetimes
+        cutoff = cutoff.replace(tzinfo=UTC)
+    return minted_at_ms >= int(cutoff.timestamp() * 1000)

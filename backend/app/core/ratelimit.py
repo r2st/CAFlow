@@ -52,7 +52,24 @@ def _buckets() -> dict[str, Bucket]:
 
 # Endpoints that mint or spend credentials. Matched as a suffix on the path so
 # the API prefix does not have to be baked in.
-AUTH_PATH_SUFFIXES = ("/auth/login", "/auth/register")
+#
+# The two password endpoints belong here as much as sign-in does, and one of
+# them for a sharper reason: ``/auth/change-password`` checks the password in
+# force, so it answers the same question sign-in does — but from *inside* a
+# session, where the caller is authenticated and would otherwise count against
+# the generous ``default`` bucket. Someone holding a token they should not have
+# is exactly who guesses at a password there, and a few hundred attempts a
+# minute is not a rate at which bcrypt's cost means anything.
+#
+# ``/reset-password`` cannot be guessed at — it takes no current password — but
+# it writes a credential onto somebody else's account, and a firm admin has no
+# business doing that hundreds of times a minute either.
+AUTH_PATH_SUFFIXES = (
+    "/auth/login",
+    "/auth/register",
+    "/auth/change-password",
+    "/reset-password",
+)
 UPLOAD_PATH_SUFFIXES = ("/documents/upload", "/portal/documents")
 
 

@@ -20,13 +20,15 @@ from app.schemas.auth import (
     FirmRegisterRequest,
     FirmUpdate,
     LoginRequest,
+    PasswordChangeRequest,
+    PasswordResetRequest,
     PractitionerCreate,
     PractitionerOut,
     PractitionerUpdate,
     RegisterResponse,
     TokenResponse,
 )
-from app.services import audit, firms
+from app.services import audit, credentials, firms
 from app.services import tasks as task_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -244,6 +246,84 @@ def update_firm(payload: FirmUpdate, admin: FirmAdmin, firm: CurrentFirm, db: Db
     return firm
 
 
+@router.post(
+    "/change-password",
+    response_model=TokenResponse,
+    summary="Change your own password",
+)
+def change_password(
+    payload: PasswordChangeRequest,
+    practitioner: CurrentPractitioner,
+    firm: CurrentFirm,
+    db: DbSession,
+    request: Request,
+):
+    """Replace your own password. Every other session ends; this one continues.
+
+    Nothing could change a password before this. An account's first one is
+    chosen by whoever created the account — the owner at sign-up, or an admin
+    filling in the *Add team member* form — so "temporary password" described a
+    credential that was permanent, known to a second person for the life of the
+    account, and unrotatable after a laptop was lost or a message went to the
+    wrong chat. See :mod:`app.services.credentials`.
+
+    Three things happen together, and each is load-bearing:
+
+    * **the current password is checked**, because a bearer token is not proof
+      of knowing it — and a token in the wrong hands is the case this endpoint
+      exists to answer. Without the check, whoever holds a stolen token locks
+      the real member out of their own account with one request;
+    * **every session opened before now ends**, because otherwise the rotation
+      reaches only the next sign-in. A token lives twelve hours; the point of
+      changing a password is to close that window, not to wait it out;
+    * **a fresh token comes back**, because the cut-off has just invalidated
+      the one the caller is holding. Without it, changing your password signs
+      you out of the tab you did it in — which reads as the change having
+      failed, and is what makes people not do it.
+
+    A new password identical to the old one is refused rather than accepted as
+    a no-op: the member came here to rotate a credential, and answering 200
+    would tell them a rotation happened when the same secret is still in force.
+    """
+    if not verify_password(payload.current_password, practitioner.password_hash):
+        # The same wording sign-in gives, and the same status. It is the same
+        # question being asked of the same stored hash.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect",
+        )
+    # Checked against the stored hash rather than against the two strings, so a
+    # password re-entered in a different normalisation is still caught as the
+    # same one. Constant-time either way, being the same bcrypt comparison.
+    if verify_password(payload.new_password, practitioner.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The new password is the same as the current one — choose a different one",
+        )
+
+    credentials.set_password(practitioner, payload.new_password)
+    caller_ip, caller_agent = audit.request_origin(request)
+    audit.record(
+        db,
+        action="practitioner.password_change",
+        entity_type="practitioner",
+        entity_id=practitioner.id,
+        actor=practitioner,
+        # Never the password, obviously — but not the cut-off either as a
+        # `changes` diff, since the trail is readable by the firm and the useful
+        # fact is that it happened and who did it.
+        summary=f"{practitioner.email} changed their own password",
+        ip_address=caller_ip,
+        user_agent=caller_agent,
+    )
+    db.commit()
+    db.refresh(practitioner)
+    # Minted after the cut-off was stamped and committed, so it outlives the
+    # revocation it was issued alongside — which is what the millisecond
+    # resolution on ``iat_ms`` is for.
+    return _token_response(practitioner, firm)
+
+
 @router.get("/practitioners", response_model=list[PractitionerOut], summary="List the firm's team")
 def list_practitioners(practitioner: CurrentPractitioner, db: DbSession):
     stmt = (
@@ -392,6 +472,90 @@ def update_practitioner(
             else ""
         ),
         changes=audit.diff(before, audit.snapshot(target, updates)),
+    )
+    db.commit()
+    db.refresh(target)
+    return target
+
+
+@router.post(
+    "/practitioners/{practitioner_id}/reset-password",
+    response_model=PractitionerOut,
+    summary="Set a new password for a team member",
+)
+def reset_practitioner_password(
+    practitioner_id: uuid.UUID,
+    payload: PasswordResetRequest,
+    admin: FirmAdmin,
+    db: DbSession,
+    request: Request,
+):
+    """Give a locked-out member a new password. Their existing sessions end.
+
+    The other half of :func:`change_password`, and the half a firm reaches for
+    on a Monday morning. A member who has forgotten their password had exactly
+    one route back before this, and it was not a route: deactivate the account
+    and create a new one, which loses their sign-in identity, takes their
+    clients and open filings off them
+    (:func:`~app.services.firms.release_assignments`), and spends a plan seat on
+    the duplicate — all to fix a forgotten string.
+
+    Three refusals, and each is a boundary rather than a nicety:
+
+    * **not the owner.** A partner is a firm admin, so without this a partner
+      could set the owner's password, sign in as them and take the firm. It is
+      the same rule :func:`update_practitioner` already applies to the owner's
+      standing, applied to the credential, where the stakes are higher;
+    * **not yourself.** Resetting your own password here would be a change that
+      never asks for the current one — which is the whole strength of
+      :func:`change_password`, undone by a caller with a stolen token pointing
+      the endpoint at themselves. Admins change their own password the way
+      everyone else does;
+    * **not another firm's.** The scope check every practitioner endpoint makes.
+
+    Together these leave the owner's own password changeable only by knowing it.
+    That is deliberate: any weaker rule is a path for someone inside the firm to
+    take the firm's most privileged account. An owner who has genuinely lost
+    theirs needs an out-of-band recovery, which is a separate mechanism and not
+    something a colleague should be able to invoke.
+
+    No password is returned, and none is generated: the admin chooses one and
+    hands it over, which is the same shape as adding a member and keeps the
+    secret out of the response body, the logs and the audit trail.
+    """
+    target = db.get(Practitioner, practitioner_id)
+    if target is None or target.firm_id != admin.firm_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Practitioner not found")
+    if target.id == admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Use Change password to set your own — a reset does not ask for "
+                "the password in force, and yours is the one you know."
+            ),
+        )
+    if target.role == PractitionerRole.OWNER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "The firm owner's password cannot be reset by anyone else — "
+                "they change it themselves from their account page."
+            ),
+        )
+
+    credentials.set_password(target, payload.new_password)
+    caller_ip, caller_agent = audit.request_origin(request)
+    audit.record(
+        db,
+        action="practitioner.password_reset",
+        entity_type="practitioner",
+        entity_id=target.id,
+        actor=admin,
+        # Named on both sides: this is one person setting another person's
+        # credential, and who did it to whom is the fact the trail is read for.
+        summary=f"{admin.email} reset the password for {target.email}",
+        ip_address=caller_ip,
+        user_agent=caller_agent,
     )
     db.commit()
     db.refresh(target)

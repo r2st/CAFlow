@@ -262,6 +262,20 @@ export const api = {
   addPractitioner: (payload) => request('/auth/practitioners', { method: 'POST', body: payload }),
   updatePractitioner: (id, payload) =>
     request(`/auth/practitioners/${id}`, { method: 'PATCH', body: payload }),
+  // Answers with a fresh token: the change revokes every session opened before
+  // it, including the one this request was signed with. `AuthContext` is what
+  // stores the replacement — going through it is what keeps the caller signed
+  // in rather than logged out of the tab they changed it in.
+  changePassword: (currentPassword, newPassword) =>
+    request('/auth/change-password', {
+      method: 'POST',
+      body: { current_password: currentPassword, new_password: newPassword },
+    }),
+  resetPractitionerPassword: (id, newPassword) =>
+    request(`/auth/practitioners/${id}/reset-password`, {
+      method: 'POST',
+      body: { new_password: newPassword },
+    }),
 
   // --- Clients ---
   listClients: (params) => request('/clients', { params }),

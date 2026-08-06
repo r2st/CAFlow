@@ -60,6 +60,9 @@ export default function Layout() {
           {/* Same condition, and the same reason: the firm's registration and
               address are a partner's to change. */}
           {isFirmAdmin && <NavLink to="/settings">Firm settings</NavLink>}
+          {/* No condition: signing in is something every role does, so
+              changing how you sign in is something every role needs. */}
+          <NavLink to="/account">Your account</NavLink>
         </nav>
 
         <div className="sidebar-footer">

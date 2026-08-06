@@ -4,6 +4,7 @@ import Layout from './components/Layout'
 import RouteAnnouncer from './components/RouteAnnouncer'
 import { Loading, ServerUnreachable } from './components/ui'
 import { useAuth } from './context/AuthContext'
+import Account from './pages/Account'
 import AuditLog from './pages/AuditLog'
 import Billing from './pages/Billing'
 import Calendar from './pages/Calendar'
@@ -80,6 +81,10 @@ export default function App() {
               stays reachable so a 403 explains itself rather than a redirect
               silently pretending the page does not exist. */}
           <Route path="/audit" element={<AuditLog />} />
+          {/* Every role, deliberately. Firm settings are a partner's; your own
+              password is yours, and lumping the two together is what left a
+              junior with no way to change theirs at all. */}
+          <Route path="/account" element={<Account />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />
