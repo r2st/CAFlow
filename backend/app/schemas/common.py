@@ -149,11 +149,52 @@ def validate_pan(value: str | None) -> str | None:
 
 
 def validate_gstin(value: str | None) -> str | None:
+    """Check a GSTIN's shape, its state code, and its own check digit.
+
+    The pattern alone accepts a great many strings the GST portal does not. Two
+    of them are worth refusing here, because both are what a mistyped GSTIN
+    looks like and neither is discoverable afterwards from anything the firm
+    holds:
+
+    * the leading two digits are a *state code*, and only some numbers are one.
+      ``00`` and ``40`` match the pattern and name no state — and this field is
+      not merely stored: it is what decides whether a supply to this client is
+      taxed as CGST+SGST or as IGST, so a code naming no state silently takes
+      the invoice down the undetermined path;
+    * the fifteenth character is a check digit over the other fourteen. It
+      exists precisely so that a transcription error is caught at the point of
+      entry, and checking it catches every single-character slip and every
+      transposition of two adjacent characters.
+
+    Both matter more than they look, because a wrong GSTIN is not a wrong label
+    on a record. It goes onto the firm's GSTR-1 as the counterparty, where it
+    either fails validation at the portal — after the return is prepared — or
+    matches nobody, and the client cannot then claim the credit for a bill they
+    have already paid. The firm hears about it from the client.
+
+    The message names which of the two failed, since a wrong state code and a
+    wrong character are different mistakes to go looking for.
+    """
     if value is None or value == "":
         return None
     value = value.strip().upper()
     if not GSTIN_RE.match(value):
         raise ValueError("GSTIN must be a valid 15-character GST identification number")
+
+    # Imported here rather than at module scope: the schemas are imported by the
+    # models' own consumers, and app.services.gst imports app.models.base.
+    from app.services.gst import STATE_CODES, gstin_checksum_valid
+
+    if value[:2] not in STATE_CODES:
+        raise ValueError(
+            f"GSTIN starts with {value[:2]}, which is not a GST state code — "
+            "the first two digits are the state the client is registered in"
+        )
+    if not gstin_checksum_valid(value):
+        raise ValueError(
+            "GSTIN failed its own check digit — the last character does not match "
+            "the other fourteen, so at least one of them has been mistyped"
+        )
     return value
 
 

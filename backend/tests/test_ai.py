@@ -396,7 +396,7 @@ class TestAModelThatIgnoresTheSchema:
                             "category": "other",
                             "confidence": 0.9,
                             "pan": " aabcn2345p ",
-                            "gstin": "27aabcn2345p1zv",
+                            "gstin": "27aabcn2345p1z5",
                         }
                     )
                 )
@@ -408,7 +408,7 @@ class TestAModelThatIgnoresTheSchema:
         )
 
         assert result.extracted["pan"] == "AABCN2345P"
-        assert result.extracted["gstin"] == "27AABCN2345P1ZV"
+        assert result.extracted["gstin"] == "27AABCN2345P1Z5"
 
     def test_a_malformed_gstin_is_dropped(self, capture_posts):
         _, queue = capture_posts

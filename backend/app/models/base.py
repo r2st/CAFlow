@@ -173,6 +173,17 @@ class InvoiceStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class SupplyType(StrEnum):
+    """Whether a supply is taxed as CGST+SGST or as IGST.
+
+    A fact about where the supplier and the place of supply are, resolved when
+    an invoice is raised and stored on it; see :mod:`app.services.gst`.
+    """
+
+    INTRA_STATE = "intra_state"
+    INTER_STATE = "inter_state"
+
+
 class ReminderType(StrEnum):
     DOCUMENT = "document"
     PAYMENT = "payment"

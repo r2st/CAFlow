@@ -43,7 +43,7 @@ from app.schemas.portal import (
     PortalOverview,
     PortalSummary,
 )
-from app.services import audit, storage
+from app.services import audit, gst, storage
 from app.services import documents as document_service
 from app.services import portal as portal_service
 
@@ -311,6 +311,13 @@ def _portal_invoice(invoice: Invoice, today: date) -> PortalInvoiceOut:
         invoice_number=invoice.invoice_number,
         issue_date=invoice.issue_date,
         due_date=invoice.due_date,
+        subtotal_paise=invoice.subtotal_paise,
+        cgst_paise=invoice.cgst_paise,
+        sgst_paise=invoice.sgst_paise,
+        igst_paise=invoice.igst_paise,
+        tax_paise=invoice.tax_paise,
+        gst_rate_bps=invoice.gst_rate_bps,
+        place_of_supply=gst.place_of_supply_label(invoice.place_of_supply),
         total_paise=invoice.total_paise,
         amount_paid_paise=invoice.amount_paid_paise,
         balance_paise=invoice.balance_paise,

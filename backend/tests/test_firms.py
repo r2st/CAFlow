@@ -21,7 +21,7 @@ from app.models.base import FirmPlan
 from app.models.client import Client as ClientModel
 from app.models.firm import Firm
 from app.services import firms
-from tests.conftest import make_client_payload
+from tests.conftest import gstin_for, make_client_payload
 
 API = "/api/v1"
 
@@ -158,7 +158,7 @@ class TestSwitchingOneBackOnCostsASlot:
         return client.post(
             f"{API}/clients",
             headers=auth_headers,
-            json=make_client_payload(name=name, pan=pan, gstin=f"27{pan}1Z5"),
+            json=make_client_payload(name=name, pan=pan, gstin=gstin_for(pan)),
         )
 
     def deactivate(self, client: TestClient, auth_headers: dict, client_id: str):

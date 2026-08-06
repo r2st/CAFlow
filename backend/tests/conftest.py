@@ -40,6 +40,7 @@ from app.database import Base, SessionLocal, engine, get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Client, ComplianceItem, Firm, Practitioner  # noqa: E402,F401
 from app.seeds import seed_compliance_types  # noqa: E402
+from app.services.gst import gstin_check_digit  # noqa: E402
 
 FIRM_REGISTRATION = {
     "firm_name": "Sharma & Associates",
@@ -185,6 +186,20 @@ def first_lapsed_item_of_type(
     )
     assert item is not None, f"No lapsed compliance item generated for {code}"
     return item
+
+
+def gstin_for(pan: str, state_code: str = "27", entity_digit: str = "1") -> str:
+    """A checksum-valid GSTIN wrapping ``pan``, for a test that needs one.
+
+    A GSTIN is its state code, the holder's PAN, an entity digit, a literal
+    ``Z``, and a check digit over the other fourteen characters. Tests build
+    them from whatever PAN they were already using, so the check digit has to
+    be computed rather than written down — a hardcoded one is right for exactly
+    one PAN and silently wrong for every other, which is what
+    ``validate_gstin`` now refuses.
+    """
+    body = f"{state_code}{pan.upper()}{entity_digit}Z"
+    return body + gstin_check_digit(body)
 
 
 def make_client_payload(**overrides) -> dict:

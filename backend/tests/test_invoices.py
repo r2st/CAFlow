@@ -1341,7 +1341,7 @@ class TestTellingTwoClientsOfTheSameNameApart:
         self, client, auth_headers, client_id
     ):
         twin = self._twin(
-            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z9", gst_registered=False
         )
         first = self._send(client, auth_headers, client_id, 200_000)
         second = self._send(client, auth_headers, twin, 500_000)
@@ -1356,7 +1356,7 @@ class TestTellingTwoClientsOfTheSameNameApart:
     def test_the_pan_is_what_tells_them_apart(self, client, auth_headers, client_id):
         """What a practitioner would reach for to separate two clients."""
         twin = self._twin(
-            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z9", gst_registered=False
         )
         self._send(client, auth_headers, client_id, 200_000)
         self._send(client, auth_headers, twin, 500_000)
@@ -1374,7 +1374,7 @@ class TestTellingTwoClientsOfTheSameNameApart:
         row with — and qualifying it would put a PAN on a line that never
         needed one."""
         self._twin(
-            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z9", gst_registered=False
         )
         sent = self._send(client, auth_headers, client_id, 200_000)
 
@@ -1398,10 +1398,10 @@ class TestTellingTwoClientsOfTheSameNameApart:
         self, client, auth_headers, client_id
     ):
         second = self._twin(
-            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z9", gst_registered=False
         )
         third = self._twin(
-            client, auth_headers, pan="AABCN1111R", gstin="24AABCN1111R1Z3", gst_registered=False
+            client, auth_headers, pan="AABCN1111R", gstin="24AABCN1111R1ZL", gst_registered=False
         )
         self._send(client, auth_headers, client_id, 100_000)
         self._send(client, auth_headers, second, 200_000)
@@ -1414,7 +1414,7 @@ class TestTellingTwoClientsOfTheSameNameApart:
         self, client, auth_headers, client_id
     ):
         twin = self._twin(
-            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z9", gst_registered=False
         )
         first = self._send(client, auth_headers, client_id, 200_000)
         second = self._send(client, auth_headers, twin, 500_000)
@@ -1428,7 +1428,7 @@ class TestTellingTwoClientsOfTheSameNameApart:
     ):
         """Splitting by id must not split one client across its own bills."""
         twin = self._twin(
-            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z9", gst_registered=False
         )
         one = self._send(client, auth_headers, client_id, 200_000)
         two = self._send(client, auth_headers, client_id, 300_000)
@@ -1441,7 +1441,7 @@ class TestTellingTwoClientsOfTheSameNameApart:
 
     def test_the_total_is_unchanged_by_the_split(self, client, auth_headers, client_id):
         twin = self._twin(
-            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z8", gst_registered=False
+            client, auth_headers, pan="AABCN9876Q", gstin="29AABCN9876Q1Z9", gst_registered=False
         )
         first = self._send(client, auth_headers, client_id, 200_000)
         second = self._send(client, auth_headers, twin, 500_000)
@@ -1750,7 +1750,7 @@ class TestLinesCitingFilings:
         other = client.post(
             "/api/v1/clients",
             json=make_client_payload(
-                name="Meridian Exports LLP", pan="AACCM7788K", gstin="27AACCM7788K1Z9"
+                name="Meridian Exports LLP", pan="AACCM7788K", gstin="27AACCM7788K1ZQ"
             ),
             headers=auth_headers,
         ).json()["client"]
@@ -1796,7 +1796,7 @@ class TestLinesCitingFilings:
         outsider_headers = {"Authorization": f"Bearer {outsider['access_token']}"}
         their_client = client.post(
             "/api/v1/clients",
-            json=make_client_payload(pan="AAECM3456L", gstin="27AAECM3456L1Z2"),
+            json=make_client_payload(pan="AAECM3456L", gstin="27AAECM3456L1Z5"),
             headers=outsider_headers,
         ).json()["client"]
         their_item = client.get(
@@ -2004,7 +2004,7 @@ class TestReleasingWorkACancelledInvoiceNoLongerOwns:
         outsider_headers = {"Authorization": f"Bearer {outsider['access_token']}"}
         their_client = client.post(
             "/api/v1/clients",
-            json=make_client_payload(pan="AAECM3456L", gstin="27AAECM3456L1Z2"),
+            json=make_client_payload(pan="AAECM3456L", gstin="27AAECM3456L1Z5"),
             headers=outsider_headers,
         ).json()["client"]
         their_item_id = uuid.UUID(
@@ -3252,7 +3252,7 @@ class TestBillingOneClientAtATime:
                 name="Kaveri Exports LLP",
                 entity_type="llp",
                 pan="AABCK7654L",
-                gstin="29AABCK7654L1Z9",
+                gstin="29AABCK7654L1ZY",
                 email="books@kaveri-exports.in",
             ),
             headers=auth_headers,
@@ -3436,7 +3436,7 @@ class TestNarrowingTheLedger:
             json=make_client_payload(
                 name="Kaveri Exports LLP",
                 pan="AABCK7654L",
-                gstin="29AABCK7654L1Z9",
+                gstin="29AABCK7654L1ZY",
                 email="books@kaveri-exports.in",
             ),
             headers=auth_headers,

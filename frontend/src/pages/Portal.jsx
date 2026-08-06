@@ -98,6 +98,14 @@ function DocumentRow({ doc, onDownload, downloading }) {
   )
 }
 
+// The three heads GST is levied under. Two of the three are always zero on any
+// one invoice — which two is decided by the place of supply, on the server.
+const TAX_HEADS = [
+  { key: 'cgst_paise', label: 'CGST' },
+  { key: 'sgst_paise', label: 'SGST' },
+  { key: 'igst_paise', label: 'IGST' },
+]
+
 /**
  * One issued invoice.
  *
@@ -138,7 +146,32 @@ function InvoiceRow({ invoice }) {
                   <span className="mono">{formatRupees(line.amount_paise)}</span>
                 </li>
               ))}
+              {/*
+                The tax breakup, which is the half of this a client's
+                accountant actually needs: input tax credit is claimed against
+                CGST, SGST and IGST separately, and a copy of the invoice
+                showing only a total cannot support the claim. Rendered from
+                whichever heads carry an amount, so an intra-state bill shows
+                two and an inter-state one shows the other.
+              */}
+              <li className="invoice-tax-row">
+                <span>Subtotal</span>
+                <span className="mono">{formatRupees(invoice.subtotal_paise)}</span>
+              </li>
+              {TAX_HEADS.map(({ key, label }) =>
+                invoice[key] > 0 ? (
+                  <li key={key} className="invoice-tax-row">
+                    <span>{label}</span>
+                    <span className="mono">{formatRupees(invoice[key])}</span>
+                  </li>
+                ) : null,
+              )}
             </ul>
+            {invoice.place_of_supply && (
+              <p className="small muted">
+                Place of supply: {invoice.place_of_supply}
+              </p>
+            )}
           </details>
         )}
       </div>

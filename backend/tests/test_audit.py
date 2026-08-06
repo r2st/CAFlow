@@ -425,7 +425,7 @@ class TestAuditActions:
             f"{API}/clients",
             headers=auth_headers,
             json=make_client_payload(
-                name="Second Client Pvt Ltd", pan="AABCS7777P", gstin="27AABCS7777P1Z5"
+                name="Second Client Pvt Ltd", pan="AABCS7777P", gstin="27AABCS7777P1ZE"
             ),
         )
 

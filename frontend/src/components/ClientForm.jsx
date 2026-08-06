@@ -108,7 +108,7 @@ export default function ClientForm({ value, onChange, practitioners }) {
                 id="gstin"
                 value={value.gstin}
                 onChange={update('gstin')}
-                placeholder="27AAAAA9999A1Z5"
+                placeholder="27AAAAA9999A1ZK"
               />
             </div>
             <div className="field">

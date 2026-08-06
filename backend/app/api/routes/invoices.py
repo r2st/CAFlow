@@ -30,7 +30,7 @@ from app.schemas.invoice import (
     PaymentCreate,
     RevenueSummaryOut,
 )
-from app.services import audit, billing
+from app.services import audit, billing, gst
 
 router = APIRouter(prefix="/invoices", tags=["billing"])
 
@@ -86,6 +86,7 @@ def serialise(invoice: Invoice, today: date | None = None) -> InvoiceOut:
     today = today or clock.today()
     out = InvoiceOut.model_validate(invoice)
     out.client_name = invoice.client.name if invoice.client else None
+    out.place_of_supply_label = gst.place_of_supply_label(invoice.place_of_supply)
     if (
         invoice.status not in billing.NOT_OWED_STATUSES
         and invoice.due_date is not None
@@ -376,6 +377,9 @@ def create_invoice(payload: InvoiceCreate, practitioner: Manager, db: DbSession)
             status=InvoiceStatus.DRAFT,
             notes=payload.notes,
         )
+        # Before the lines, because ``set_lines`` totals the invoice on its way
+        # out and the tax split those totals carry depends on the supply.
+        billing.apply_place_of_supply(db, invoice, client)
         _apply_lines(db, invoice, payload.lines, practitioner.firm_id)
         return invoice
 
@@ -484,6 +488,11 @@ def update_invoice(
             setattr(invoice, key, updates[key])
     if payload.lines is not None:
         _apply_lines(db, invoice, payload.lines, practitioner.firm_id)
+    # Re-resolved on every edit of a draft, so a client's GSTIN corrected after
+    # the draft was raised corrects the draft too — a bill that has not gone out
+    # is not yet a document of record. Before the totals, which carry the split.
+    if invoice.client is not None:
+        billing.apply_place_of_supply(db, invoice, invoice.client)
     billing.recalculate(invoice)
 
     # After the lines, so a re-numbering attempt is not undone by a savepoint

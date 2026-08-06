@@ -116,17 +116,50 @@ export function totalsOf(lines, gstRateBps) {
   return { subtotal, tax, total: subtotal + tax }
 }
 
-function TotalsRows({ subtotal, tax, total, gstRateBps, colSpan }) {
+/**
+ * The tax rows an invoice shows, which is not one row.
+ *
+ * GST is levied either as CGST plus SGST or as IGST, and a tax invoice has to
+ * name which — the client claims input tax credit against the heads
+ * separately, and CGST credit cannot offset IGST. Halved here the same way the
+ * server halves it, odd paise to SGST, so the preview and the saved invoice
+ * never disagree.
+ *
+ * `supplyType` is unknown while a brand-new invoice is being typed, because it
+ * follows from the firm's and the client's registered states and is resolved
+ * when the invoice is saved. A single "GST" row is the honest thing to show
+ * until then, rather than guessing at a split that would be printed on a tax
+ * document.
+ */
+export function taxRowsOf(tax, gstRateBps, supplyType) {
+  const rate = (gstRateBps / 100).toFixed(2)
+  if (supplyType === 'inter_state') {
+    return [{ key: 'igst', label: `IGST @ ${rate}%`, amount: tax }]
+  }
+  if (supplyType === 'intra_state') {
+    const cgst = Math.floor(tax / 2)
+    const half = (gstRateBps / 200).toFixed(2)
+    return [
+      { key: 'cgst', label: `CGST @ ${half}%`, amount: cgst },
+      { key: 'sgst', label: `SGST @ ${half}%`, amount: tax - cgst },
+    ]
+  }
+  return [{ key: 'gst', label: `GST @ ${rate}%`, amount: tax }]
+}
+
+function TotalsRows({ subtotal, tax, total, gstRateBps, colSpan, supplyType }) {
   return (
     <>
       <tr className="totals-row">
         <td colSpan={colSpan}>Subtotal</td>
         <td className="numeric">{formatRupees(subtotal)}</td>
       </tr>
-      <tr className="totals-row">
-        <td colSpan={colSpan}>GST @ {(gstRateBps / 100).toFixed(2)}%</td>
-        <td className="numeric">{formatRupees(tax)}</td>
-      </tr>
+      {taxRowsOf(tax, gstRateBps, supplyType).map((row) => (
+        <tr className="totals-row" key={row.key}>
+          <td colSpan={colSpan}>{row.label}</td>
+          <td className="numeric">{formatRupees(row.amount)}</td>
+        </tr>
+      ))}
       <tr className="totals-row grand">
         <td colSpan={colSpan}>Total</td>
         <td className="numeric">{formatRupees(total)}</td>
@@ -176,6 +209,7 @@ export function InvoiceLineTable({ invoice }) {
             tax={invoice.tax_paise}
             total={invoice.total_paise}
             gstRateBps={invoice.gst_rate_bps}
+            supplyType={invoice.supply_type}
             colSpan={4}
           />
           {invoice.amount_paid_paise > 0 && (
@@ -192,6 +226,22 @@ export function InvoiceLineTable({ invoice }) {
           )}
         </tfoot>
       </table>
+      {/*
+        Rule 46 of the CGST Rules puts the place of supply on the face of a tax
+        invoice, and it is what decides whether the tax above is CGST+SGST or
+        IGST. Absent on invoices raised before it was determined at all, and on
+        one where neither the firm's nor the client's registration established
+        a state — which is worth saying rather than leaving blank, since it is
+        the firm's own missing GSTIN that usually causes it.
+      */}
+      <p className="small muted line-notes">
+        Place of supply:{' '}
+        {invoice.place_of_supply_label ? (
+          <span className="mono">{invoice.place_of_supply_label}</span>
+        ) : (
+          <span>not determined — add the firm&apos;s and the client&apos;s GSTIN</span>
+        )}
+      </p>
       {invoice.notes && <p className="small muted line-notes">{invoice.notes}</p>}
     </TableScroll>
   )
@@ -433,6 +483,10 @@ export function InvoiceForm({ clients, invoice, onSubmit, onCancel, busy }) {
                 tax={totals.tax}
                 total={totals.total}
                 gstRateBps={gstRateBps}
+                // Known only when editing a draft the server has already
+                // resolved the supply for. A new invoice shows a single GST
+                // row until it is saved; see `taxRowsOf`.
+                supplyType={invoice?.supply_type}
                 colSpan={4}
               />
             </tfoot>

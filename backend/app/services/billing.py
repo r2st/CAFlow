@@ -22,11 +22,12 @@ from sqlalchemy.orm import Session, selectinload
 from app.config import settings
 from app.core import clock
 from app.core.periods import fiscal_year_start, fy_label
-from app.models.base import ComplianceStatus, InvoiceStatus
+from app.models.base import ComplianceStatus, InvoiceStatus, SupplyType
 from app.models.client import Client
 from app.models.compliance import ComplianceItem, ComplianceType
+from app.models.firm import Firm
 from app.models.invoice import Invoice, InvoiceLine
-from app.services import firms
+from app.services import firms, gst
 
 FILED_STATUSES = (ComplianceStatus.FILED, ComplianceStatus.DELAYED_FILED)
 UNPAID_STATUSES = (
@@ -176,6 +177,32 @@ def renumber_for_issue_date(db: Session, invoice: Invoice, issue_date: date) -> 
     raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
 
 
+# ----------------------------------------------------- place of supply --
+
+
+def apply_place_of_supply(db: Session, invoice: Invoice, client: Client) -> Invoice:
+    """Resolve where this supply is placed, and under which heads it is taxed.
+
+    Called when an invoice is raised, and again whenever a *draft* is edited —
+    a draft is not yet a document of record, so a client's GSTIN corrected
+    before the bill goes out should correct the bill. Once sent, nothing here
+    runs again: the tax character of an issued invoice is fixed at issue, and a
+    client who later re-registers in another state has not changed a document
+    they are already holding a copy of.
+
+    A firm row that cannot be read leaves the supply undetermined, which
+    :func:`~app.services.gst.resolve_supply` resolves to intra-state with no
+    place of supply recorded — the same answer, and the same visible marker,
+    as a firm that has not entered its own GSTIN.
+    """
+    firm = db.get(Firm, invoice.firm_id)
+    if firm is None:  # pragma: no cover - a live invoice always has its firm
+        invoice.place_of_supply, invoice.supply_type = None, SupplyType.INTRA_STATE
+        return invoice
+    invoice.place_of_supply, invoice.supply_type = gst.resolve_supply(firm, client)
+    return invoice
+
+
 # ------------------------------------------------------------------ totals --
 
 
@@ -184,7 +211,19 @@ def line_amount(line: InvoiceLine) -> int:
 
 
 def recalculate(invoice: Invoice) -> Invoice:
-    """Recompute line amounts, subtotal, GST and total. Call after any edit."""
+    """Recompute line amounts, subtotal, GST and total. Call after any edit.
+
+    The tax total is struck first and then divided into its heads, rather than
+    each head being computed from its own rate — see
+    :func:`~app.services.gst.split_tax` for why that ordering is what keeps the
+    printed components summing to the total the client is asked to pay.
+
+    ``supply_type`` falls back to intra-state when it is unset, which is the
+    case for an invoice being built in memory before it has ever reached the
+    database and taken the column's default. It is the same fallback
+    :func:`~app.services.gst.resolve_supply` makes for an undetermined supply,
+    so nothing depends on which of the two paths got here.
+    """
     subtotal = 0
     for line in invoice.lines:
         line.amount_paise = line_amount(line)
@@ -194,6 +233,9 @@ def recalculate(invoice: Invoice) -> Invoice:
     # Round half-up, in paise.
     invoice.tax_paise = (subtotal * invoice.gst_rate_bps + 5_000) // 10_000
     invoice.total_paise = subtotal + invoice.tax_paise
+    invoice.cgst_paise, invoice.sgst_paise, invoice.igst_paise = gst.split_tax(
+        invoice.tax_paise, invoice.supply_type or SupplyType.INTRA_STATE
+    )
     return invoice
 
 
@@ -334,6 +376,8 @@ def build_invoice(
                 )
             )
             item.is_billed = True
+        # Before the totals, because the split the totals produce depends on it.
+        apply_place_of_supply(db, invoice, client)
         return recalculate(invoice)
 
     return insert_numbered(db, firm_id=firm_id, issue_date=issue_date, build=build)

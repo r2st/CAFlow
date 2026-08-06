@@ -469,7 +469,7 @@ class TestComplianceGeneration:
         patched = client.patch(
             f"{API}/clients/{client_id}",
             headers=auth_headers,
-            json={"gst_registered": True, "gstin": "27AAACL9876R1Z1"},
+            json={"gst_registered": True, "gstin": "27AAACL9876R1ZE"},
         )
         assert patched.status_code == 200
         assert patched.json()["compliance_items_created"] > 0
@@ -2074,7 +2074,7 @@ class TestCountingAClientsFilingsInTheDatabase:
             f"{API}/clients",
             headers=auth_headers,
             json=make_client_payload(
-                name="Second Co", pan="AABCS4321Q", gstin="27AABCS4321Q1Z9"
+                name="Second Co", pan="AABCS4321Q", gstin="27AABCS4321Q1Z2"
             ),
         )
         assert second.status_code == 201, second.text
@@ -2572,7 +2572,7 @@ class TestOneSaveThatBothReactivatesAndChangesARegistration:
             json={
                 "is_active": True,
                 "gst_registered": True,
-                "gstin": "27AABCN2345P1ZV",
+                "gstin": "27AABCN2345P1Z5",
                 "gst_filing_frequency": "monthly",
             },
         )

@@ -874,6 +874,10 @@ button:not(.secondary):not(.link):focus-visible,
   font-size: 0.86rem;
   color: var(--text-muted);
 }
+/* The tax breakup sits below the lines it is charged on, separated so a client
+   reading down the list can see where the work stops and the tax starts. */
+.invoice-tax-row { border-top: 1px dashed var(--border); }
+.invoice-tax-row + .invoice-tax-row { border-top: none; }
 
 .card-footer {
   padding: 11px 18px;

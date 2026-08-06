@@ -13,6 +13,7 @@ from app.models.base import (
     EnumString,
     InvoiceStatus,
     JSONType,
+    SupplyType,
     TimestampMixin,
     UUIDPrimaryKeyMixin,
     UuidType,
@@ -47,6 +48,22 @@ class Invoice(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     total_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     amount_paid_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     gst_rate_bps: Mapped[int] = mapped_column(Integer, default=1800, nullable=False)  # 18.00%
+
+    # How ``tax_paise`` divides between the three levies. Always summing to it,
+    # and two of the three always zero — see :func:`app.services.gst.split_tax`.
+    # Stored rather than derived on read because an invoice is a document of
+    # record: the client holds a copy naming these amounts, and claims input tax
+    # credit against them.
+    cgst_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    sgst_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    igst_paise: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    # The GST state code the supply is placed in, e.g. ``"27"``. Null when
+    # neither the client's GSTIN nor their state established one; the invoice is
+    # then taxed intra-state and this blank is what says so.
+    place_of_supply: Mapped[str | None] = mapped_column(String(2))
+    supply_type: Mapped[SupplyType] = mapped_column(
+        EnumString(SupplyType, 16), default=SupplyType.INTRA_STATE, nullable=False
+    )
 
     status: Mapped[InvoiceStatus] = mapped_column(
         EnumString(InvoiceStatus, 32), default=InvoiceStatus.DRAFT, nullable=False

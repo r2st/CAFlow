@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 from pydantic import Field, field_validator
 
 from app.core import clock
-from app.models.base import InvoiceStatus
+from app.models.base import InvoiceStatus, SupplyType
 from app.schemas.common import MAX_AMOUNT_PAISE, ORMModel, SanitizedModel
 
 # How far ahead an invoice may be dated. A month covers every forward-dating a
@@ -130,6 +130,13 @@ class InvoiceOut(ORMModel):
     amount_paid_paise: int
     balance_paise: int
     gst_rate_bps: int
+    # The three heads ``tax_paise`` divides into, and where the supply was
+    # placed. Two of the three are always zero; see :mod:`app.services.gst`.
+    cgst_paise: int
+    sgst_paise: int
+    igst_paise: int
+    place_of_supply: str | None
+    supply_type: SupplyType
     status: InvoiceStatus
     payment_date: date | None
     payment_reference: str | None
@@ -138,6 +145,9 @@ class InvoiceOut(ORMModel):
 
     client_name: str | None = None
     days_overdue: int | None = None
+    # ``"27-Maharashtra"``. Named on the server so the state table lives in one
+    # place rather than being duplicated into the client and left to drift.
+    place_of_supply_label: str | None = None
 
 
 class InvoiceDetailOut(InvoiceOut):

@@ -519,7 +519,7 @@ class TestWorkAimedAtAnAccountThatIsSwitchedOff:
         response = client.post(
             "/api/v1/clients",
             json=make_client_payload(
-                pan="AAECS9876P", gstin="27AAECS9876P1Z8",
+                pan="AAECS9876P", gstin="27AAECS9876P1Z7",
                 assigned_practitioner_id=junior["id"],
             ),
             headers=auth_headers,
@@ -1088,7 +1088,7 @@ class TestATaskThatNamesTwoClientsAtOnce:
         response = client.post(
             "/api/v1/clients",
             json=make_client_payload(
-                name="Ravi Traders", pan="AAFCR7788K", gstin="27AAFCR7788K1Z9"
+                name="Ravi Traders", pan="AAFCR7788K", gstin="27AAFCR7788K1ZI"
             ),
             headers=auth_headers,
         )

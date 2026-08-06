@@ -81,6 +81,19 @@ class PortalInvoiceOut(SanitizedModel):
     invoice_number: str
     issue_date: date
     due_date: date | None
+    # The tax breakup, which the client's copy of an invoice exists to carry as
+    # much as the total does: input tax credit is claimed against the heads
+    # separately, and CGST credit cannot offset IGST. A client shown only a
+    # total has no way to claim what they have paid.
+    subtotal_paise: int
+    cgst_paise: int
+    sgst_paise: int
+    igst_paise: int
+    tax_paise: int
+    gst_rate_bps: int
+    # ``"27-Maharashtra"``, or null on an invoice raised before the place of
+    # supply was determined at all.
+    place_of_supply: str | None
     total_paise: int
     amount_paid_paise: int
     balance_paise: int
