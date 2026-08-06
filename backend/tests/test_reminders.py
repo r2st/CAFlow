@@ -1864,3 +1864,117 @@ class TestWhenTheThingBeingChasedHasGone:
     def test_an_invoice_that_no_longer_exists_is_not_a_reason_either(self, db):
         reminder = Reminder(invoice_id=uuid.uuid4(), extra={"kind": "payment"})
         assert reminder_service.withdrawn_reason(db, reminder) is None
+
+
+class TestChasingAClientTheFirmHasStoppedActingFor:
+    """A queued chase to an off-boarded client is one that can never go out.
+
+    ``worker_tasks._deliverable`` joins the client row and requires
+    ``is_active``, which is what stops a fortnight of already-queued mail going
+    out in the name of a firm — or to a client — that has since been switched
+    off. Nothing said so at the point of queueing, so the message was accepted
+    with a 201 and an audit line saying the client had been written to, and then
+    sat SCHEDULED for good: never sent, never failed, never withdrawn, and
+    counted in the pending badge for ever.
+    """
+
+    def test_a_manual_reminder_for_an_off_boarded_client_is_refused(
+        self, client, auth_headers, client_id
+    ):
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        response = client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "reminder_type": "custom",
+                "subject": "Your outstanding fee",
+                "body": "A quick note about the balance.",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 422, response.text
+        detail = response.json()["detail"]
+        assert "off-boarded" in detail
+        # The refusal names the way to do it, because chasing a departed client
+        # for a last unpaid invoice is ordinary work.
+        assert "reactivate" in detail.lower()
+
+    def test_nothing_is_left_queued_by_the_refusal(
+        self, client, auth_headers, client_id, db
+    ):
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+        client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "reminder_type": "custom",
+                "subject": "Your outstanding fee",
+                "body": "A quick note about the balance.",
+            },
+            headers=auth_headers,
+        )
+        assert (
+            db.scalar(
+                select(func.count(Reminder.id)).where(
+                    Reminder.client_id == uuid.UUID(client_id)
+                )
+            )
+            == 0
+        )
+
+    def test_the_pending_badge_is_not_inflated_by_it(
+        self, client, auth_headers, client_id
+    ):
+        """The badge is what a practitioner reads to know work is waiting.
+
+        An undeliverable reminder counted in it permanently, so the number never
+        came down and stopped meaning anything.
+        """
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+        client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "reminder_type": "custom",
+                "subject": "Your outstanding fee",
+                "body": "A quick note about the balance.",
+            },
+            headers=auth_headers,
+        )
+        counts = client.get("/api/v1/reminders/pending-count", headers=auth_headers).json()
+        assert counts["scheduled"] == 0
+
+    def test_an_active_client_is_still_reachable(self, client, auth_headers, client_id):
+        response = client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "reminder_type": "custom",
+                "subject": "Your outstanding fee",
+                "body": "A quick note about the balance.",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+
+    def test_taking_the_client_back_on_reopens_the_route(
+        self, client, auth_headers, client_id
+    ):
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+        client.patch(
+            f"/api/v1/clients/{client_id}",
+            json={"is_active": True},
+            headers=auth_headers,
+        )
+        response = client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "reminder_type": "custom",
+                "subject": "Your outstanding fee",
+                "body": "A quick note about the balance.",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text

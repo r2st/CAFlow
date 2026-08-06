@@ -210,6 +210,30 @@ def create_reminder(
 ):
     """Queue a one-off reminder composed by a practitioner."""
     client = _get_client_or_404(db, practitioner.firm_id, payload.client_id)
+    # An off-boarded client is one this firm has stopped acting for, and the
+    # dispatcher will not write to them: ``_deliverable`` joins the client row
+    # and requires ``is_active``, which is what stops a fortnight of queued mail
+    # going out in the name of a firm that has since been switched off.
+    #
+    # Nothing said so here, so the message was accepted with a 201 and a
+    # "Queued a reminder to …" audit line, and then sat SCHEDULED for good: never
+    # sent, never failed, never withdrawn, and counted in the pending badge on
+    # the reminders nav for ever. The practitioner is told the client has been
+    # contacted, the client hears nothing, and the one screen that would show
+    # the discrepancy shows a reminder waiting to go out.
+    #
+    # It is not a contrived path either. Off-boarding a client and then chasing
+    # them for the last unpaid invoice is ordinary work — which is exactly why
+    # the refusal names the way to do it rather than only refusing.
+    if not client.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"{client.name} has been off-boarded, and nothing is sent to an "
+                "off-boarded client — reactivate them first if you still need to "
+                "write to them."
+            ),
+        )
     # Before the row is built, so nothing is written against a filing or an
     # invoice this client does not own — see :func:`_linked_filing`.
     _linked_filing(db, practitioner.firm_id, client, payload.compliance_item_id)
