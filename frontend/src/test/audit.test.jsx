@@ -84,6 +84,64 @@ describe('Audit trail', () => {
     expect(screen.queryByRole('button', { name: 'Changes' })).not.toBeInTheDocument()
   })
 
+  it('shows the details of an action that is not a field edit', async () => {
+    // Most of what a firm does is not a PATCH. A bulk status change, a
+    // generation run, a receipt, a portal link — each records the facts of the
+    // action rather than a before/after. Those entries used to fall through to
+    // "No field-level changes were recorded", under a Changes button that was
+    // only rendered because there *were* changes to show.
+    const user = userEvent.setup()
+    api.listAuditLog.mockResolvedValue(
+      pageOf([
+        auditEntry({
+          action: 'compliance_item.bulk_status',
+          summary: 'Set 12 item(s) to filed',
+          changes: { status: 'filed', resulting_statuses: ['delayed_filed', 'filed'] },
+        }),
+      ]),
+    )
+    renderPage()
+
+    await user.click(await screen.findByRole('button', { name: 'Changes' }))
+
+    const detail = within(document.querySelector('.change-table'))
+    expect(detail.getByText('Status')).toBeInTheDocument()
+    expect(detail.getByText('filed')).toBeInTheDocument()
+    expect(detail.getByText('Resulting statuses')).toBeInTheDocument()
+    expect(screen.queryByText(/No field-level changes/)).not.toBeInTheDocument()
+  })
+
+  it('labels a detail panel as details rather than before and after', async () => {
+    const user = userEvent.setup()
+    api.listAuditLog.mockResolvedValue(
+      pageOf([
+        auditEntry({
+          action: 'invoice.payment',
+          changes: { amount_paise: 25000, reference: 'NEFT-8891' },
+        }),
+      ]),
+    )
+    renderPage()
+
+    await user.click(await screen.findByRole('button', { name: 'Changes' }))
+
+    const detail = within(document.querySelector('.change-table'))
+    expect(detail.getByRole('columnheader', { name: 'Detail' })).toBeInTheDocument()
+    expect(detail.getByText('NEFT-8891')).toBeInTheDocument()
+    expect(detail.queryByRole('columnheader', { name: 'Before' })).toBeNull()
+  })
+
+  it('still reads a before/after entry as a before and after', async () => {
+    const user = userEvent.setup()
+    renderPage()
+
+    await user.click(await screen.findByRole('button', { name: 'Changes' }))
+
+    const diff = within(document.querySelector('.change-table'))
+    expect(diff.getByRole('columnheader', { name: 'Before' })).toBeInTheDocument()
+    expect(diff.getByRole('columnheader', { name: 'After' })).toBeInTheDocument()
+  })
+
   it('offers only the actions this firm has actually recorded', async () => {
     renderPage()
 

@@ -30,12 +30,58 @@ function formatValue(value) {
   return String(value)
 }
 
+/**
+ * The details recorded against an action that is not a field edit.
+ *
+ * `changes` carries two different shapes, because the trail records two
+ * different kinds of thing. A PATCH writes `{before, after}` — a filing, a
+ * client, an invoice, each field that moved. But plenty of what a firm does is
+ * not an edit to a record's fields, and those entries record the facts of the
+ * action instead: the ids a batch touched, the numbers a generation run
+ * allocated, the amount and reference on a receipt, when a portal link expires
+ * and where it was sent.
+ *
+ * This page only understood the first shape. Everything else fell through to
+ * "No field-level changes were recorded" — under a *Changes* button that was
+ * only rendered because there were changes to show. So the trail's answer to
+ * "what was in that batch?" or "what reference was that payment entered
+ * against?" was a panel saying nothing had been recorded, while the row it was
+ * rendered from held exactly that. It is the shape most of the sweeps and
+ * every bulk action write, which is to say most of what a partner opens this
+ * page to look into.
+ */
+function DetailTable({ changes }) {
+  const fields = Object.keys(changes).sort()
+  return (
+    <table className="change-table">
+      <thead>
+        <tr>
+          <th scope="col">Detail</th>
+          <th scope="col">Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        {fields.map((field) => (
+          <tr key={field}>
+            <td>{humanise(field)}</td>
+            <td className="now">{formatValue(changes[field])}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 function ChangeTable({ changes }) {
   const before = changes.before ?? {}
   const after = changes.after ?? {}
   const fields = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()
 
   if (fields.length === 0) {
+    // Not a before/after entry. Anything it does carry is the record of what
+    // happened, so it is shown rather than denied; see `DetailTable`.
+    const details = Object.keys(changes)
+    if (details.length > 0) return <DetailTable changes={changes} />
     return <p className="small muted">No field-level changes were recorded.</p>
   }
 
