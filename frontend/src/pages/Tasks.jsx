@@ -265,8 +265,9 @@ export default function Tasks() {
     refreshWorkload()
     api.listPractitioners().then(setPractitioners).catch(() => setPractitioners([]))
     api
-      .listClients({ limit: 200 })
-      .then((result) => setClients(result.items))
+      // Every client — see `listAllClients` for what the first page alone cost.
+      .listAllClients()
+      .then(setClients)
       .catch(() => setClients([]))
   }, [refreshWorkload])
 

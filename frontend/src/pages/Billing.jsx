@@ -350,8 +350,9 @@ export default function Billing() {
 
   useEffect(() => {
     api
-      .listClients({ limit: 200 })
-      .then((result) => setClients(result.items))
+      // Every client — see `listAllClients` for what the first page alone cost.
+      .listAllClients()
+      .then(setClients)
       .catch(() => setClients([]))
   }, [])
 

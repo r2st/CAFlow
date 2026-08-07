@@ -195,8 +195,11 @@ export default function Documents() {
   useEffect(() => {
     loadOutstanding()
     api
-      .listClients({ limit: 200 })
-      .then((result) => setClients(result.items))
+      // Every client, not the first page of them: this list is what the upload
+      // form names its client from, and a client missing from it cannot be
+      // uploaded for at all. See `listAllClients`.
+      .listAllClients()
+      .then(setClients)
       .catch(() => setClients([]))
   }, [loadOutstanding])
 

@@ -82,8 +82,11 @@ export default function Calendar() {
 
   useEffect(() => {
     api
-      .listClients({ limit: 200, is_active: true })
-      .then((page) => setClients(page.items))
+      // Every active client — see `listAllClients` for what the first page
+      // alone cost. Two hundred is the endpoint's maximum page, and a firm past
+      // it lost the tail of its own client list off this filter.
+      .listAllClients({ is_active: true })
+      .then(setClients)
       .catch(() => setClients([]))
   }, [])
 

@@ -501,3 +501,92 @@ describe('the falsy values a filter can legitimately hold', () => {
     expect(spy.mock.calls[0][0]).not.toContain('is_active')
   })
 })
+
+/**
+ * The whole client list, for the pickers that have to offer all of it.
+ *
+ * `GET /clients` caps a page at two hundred, and the `FIRM` plan caps the
+ * firm at nothing — so "ask once and use what comes back" quietly lost every
+ * client past the two hundredth, alphabetically, on five separate screens.
+ */
+describe('listAllClients', () => {
+  /** A client whose only interesting property is being distinguishable. */
+  const client = (name) => ({ id: `c-${name}`, name })
+
+  /** `api.listClients` answering out of one long list, page by page. */
+  function pagedClients(total) {
+    const everyone = Array.from({ length: total }, (_, i) => client(`Client ${i}`))
+    return vi
+      .spyOn(api, 'listClients')
+      .mockImplementation(async ({ limit, offset }) => ({
+        items: everyone.slice(offset, offset + limit),
+        total: everyone.length,
+        limit,
+        offset,
+      }))
+  }
+
+  it('asks once when the firm fits inside a single page', async () => {
+    const spy = pagedClients(40)
+
+    await expect(api.listAllClients()).resolves.toHaveLength(40)
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps asking until it holds every client the firm has', async () => {
+    const spy = pagedClients(340)
+
+    const all = await api.listAllClients()
+
+    expect(all).toHaveLength(340)
+    expect(spy).toHaveBeenCalledTimes(2)
+    // The tail is the half that used to go missing, and it goes missing
+    // alphabetically — so the same clients vanished from every screen.
+    expect(all.at(-1).name).toBe('Client 339')
+  })
+
+  it('asks for the largest page the endpoint will answer with', async () => {
+    const spy = pagedClients(500)
+
+    await expect(api.listAllClients()).resolves.toHaveLength(500)
+    expect(spy.mock.calls.map(([params]) => params.offset)).toEqual([0, 200, 400])
+    expect(spy.mock.calls.every(([params]) => params.limit === 200)).toBe(true)
+  })
+
+  it('carries a filter onto every page rather than only the first', async () => {
+    const spy = pagedClients(250)
+
+    await api.listAllClients({ is_active: true })
+
+    expect(spy.mock.calls.every(([params]) => params.is_active === true)).toBe(true)
+  })
+
+  it('stops on a page that comes back empty, rather than spinning', async () => {
+    // A total that its own pages never reach — a client off-boarded out of the
+    // filtered set between two requests is the ordinary way to see this.
+    const spy = vi.spyOn(api, 'listClients').mockImplementation(async ({ limit, offset }) => ({
+      items: offset === 0 ? [client('Only one')] : [],
+      total: 900,
+      limit,
+      offset,
+    }))
+
+    await expect(api.listAllClients()).resolves.toHaveLength(1)
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  it('gives up rather than paging for ever when the pages never satisfy the total', async () => {
+    const spy = vi.spyOn(api, 'listClients').mockImplementation(async ({ limit, offset }) => ({
+      // Always full, never enough: a server that reports a total it will not
+      // serve would otherwise be an endless loop in the browser.
+      items: Array.from({ length: limit }, (_, i) => client(`c${offset + i}`)),
+      total: Number.MAX_SAFE_INTEGER,
+      limit,
+      offset,
+    }))
+
+    await api.listAllClients()
+
+    expect(spy).toHaveBeenCalledTimes(25)
+  })
+})

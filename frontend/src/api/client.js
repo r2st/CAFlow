@@ -250,6 +250,76 @@ function documentUploadForm(file, { clientId, complianceItemId, requirement, cat
   return form
 }
 
+/**
+ * The largest page `GET /clients` will answer with. Asking for more is a 422,
+ * so this is the ceiling a single request can reach — not a number we chose.
+ */
+const CLIENT_PAGE_LIMIT = 200
+
+/**
+ * A backstop on the paging loop below, not a limit on the firm.
+ *
+ * The loop is bounded by `total`, so this only comes into play if the server
+ * reports a total its own pages never reach. Twenty-five pages is five
+ * thousand clients — well past any real practice — so reaching it means
+ * something is wrong rather than that a firm is large.
+ */
+const MAX_CLIENT_PAGES = 25
+
+/**
+ * Every client the firm has, for the pickers that need to offer all of them.
+ *
+ * Five screens populate a client `<select>` — the calendar filter, the billing
+ * ledger filter, the document upload form, the reminders composer and log, and
+ * the task board — and every one of them asked for `limit: 200` and used what
+ * came back. Two hundred is the endpoint's *maximum* page, not a count of
+ * anything, and the `FIRM` plan sets no client limit at all, so a practice past
+ * it simply lost the tail of its own client list: the response says
+ * `total: 340`, the picker holds 200, and nothing on the screen says the other
+ * 140 exist.
+ *
+ * The list is ordered by name, so which clients disappear is alphabetical and
+ * stable — the same firms are missing from every screen, every day. What that
+ * costs is not a cosmetic gap:
+ *
+ * * a document that arrives for one of them cannot be uploaded at all; the
+ *   upload form names its client from this list and there is no other route;
+ * * they cannot be written to, so no reminder about a deadline reaches them;
+ * * filtering the ledger or the calendar to them is impossible, and the
+ *   practitioner's reading of an unfilterable client is usually that there is
+ *   nothing to find.
+ *
+ * Four of the five ask without `is_active`, so off-boarded clients occupy the
+ * two hundred as well — a firm need only have *had* that many to start losing
+ * the clients it currently acts for.
+ *
+ * Paged out in full rather than capped higher: a cap is the same bug with a
+ * larger number in it, and the loop costs one extra request per two hundred
+ * clients on a list that is fetched once when the screen opens.
+ *
+ * Routed through `api.listClients` rather than `request` so that it stays a
+ * composition of the public call — which is also what keeps it observable to a
+ * caller that has stubbed the endpoint.
+ */
+async function listAllClients(params = {}) {
+  const first = await api.listClients({ ...params, limit: CLIENT_PAGE_LIMIT, offset: 0 })
+  const items = [...first.items]
+  const total = first.total ?? items.length
+
+  for (let page = 1; items.length < total && page < MAX_CLIENT_PAGES; page += 1) {
+    const next = await api.listClients({
+      ...params,
+      limit: CLIENT_PAGE_LIMIT,
+      offset: page * CLIENT_PAGE_LIMIT,
+    })
+    // An empty page means the list shrank under us — a client off-boarded
+    // between requests. Stop rather than spin to the backstop.
+    if (next.items.length === 0) break
+    items.push(...next.items)
+  }
+  return items
+}
+
 export const api = {
   // --- Auth ---
   register: (payload) => request('/auth/register', { method: 'POST', body: payload, auth: false }),
@@ -279,6 +349,7 @@ export const api = {
 
   // --- Clients ---
   listClients: (params) => request('/clients', { params }),
+  listAllClients: (params) => listAllClients(params),
   getClient: (id) => request(`/clients/${id}`),
   createClient: (payload) => request('/clients', { method: 'POST', body: payload }),
   updateClient: (id, payload) => request(`/clients/${id}`, { method: 'PATCH', body: payload }),

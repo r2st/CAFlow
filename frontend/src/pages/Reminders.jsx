@@ -213,8 +213,10 @@ export default function Reminders() {
   useEffect(() => {
     refreshPending()
     api
-      .listClients({ limit: 200 })
-      .then((result) => setClients(result.items))
+      // Every client — see `listAllClients` for what the first page alone cost.
+      // Here it decided who the firm could write to at all.
+      .listAllClients()
+      .then(setClients)
       .catch(() => setClients([]))
   }, [refreshPending])
 

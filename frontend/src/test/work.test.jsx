@@ -678,6 +678,57 @@ describe('Reminders', () => {
     expect(await screen.findByText(/3 waiting to go out/)).toBeInTheDocument()
   })
 
+  /**
+   * A practice larger than one page of `GET /clients`.
+   *
+   * The picker asked for `limit: 200` — the endpoint's maximum, not a count of
+   * anything — and used what came back, so a firm on the `FIRM` plan, which
+   * sets no client limit, lost the tail of its own client list. On this page
+   * that decided who the firm could write to at all: the client is simply not
+   * an option, and no reminder about any deadline reaches them.
+   */
+  describe('a firm with more clients than one page holds', () => {
+    const LAST = { ...CLIENT, id: 'c-201', name: 'Zenith Alloys Pvt Ltd' }
+
+    beforeEach(() => {
+      const everyone = [
+        ...Array.from({ length: 200 }, (_, i) => ({
+          ...CLIENT,
+          id: `c-${i}`,
+          name: `Client ${String(i).padStart(3, '0')}`,
+        })),
+        LAST,
+      ]
+      api.listClients.mockImplementation(async ({ limit, offset }) =>
+        pageOf(everyone.slice(offset, offset + limit), {
+          total: everyone.length,
+          limit,
+          offset,
+        }),
+      )
+    })
+
+    it('reads past the first page rather than stopping at the endpoint maximum', async () => {
+      renderPage(<Reminders />)
+
+      await screen.findByText('GSTR-3B (Monthly) — 2026-07')
+      await waitFor(() =>
+        expect(api.listClients).toHaveBeenCalledWith(
+          expect.objectContaining({ offset: 200 }),
+        ),
+      )
+    })
+
+    it('offers a client who falls past that page in the composer', async () => {
+      renderPage(<Reminders />)
+
+      const composer = await screen.findByLabelText('Send to')
+      await waitFor(() =>
+        expect(within(composer).getByText('Zenith Alloys Pvt Ltd')).toBeInTheDocument(),
+      )
+    })
+  })
+
   describe('an off-boarded client, in the two pickers on this page', () => {
     /**
      * The composer and the filter ask different questions of the same list,
