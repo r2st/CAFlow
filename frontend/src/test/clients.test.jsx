@@ -429,6 +429,146 @@ describe('deactivating a client', () => {
   })
 })
 
+describe('taking a client back on', () => {
+  /**
+   * Off-boarding was one-way from the app.
+   *
+   * The API has had the whole of the other direction for a while — `PATCH`
+   * with `is_active: true` claims a plan slot, reopens the filings off-boarding
+   * shelved at the status they held, drops the ones the registrations no longer
+   * call for, and tops the calendar up — and nothing in the UI sent it.
+   * `Deactivate` only appeared while the client was active, and the edit form
+   * has no standing field at all. The ways round it were closed too:
+   * re-creating the client is a 409 on the duplicate PAN, and `Regenerate
+   * compliance items` is a 409 telling the practitioner to reactivate them.
+   */
+  beforeEach(() => {
+    signedInAs('owner')
+    vi.spyOn(api, 'calendar').mockResolvedValue(calendarResponse([]))
+    vi.spyOn(api, 'portalAccess').mockResolvedValue({
+      client_id: 'c-1',
+      portal_enabled: false,
+      portal_token_valid_from: null,
+      portal_last_seen_at: null,
+    })
+    vi.spyOn(api, 'listTasks').mockResolvedValue(pageOf([]))
+    vi.spyOn(api, 'listDocuments').mockResolvedValue(pageOf([]))
+    vi.spyOn(api, 'listInvoices').mockResolvedValue(pageOf([]))
+  })
+
+  function renderDetail() {
+    return renderAt('/clients/c-1', '/clients/:clientId', <ClientDetail />)
+  }
+
+  function offBoarded(overrides = {}) {
+    return clientDetail({ is_active: false, ...overrides })
+  }
+
+  it('offers the way back on an off-boarded client', async () => {
+    vi.spyOn(api, 'getClient').mockResolvedValue(offBoarded())
+
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+    expect(screen.getByRole('button', { name: 'Reactivate' })).toBeInTheDocument()
+  })
+
+  it('does not offer it on a client who is already active', async () => {
+    vi.spyOn(api, 'getClient').mockResolvedValue(clientDetail())
+
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+    expect(screen.queryByRole('button', { name: 'Reactivate' })).not.toBeInTheDocument()
+  })
+
+  it('sends the standing change the API reads', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'getClient')
+      .mockResolvedValueOnce(offBoarded())
+      .mockResolvedValue(clientDetail())
+    const update = vi
+      .spyOn(api, 'updateClient')
+      .mockResolvedValue({ client: CLIENT, compliance_items_created: 0 })
+
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+    await user.click(screen.getByRole('button', { name: 'Reactivate' }))
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith('c-1', { is_active: true }))
+    expect(await screen.findByText(/Client reactivated/)).toBeInTheDocument()
+  })
+
+  it('says how much calendar came back with them', async () => {
+    // Reactivating is not just a flag: the filings it generates are what the
+    // client owes from today, and a firm that is not told has no reason to look.
+    const user = userEvent.setup()
+    vi.spyOn(api, 'getClient')
+      .mockResolvedValueOnce(offBoarded())
+      .mockResolvedValue(clientDetail())
+    vi.spyOn(api, 'updateClient').mockResolvedValue({
+      client: CLIENT,
+      compliance_items_created: 7,
+    })
+
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+    await user.click(screen.getByRole('button', { name: 'Reactivate' }))
+
+    expect(
+      await screen.findByText(/7 new compliance item\(s\) were generated/),
+    ).toBeInTheDocument()
+  })
+
+  it('reloads, so the page comes back showing an active client', async () => {
+    const user = userEvent.setup()
+    const getClient = vi
+      .spyOn(api, 'getClient')
+      .mockResolvedValueOnce(offBoarded())
+      .mockResolvedValue(clientDetail())
+    vi.spyOn(api, 'updateClient').mockResolvedValue({
+      client: CLIENT,
+      compliance_items_created: 0,
+    })
+
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+    await user.click(screen.getByRole('button', { name: 'Reactivate' }))
+
+    await waitFor(() => expect(getClient).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Deactivate' })).toBeInTheDocument(),
+    )
+    expect(screen.queryByRole('button', { name: 'Reactivate' })).not.toBeInTheDocument()
+  })
+
+  it('reports a refusal and leaves the client off-boarded', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'getClient').mockResolvedValue(offBoarded())
+    vi.spyOn(api, 'updateClient').mockRejectedValue(
+      new Error('The practice plan allows 50 clients. Upgrade to add more.'),
+    )
+
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+    await user.click(screen.getByRole('button', { name: 'Reactivate' }))
+
+    expect(await screen.findByText(/Upgrade to add more/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reactivate' })).toBeInTheDocument()
+  })
+
+  it('withholds the calendar top-up, which an off-boarded client is refused', async () => {
+    // `POST /clients/{id}/compliance-items` answers a 409 saying to reactivate
+    // the client — so offering it here was a button whose only outcome was an
+    // error naming the button that should have been there instead.
+    vi.spyOn(api, 'getClient').mockResolvedValue(offBoarded())
+
+    renderDetail()
+    await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+    expect(
+      screen.queryByRole('button', { name: 'Regenerate compliance items' }),
+    ).not.toBeInTheDocument()
+  })
+})
+
 describe('arriving back on the client after a save', () => {
   beforeEach(() => {
     signedInAs('owner')

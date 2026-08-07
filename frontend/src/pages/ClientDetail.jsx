@@ -136,6 +136,46 @@ export default function ClientDetail() {
     }
   }
 
+  /**
+   * Take a client back on.
+   *
+   * Off-boarding was one-way from the app. The API has had the whole of the
+   * other direction for a while — `PATCH /clients/{id}` with `is_active: true`
+   * claims a plan slot, reopens the filings off-boarding shelved at the status
+   * they held, drops the ones the client's registrations no longer call for,
+   * and tops the calendar up for everything that has fallen due since — and
+   * nothing in the UI sent it. `Deactivate` only ever appeared while the client
+   * was active, and the edit form has no standing field at all.
+   *
+   * So a client off-boarded by mistake, or genuinely coming back, had no route
+   * home, and the ways round it were all closed too: re-creating them is a 409
+   * on the duplicate PAN, and `Regenerate compliance items` — which this page
+   * went on offering an off-boarded client — is a 409 telling the practitioner
+   * to reactivate the client, which was the one thing they could not do.
+   *
+   * The count is spoken back because reactivating is not just a flag: the
+   * filings it restores and the ones it generates are what the client owes
+   * from today, and a firm that is not told has no reason to look.
+   */
+  async function reactivate() {
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await api.updateClient(clientId, { is_active: true })
+      setNotice(
+        result.compliance_items_created > 0
+          ? `Client reactivated — their filings are tracked again, and ${result.compliance_items_created} new compliance item(s) were generated.`
+          : 'Client reactivated — their filings are tracked again.',
+      )
+      await Promise.all([load(), loadWork()])
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function regenerate() {
     setBusy(true)
     setError('')
@@ -203,17 +243,28 @@ export default function ClientDetail() {
                 Edit client
               </button>
             </Link>
-            <button className="secondary" onClick={regenerate} disabled={busy}>
-              {busy ? 'Generating…' : 'Regenerate compliance items'}
-            </button>
-            {client.is_active && (
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setConfirmingDeactivate(true)}
-                disabled={busy}
-              >
-                Deactivate
+            {/* Both of these are about a calendar an off-boarded client does
+                not have. Generation is refused outright for one — a 409 saying
+                to reactivate them — so offering it here was a button whose
+                only outcome was an error naming the button that should have
+                been there instead. */}
+            {client.is_active ? (
+              <>
+                <button className="secondary" onClick={regenerate} disabled={busy}>
+                  {busy ? 'Generating…' : 'Regenerate compliance items'}
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setConfirmingDeactivate(true)}
+                  disabled={busy}
+                >
+                  Deactivate
+                </button>
+              </>
+            ) : (
+              <button type="button" onClick={reactivate} disabled={busy}>
+                {busy ? 'Reactivating…' : 'Reactivate'}
               </button>
             )}
           </div>
