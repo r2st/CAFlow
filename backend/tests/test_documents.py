@@ -8,10 +8,12 @@ from __future__ import annotations
 import io
 import logging
 import uuid
+from datetime import timedelta
 
 import pytest
 from sqlalchemy.exc import OperationalError
 
+from app.core import clock
 from app.models.base import DocumentCategory
 from app.models.document import Document
 from app.services import documents as document_service
@@ -319,7 +321,10 @@ class TestOutstanding:
 
         body = client.get(
             "/api/v1/documents/outstanding",
-            params={"from_date": "2020-01-01", "to_date": "2035-12-31"},
+            params={
+                "from_date": (clock.today() - timedelta(days=180)).isoformat(),
+                "to_date": (clock.today() + timedelta(days=180)).isoformat(),
+            },
             headers=auth_headers,
         ).json()
         assert item["id"] not in [c["compliance_item_id"] for c in body["checklists"]]
@@ -331,6 +336,55 @@ class TestOutstanding:
             headers=auth_headers,
         )
         assert response.status_code == 422
+
+
+class TestTheChaseListWindowIsBounded:
+    """The last landing-page read still shaped like "load the table and reduce it here".
+
+    A checklist is not an aggregate: every filing in the window is hydrated,
+    every document attached to any of them is read, and a
+    requirement-by-requirement checklist is built and serialised for each —
+    with no ``limit`` on the result. The window was the only thing bounding
+    that work, and it was the caller's.
+    """
+
+    def _window(self, client, auth_headers, *, days):
+        return client.get(
+            "/api/v1/documents/outstanding",
+            params={
+                "from_date": clock.today().isoformat(),
+                "to_date": (clock.today() + timedelta(days=days)).isoformat(),
+            },
+            headers=auth_headers,
+        )
+
+    def test_a_decade_wide_window_is_refused(self, client, auth_headers, client_id):
+        """A firm's entire calendar, past and pre-generated, in one body."""
+        response = client.get(
+            "/api/v1/documents/outstanding",
+            params={"from_date": "1990-01-01", "to_date": "2099-12-31"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 422
+        assert "at most" in response.json()["detail"]
+
+    def test_the_refusal_names_both_dates(self, client, auth_headers):
+        response = self._window(client, auth_headers, days=400)
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert f"{clock.today():%d %b %Y}" in detail
+
+    def test_a_year_is_still_answered(self, client, auth_headers, client_id):
+        """The calendar is only generated a year ahead, so a year is the whole
+        of what there is to be waiting for."""
+        assert self._window(client, auth_headers, days=366).status_code == 200
+
+    def test_the_default_window_needs_no_dates_at_all(
+        self, client, auth_headers, client_id
+    ):
+        response = client.get("/api/v1/documents/outstanding", headers=auth_headers)
+        assert response.status_code == 200
+        assert response.json()["total_items"] > 0
 
 
 class TestDocumentCrud:

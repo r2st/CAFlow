@@ -35,6 +35,29 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 # How far ahead the "what are we still waiting for" view looks by default.
 OUTSTANDING_HORIZON_DAYS = 45
 
+# And the widest window it will answer for at all.
+#
+# This is the last read on a landing page still shaped like "load the table and
+# reduce it here". The dashboard, the calendar, the workload view, the client
+# screen, the billing summary and the portal have each been taken off that
+# curve; this one cannot be, because a checklist is not an aggregate — every
+# filing in the window is hydrated, every document attached to any of them is
+# read, and a requirement-by-requirement checklist is built and serialised for
+# each. There is no ``limit`` on it either: the whole window comes back.
+#
+# So the window is the only thing bounding the work, and it was the caller's.
+# ``?from_date=1990-01-01&to_date=2099-12-31`` is a firm's entire compliance
+# calendar — every period it has ever filed and every one the nightly generator
+# has materialised ahead — read off disk and rendered into one JSON body, from
+# any authenticated practitioner including a junior, on an endpoint the
+# dashboard already calls on every visit.
+#
+# A year, because that is the whole of what there is to be waiting for:
+# ``compliance_generation_months`` materialises twelve months ahead, so a
+# window past that asks about filings that do not exist yet. Refused with the
+# 422 naming both dates that every other window in the API answers with.
+MAX_OUTSTANDING_WINDOW_DAYS = 366
+
 
 def _get_client_or_404(db: Session, firm_id: uuid.UUID, client_id: uuid.UUID) -> Client:
     client = db.get(Client, client_id)
@@ -171,6 +194,16 @@ def outstanding_documents(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="to_date must not be before from_date",
+        )
+    # See :data:`MAX_OUTSTANDING_WINDOW_DAYS` for what an unbounded one costs.
+    if (end - start).days > MAX_OUTSTANDING_WINDOW_DAYS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"The chase list covers at most {MAX_OUTSTANDING_WINDOW_DAYS} days, "
+                f"and {start:%d %b %Y} to {end:%d %b %Y} is longer. Narrow the "
+                "window — the compliance calendar is only generated a year ahead."
+            ),
         )
 
     pairs = document_service.items_awaiting_documents(
