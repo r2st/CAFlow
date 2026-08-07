@@ -230,6 +230,176 @@ class TestLogin:
         assert response.json()["detail"] == "Incorrect email or password"
 
 
+class TestARefusedSignInIsRecorded:
+    """The trail held only the sign-ins that worked.
+
+    It is what a firm reads once a credential is suspected of having leaked, so
+    the question it exists to answer — was somebody trying to get into this
+    account? — could not be asked of it. A weekend of failed attempts against a
+    partner's address followed by one success read as a single ordinary Monday
+    sign-in.
+    """
+
+    @staticmethod
+    def refusals(client: TestClient, auth_headers: dict) -> list[dict]:
+        return client.get(
+            f"{API}/audit", params={"action": "auth.login_failed"}, headers=auth_headers
+        ).json()["items"]
+
+    def test_a_wrong_password_lands_in_the_trail(
+        self, client: TestClient, auth_headers: dict
+    ):
+        client.post(
+            f"{API}/auth/login",
+            json={"email": "anita@sharma-ca.in", "password": "nope-nope-nope"},
+        )
+
+        entries = self.refusals(client, auth_headers)
+        assert len(entries) == 1
+        assert "anita@sharma-ca.in" in entries[0]["summary"]
+        assert entries[0]["changes"]["reason"] == "wrong password"
+
+    def test_every_attempt_is_its_own_entry(self, client: TestClient, auth_headers: dict):
+        """Three attempts read as three, which is the shape a sweep has."""
+        for attempt in range(3):
+            client.post(
+                f"{API}/auth/login",
+                json={"email": "anita@sharma-ca.in", "password": f"guess-{attempt}"},
+            )
+
+        assert len(self.refusals(client, auth_headers)) == 3
+
+    def test_the_account_is_named_but_is_not_the_actor(
+        self, client: TestClient, auth_headers: dict, registered_firm: dict
+    ):
+        """Whoever typed the wrong password is not proven to be the member.
+
+        ``actor_practitioner_id`` means "this practitioner did this", and
+        putting the account there would file an intrusion into it under the
+        member's own name.
+        """
+        client.post(
+            f"{API}/auth/login",
+            json={"email": "anita@sharma-ca.in", "password": "nope-nope-nope"},
+        )
+
+        entry = self.refusals(client, auth_headers)[0]
+        assert entry["actor_practitioner_id"] is None
+        assert "anita@sharma-ca.in" in entry["actor_label"]
+        assert entry["entity_id"] == registered_firm["practitioner"]["id"]
+
+    def test_where_it_came_from_is_kept(self, client: TestClient, auth_headers: dict):
+        """The address and the client are the whole point of the entry."""
+        client.post(
+            f"{API}/auth/login",
+            json={"email": "anita@sharma-ca.in", "password": "nope-nope-nope"},
+            headers={"User-Agent": "curl/8.4.0"},
+        )
+
+        entry = self.refusals(client, auth_headers)[0]
+        assert entry["user_agent"] == "curl/8.4.0"
+        assert entry["ip_address"]
+
+    def test_an_address_that_signs_in_nowhere_records_nothing(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """There is no firm to attach it to, and no firm could read it.
+
+        An unattached row for any address a caller cares to type is an
+        unauthenticated write into the audit table with nobody to read it.
+        """
+        from app.models.audit import AuditLog
+
+        client.post(
+            f"{API}/auth/login",
+            json={"email": "ghost@nowhere.in", "password": "correct-horse-battery"},
+        )
+
+        assert self.refusals(client, auth_headers) == []
+        assert (
+            db.query(AuditLog).filter(AuditLog.action == "auth.login_failed").count() == 0
+        )
+
+    def test_the_right_password_on_a_switched_off_account_is_recorded(
+        self, client: TestClient, auth_headers: dict, registered_firm: dict, db: Session
+    ):
+        """The more urgent of the two: a credential nobody has rotated."""
+        member = client.post(
+            f"{API}/auth/practitioners",
+            json={
+                "full_name": "Ravi Menon",
+                "email": "ravi@sharma-ca.in",
+                "password": "another-good-passphrase",
+                "role": "junior",
+            },
+            headers=auth_headers,
+        ).json()
+        client.patch(
+            f"{API}/auth/practitioners/{member['id']}",
+            json={"is_active": False},
+            headers=auth_headers,
+        )
+
+        refused = client.post(
+            f"{API}/auth/login",
+            json={"email": "ravi@sharma-ca.in", "password": "another-good-passphrase"},
+        )
+        assert refused.status_code == 403
+
+        entries = self.refusals(client, auth_headers)
+        assert len(entries) == 1
+        assert entries[0]["changes"]["reason"] == "the account has been deactivated"
+
+    def test_a_refusal_the_firm_never_sees_is_still_only_its_own(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Scoped like every other entry: one firm's trail is not another's."""
+        other = client.post(
+            f"{API}/auth/register",
+            json={
+                **FIRM_REGISTRATION,
+                "firm_name": "Iyer & Co",
+                "firm_email": "office@iyer-ca.in",
+                "owner_email": "meera@iyer-ca.in",
+                "pan": "AAACI9876K",
+            },
+        ).json()
+        client.post(
+            f"{API}/auth/login",
+            json={"email": "meera@iyer-ca.in", "password": "wrong-one-entirely"},
+        )
+
+        assert self.refusals(client, auth_headers) == []
+        theirs = self.refusals(
+            client, {"Authorization": f"Bearer {other['access_token']}"}
+        )
+        assert len(theirs) == 1
+
+    def test_a_successful_sign_in_records_no_refusal(
+        self, client: TestClient, auth_headers: dict
+    ):
+        client.post(
+            f"{API}/auth/login",
+            json={"email": "anita@sharma-ca.in", "password": "correct-horse-battery"},
+        )
+        assert self.refusals(client, auth_headers) == []
+
+    def test_the_reply_still_says_nothing_extra(
+        self, client: TestClient, registered_firm: dict
+    ):
+        """Recording the attempt must not change what the caller is told."""
+        known = client.post(
+            f"{API}/auth/login",
+            json={"email": "anita@sharma-ca.in", "password": "nope-nope-nope"},
+        )
+        unknown = client.post(
+            f"{API}/auth/login",
+            json={"email": "ghost@nowhere.in", "password": "nope-nope-nope"},
+        )
+        assert known.status_code == unknown.status_code == 401
+        assert known.json()["detail"] == unknown.json()["detail"]
+
+
 class TestSignInDoesNotSayWhichEmailsAreCustomers:
     """The two ways to fail a sign-in have to be indistinguishable — by the clock too.
 

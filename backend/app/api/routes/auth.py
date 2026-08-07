@@ -85,6 +85,62 @@ def _refuse_duplicate_email(db: Session, email: str) -> None:
     )
 
 
+def _record_sign_in_refusal(
+    db: Session,
+    request: Request,
+    practitioner: Practitioner | None,
+    *,
+    reason: str,
+) -> None:
+    """Record a sign-in that was refused, and commit it before the refusal.
+
+    The audit trail is what a firm reads once a credential is suspected of
+    having leaked, and it held only the sign-ins that *worked*. So the one
+    question it exists to answer — was somebody trying to get into this
+    account? — could not be asked of it. A hundred failed attempts against a
+    partner's address over a weekend, followed by one success, read in the log
+    as a single ordinary Monday sign-in; the two hundred rows that would have
+    named the attempt were never written. The same blindness covers the quieter
+    version: a member who has left and whose password still works somewhere is
+    only visible in the failures they cause before they get in.
+
+    ``actor_practitioner_id`` is deliberately left unset, and this is the
+    reason the entry is built by hand rather than passed ``actor=``. That
+    column means "this practitioner did this", and a failed sign-in is somebody
+    *claiming* to be them — recording the account as the actor of an attempt it
+    may know nothing about would put the member's own name against an intrusion
+    into their account. The address is named in the label and the summary
+    instead, which is what a reader searches on either way.
+
+    Nothing is recorded for an address that signs in nowhere. There is no firm
+    to attach such a row to, so no firm could read it — ``GET /audit`` is
+    scoped by ``firm_id`` — and an unattached row for any address a caller
+    cares to type is an unauthenticated write into the audit table with no
+    reader. The addresses that matter are the ones that name an account, and
+    those are exactly the ones kept.
+
+    Committed here, because the caller raises immediately afterwards and an
+    ``HTTPException`` out of a handler discards the session's work. Nothing
+    else is pending on this transaction: the failure paths write no other row.
+    """
+    if practitioner is None:
+        return
+    caller_ip, caller_agent = audit.request_origin(request)
+    audit.record(
+        db,
+        action="auth.login_failed",
+        entity_type="practitioner",
+        entity_id=practitioner.id,
+        firm_id=practitioner.firm_id,
+        actor_label=audit.practitioner_label(practitioner),
+        summary=f"Refused sign-in for {practitioner.email} — {reason}",
+        changes={"reason": reason},
+        ip_address=caller_ip,
+        user_agent=caller_agent,
+    )
+    db.commit()
+
+
 def _token_response(practitioner: Practitioner, firm: Firm) -> TokenResponse:
     token = create_access_token(
         practitioner_id=practitioner.id, firm_id=firm.id, role=practitioner.role
@@ -165,16 +221,36 @@ def login(payload: LoginRequest, request: Request, db: DbSession):
     # failed anyway; naming both makes that an assertion rather than a trace.
     password_matches = verify_password(payload.password, stored_hash)
     if practitioner is None or not password_matches:
+        # Recorded against the account the address names, and against nothing
+        # at all when it names none — see :func:`_record_sign_in_refusal`. What
+        # comes back to the caller is unchanged either way, so the trail learns
+        # something the reply still does not say.
+        _record_sign_in_refusal(db, request, practitioner, reason="wrong password")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password"
         )
     if not practitioner.is_active:
+        # The password was right. That is the more urgent of the two entries:
+        # a credential that still works on an account the firm has switched
+        # off is one nobody has rotated.
+        _record_sign_in_refusal(
+            db, request, practitioner, reason="the account has been deactivated"
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="This account has been deactivated"
         )
 
     firm = db.get(Firm, practitioner.firm_id)
     if firm is None or not firm.is_active:
+        # Only when the firm is still a row: ``audit_log.firm_id`` is a foreign
+        # key, so an entry naming a firm that has gone cannot be written — and
+        # there would be nobody left to read it.
+        _record_sign_in_refusal(
+            db,
+            request,
+            practitioner if firm is not None else None,
+            reason="the firm is not active",
+        )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Firm is not active")
 
     practitioner.last_login_at = datetime.now(UTC)
