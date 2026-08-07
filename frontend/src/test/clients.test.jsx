@@ -14,6 +14,7 @@ import {
   FIRM,
   PRACTITIONER,
   calendarResponse,
+  complianceItem,
   pageOf,
   practitioner as practitionerFixture,
 } from './fixtures'
@@ -625,5 +626,111 @@ describe('arriving back on the client after a save', () => {
     await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
     expect(screen.queryByText(/Client saved/)).not.toBeInTheDocument()
     expect(screen.queryByText(/Client created/)).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Paging the filings on a client's own page.
+ *
+ * The panel asked for five hundred and printed `calendar.total` beside them —
+ * the same pair the whole-firm calendar was carrying, on the one screen where
+ * the list is the client's entire compliance history and there is no other
+ * view of it. `WINDOW` spans 2020 to 2035 deliberately, and a full-service
+ * client runs to roughly sixty filings a year, so a long-standing client
+ * reaches five hundred inside the product's ordinary lifetime: a heading
+ * reading "540 filing(s)" above five hundred rows, earliest ones absent, with
+ * nothing saying so.
+ */
+describe('a client with more filings than one page holds', () => {
+  const PAGE_SIZE = 100
+
+  /** One page of `total` filings, numbered so a page can be told from its neighbour. */
+  function filingPage({ offset, total }) {
+    const items = Array.from(
+      { length: Math.min(PAGE_SIZE, total - offset) },
+      (_, i) => complianceItem({ id: `ci-${offset + i}`, period_label: `P${offset + i}` }),
+    )
+    return { ...calendarResponse(items), total, limit: PAGE_SIZE, offset }
+  }
+
+  function stubCalendar(total) {
+    return vi
+      .spyOn(api, 'calendar')
+      .mockImplementation(async ({ offset = 0 }) => filingPage({ offset, total }))
+  }
+
+  beforeEach(() => {
+    signedInAs('owner')
+    vi.spyOn(api, 'getClient').mockResolvedValue(clientDetail())
+    vi.spyOn(api, 'portalAccess').mockResolvedValue({
+      client_id: 'c-1',
+      portal_enabled: false,
+      portal_token_valid_from: null,
+      portal_last_seen_at: null,
+    })
+    vi.spyOn(api, 'listTasks').mockResolvedValue(pageOf([]))
+    vi.spyOn(api, 'listDocuments').mockResolvedValue(pageOf([]))
+    vi.spyOn(api, 'listInvoices').mockResolvedValue(pageOf([]))
+  })
+
+  function renderDetail() {
+    return renderAt('/clients/c-1', '/clients/:clientId', <ClientDetail />)
+  }
+
+  it('asks for one page rather than as much as the endpoint allows', async () => {
+    const calendar = stubCalendar(240)
+
+    renderDetail()
+
+    await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+    await waitFor(() =>
+      expect(calendar).toHaveBeenCalledWith(
+        expect.objectContaining({ client_id: 'c-1', limit: PAGE_SIZE, offset: 0 }),
+      ),
+    )
+  })
+
+  it('says which of the filings it is showing when there are more', async () => {
+    stubCalendar(240)
+
+    renderDetail()
+
+    expect(await screen.findByText('Showing 1–100 of 240')).toBeInTheDocument()
+  })
+
+  it('reads the next page rather than leaving the rest unreachable', async () => {
+    const user = userEvent.setup()
+    const calendar = stubCalendar(240)
+
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: 'Next' }))
+
+    await waitFor(() =>
+      expect(calendar).toHaveBeenCalledWith(expect.objectContaining({ offset: 100 })),
+    )
+    expect(await screen.findByText('Showing 101–200 of 240')).toBeInTheDocument()
+  })
+
+  it('stops at the last page, which is a short one', async () => {
+    const user = userEvent.setup()
+    stubCalendar(240)
+
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: 'Next' }))
+    await screen.findByText('Showing 101–200 of 240')
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+
+    expect(await screen.findByText('Showing 201–240 of 240')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+  })
+
+  it('offers no pager when the client fits on one page', async () => {
+    stubCalendar(40)
+
+    renderDetail()
+
+    await screen.findByRole('heading', { name: 'Nimbus Textiles Pvt Ltd' })
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Showing/)).not.toBeInTheDocument()
   })
 })

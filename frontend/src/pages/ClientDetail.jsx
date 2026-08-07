@@ -28,6 +28,24 @@ const WINDOW = { from_date: '2020-01-01', to_date: '2035-12-31' }
 const PREVIEW = 5
 
 /**
+ * How many of this client's filings one page of the panel below shows.
+ *
+ * The panel used to ask for five hundred and print `calendar.total` beside
+ * them — the same pair the whole-firm calendar was carrying, on a narrower
+ * window and so further from biting, but on the one screen where the list is
+ * the client's entire compliance history and there is no other view of it.
+ *
+ * `WINDOW` spans 2020 to 2035 deliberately, and a full-service client is
+ * roughly sixty filings a year once GST, TDS, payroll and the annual returns
+ * are counted — with the generator materialising a year ahead of time. So a
+ * client a firm has acted for since the window opened reaches five hundred
+ * inside the product's ordinary lifetime, and what they would have seen is a
+ * heading reading "540 filing(s)" above five hundred rows, with the earliest
+ * ones simply absent and nothing saying so.
+ */
+const FILINGS_PAGE_SIZE = 100
+
+/**
  * A side panel summarising one domain for this client, with a link into the
  * full page filtered to them. Rendered even when empty, because "no unpaid
  * invoices" is itself worth knowing on a client page.
@@ -83,13 +101,23 @@ export default function ClientDetail() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [confirmingDeactivate, setConfirmingDeactivate] = useState(false)
+  const [filingsOffset, setFilingsOffset] = useState(0)
 
+  // The offset is a dependency, so turning a page reloads the pair. Nothing
+  // here shrinks the filing count — regenerating only adds, and off-boarding
+  // moves statuses rather than removing rows — so a page the caller is on
+  // cannot be stranded past the end by anything the buttons on this screen do.
   const load = useCallback(async () => {
     setError('')
     try {
       const [detail, cal] = await Promise.all([
         api.getClient(clientId),
-        api.calendar({ ...WINDOW, client_id: clientId, limit: 500 }),
+        api.calendar({
+          ...WINDOW,
+          client_id: clientId,
+          limit: FILINGS_PAGE_SIZE,
+          offset: filingsOffset,
+        }),
       ])
       setClient(detail)
       setCalendar(cal)
@@ -98,7 +126,7 @@ export default function ClientDetail() {
     } finally {
       setLoading(false)
     }
-  }, [clientId])
+  }, [clientId, filingsOffset])
 
   // The work panels load separately from the client itself: they are context,
   // not the record, and none of them should be able to fail the page.
@@ -220,6 +248,8 @@ export default function ClientDetail() {
   }
 
   const summary = client.compliance_summary
+  const filingsTotal = calendar?.total ?? 0
+  const filingsShowingTo = Math.min(filingsOffset + FILINGS_PAGE_SIZE, filingsTotal)
 
   return (
     <>
@@ -423,7 +453,34 @@ export default function ClientDetail() {
           <span className="small muted">{calendar?.total ?? 0} filing(s)</span>
         </div>
         {calendar && calendar.items.length > 0 ? (
-          <ComplianceTable items={calendar.items} showClient={false} showFee />
+          <>
+            <ComplianceTable items={calendar.items} showClient={false} showFee />
+            {filingsTotal > FILINGS_PAGE_SIZE && (
+              <div className="card-header pager">
+                <span className="small muted">
+                  Showing {filingsOffset + 1}–{filingsShowingTo} of {filingsTotal}
+                </span>
+                <div className="button-row">
+                  <button
+                    className="secondary small"
+                    disabled={filingsOffset === 0}
+                    onClick={() =>
+                      setFilingsOffset(Math.max(0, filingsOffset - FILINGS_PAGE_SIZE))
+                    }
+                  >
+                    Previous
+                  </button>
+                  <button
+                    className="secondary small"
+                    disabled={filingsShowingTo >= filingsTotal}
+                    onClick={() => setFilingsOffset(filingsOffset + FILINGS_PAGE_SIZE)}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         ) : (
           <EmptyState title="No compliance items">
             Set this client&apos;s registrations, then regenerate the calendar.
