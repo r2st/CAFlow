@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '../api/client'
 import ComplianceTable from '../components/ComplianceTable'
-import { Alert, EmptyState, Skeleton, monthWindow, todayInIndia } from '../components/ui'
+import {
+  Alert,
+  EmptyState,
+  Skeleton,
+  monthWindow,
+  todayInIndia,
+  usePageOffsetGuard,
+} from '../components/ui'
 
 const CATEGORIES = [
   ['', 'All categories'],
@@ -150,6 +157,11 @@ export default function Calendar() {
       setSaving(false)
     }
   }
+
+  // *Mark filed* moves rows out of `overdue`, `due_soon` and `upcoming`, so
+  // the page a practitioner just cleared can be past the end of the set the
+  // status filter now matches. See `usePageOffsetGuard`.
+  usePageOffsetGuard(data, offset, setOffset, PAGE_SIZE)
 
   const buckets = data?.buckets ?? []
   const total = data?.total ?? 0

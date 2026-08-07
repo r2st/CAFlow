@@ -7,6 +7,7 @@ import {
   formatDaysRemaining,
   formatRupees,
   isoDateInIndia,
+  lastPageOffset,
   monthWindow,
   statusLabel,
   todayInIndia,
@@ -215,5 +216,35 @@ describe('ComplianceTable', () => {
     renderTable({ selectable: true, selectedIds: ['ci-1'] })
     const rowBox = screen.getByLabelText(/Select GSTR-3B/)
     expect(rowBox).toBeChecked()
+  })
+})
+
+/**
+ * Where a paged list comes home to when its offset outruns its total; see
+ * `usePageOffsetGuard` for what goes wrong without it.
+ */
+describe('lastPageOffset', () => {
+  it('lands on the page holding the final rows', () => {
+    expect(lastPageOffset(240, 100)).toBe(200)
+    expect(lastPageOffset(201, 100)).toBe(200)
+  })
+
+  it('keeps an exact multiple on the last full page rather than one past it', () => {
+    // 200 rows of 100 end at offset 100. Off by one here and the guard sends
+    // the caller to a page that is empty for the same reason they were sent.
+    expect(lastPageOffset(200, 100)).toBe(100)
+    expect(lastPageOffset(100, 100)).toBe(0)
+  })
+
+  it('sends an empty set back to the beginning', () => {
+    // Nothing matches, so there is no last page; the empty state is the true
+    // thing to say and the offset should not survive to skew the next filter.
+    expect(lastPageOffset(0, 100)).toBe(0)
+    expect(lastPageOffset(-1, 100)).toBe(0)
+  })
+
+  it('holds for a short first page', () => {
+    expect(lastPageOffset(1, 100)).toBe(0)
+    expect(lastPageOffset(99, 100)).toBe(0)
   })
 })

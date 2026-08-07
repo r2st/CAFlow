@@ -333,6 +333,77 @@ describe('Compliance calendar', () => {
       await screen.findByLabelText(/^Select GSTR-3B \(Monthly\)/)
       expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
     })
+
+    /**
+     * The pager is drawn inside the branch that has rows to draw, so a page
+     * that comes back empty falls through to the empty state — which says
+     * "no filings match these filters" and carries no Previous button.
+     *
+     * *Mark filed* is what empties one. Narrowed to Overdue is exactly when
+     * the set is long enough to page and exactly when a practitioner is
+     * working down it to the end, and clearing the last page moves every row
+     * on it out of the filtered set. What they were told was that nothing
+     * matched a filter that in fact matched two hundred filings, with the way
+     * back off the screen: changing a filter resets the offset as a side
+     * effect, and reloading the browser was the other way out.
+     */
+    it('steps back to the last page with rows when the one it is on is emptied', async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      vi.spyOn(api, 'bulkUpdateStatus').mockResolvedValue({ updated: 40, skipped: 0 })
+
+      // 240 overdue filings, forty of them on the last page. Filing those forty
+      // leaves 200, and offset 200 is then one page past the end.
+      let remaining = 240
+      api.calendar.mockImplementation(async ({ offset = 0 }) =>
+        page(Math.max(0, Math.min(100, remaining - offset)), remaining, offset),
+      )
+
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: 'Next' }))
+      await user.click(await screen.findByRole('button', { name: 'Next' }))
+      expect(await screen.findByText('Showing 201–240 of 240')).toBeInTheDocument()
+
+      remaining = 200
+      await user.click(await screen.findByLabelText('Select all filings'))
+      await user.click(screen.getByRole('button', { name: 'Mark filed' }))
+
+      expect(await screen.findByText('Showing 101–200 of 200')).toBeInTheDocument()
+      expect(
+        screen.queryByText('No filings match these filters'),
+      ).not.toBeInTheDocument()
+    })
+
+    /**
+     * A set that really has gone empty is not stranded — it is empty, and the
+     * empty state is the true thing to say. The offset still has to come home,
+     * or the next widening of the filter reads from page three of a set that
+     * now starts again at one.
+     */
+    it('returns to the first page when the filtered set empties completely', async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      vi.spyOn(api, 'bulkUpdateStatus').mockResolvedValue({ updated: 40, skipped: 0 })
+
+      let remaining = 240
+      api.calendar.mockImplementation(async ({ offset = 0 }) =>
+        page(Math.max(0, Math.min(100, remaining - offset)), remaining, offset),
+      )
+
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: 'Next' }))
+      await waitFor(() =>
+        expect(api.calendar).toHaveBeenCalledWith(expect.objectContaining({ offset: 100 })),
+      )
+
+      remaining = 0
+      api.calendar.mockClear()
+      await user.click(await screen.findByLabelText('Select all filings'))
+      await user.click(screen.getByRole('button', { name: 'Mark filed' }))
+
+      await waitFor(() =>
+        expect(api.calendar).toHaveBeenCalledWith(expect.objectContaining({ offset: 0 })),
+      )
+      expect(await screen.findByText('No filings match these filters')).toBeInTheDocument()
+    })
   })
 
   /**

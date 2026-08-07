@@ -2,7 +2,14 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
 import { useAuth } from '../context/AuthContext'
-import { Alert, ENTITY_TYPE_LABELS, EmptyState, Skeleton, TableScroll } from '../components/ui'
+import {
+  Alert,
+  ENTITY_TYPE_LABELS,
+  EmptyState,
+  Skeleton,
+  TableScroll,
+  usePageOffsetGuard,
+} from '../components/ui'
 
 const PAGE_SIZE = 25
 
@@ -39,6 +46,11 @@ export default function Clients() {
     const timer = setTimeout(load, 250)
     return () => clearTimeout(timer)
   }, [load])
+
+  // Nothing on this screen shrinks the list, but a colleague off-boarding
+  // clients while this one is on a later page of `is_active` does. See
+  // `usePageOffsetGuard`.
+  usePageOffsetGuard(page, offset, setOffset, PAGE_SIZE)
 
   const total = page?.total ?? 0
   const showingTo = Math.min(offset + PAGE_SIZE, total)

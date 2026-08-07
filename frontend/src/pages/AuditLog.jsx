@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '../api/client'
-import { Alert, EmptyState, Skeleton, TableScroll, formatDateTime } from '../components/ui'
+import {
+  Alert,
+  EmptyState,
+  Skeleton,
+  TableScroll,
+  formatDateTime,
+  usePageOffsetGuard,
+} from '../components/ui'
 
 /**
  * The audit trail.
@@ -158,6 +165,11 @@ export default function AuditLog() {
     setFilters((prev) => ({ ...prev, [key]: event.target.value }))
     setOffset(0)
   }
+
+  // The trail only ever grows, so this cannot fire from a change to the data.
+  // It is here so that every paged list in the app behaves the same way when
+  // its offset outruns its total. See `usePageOffsetGuard`.
+  usePageOffsetGuard(page, offset, setOffset, PAGE_SIZE)
 
   const entries = page?.items ?? []
   const total = page?.total ?? 0

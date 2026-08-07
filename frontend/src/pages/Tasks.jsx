@@ -14,6 +14,7 @@ import {
   formatDaysRemaining,
   formatMinutes,
   taskTone,
+  usePageOffsetGuard,
 } from '../components/ui'
 
 /**
@@ -280,6 +281,10 @@ export default function Tasks() {
     setFilters((prev) => ({ ...prev, [key]: value }))
     setOffset(0)
   }
+
+  // A bulk status change moves rows out of whichever status is being filtered
+  // on, so the page just cleared can be past the end. See `usePageOffsetGuard`.
+  usePageOffsetGuard(page, offset, setOffset, PAGE_SIZE)
 
   const items = page?.items ?? []
   const total = page?.total ?? 0

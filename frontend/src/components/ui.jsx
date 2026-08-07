@@ -339,6 +339,58 @@ export function EmptyState({ title, children }) {
 }
 
 /**
+ * Where the last page of ``total`` rows begins.
+ *
+ * A ``total`` of nothing has no such page, and offset zero is where an empty
+ * list belongs. ``total - 1`` is what keeps an exact multiple on the last full
+ * page rather than one past it: 200 rows of 100 end at offset 100, not 200.
+ */
+export function lastPageOffset(total, pageSize) {
+  if (total <= 0) return 0
+  return Math.floor((total - 1) / pageSize) * pageSize
+}
+
+/**
+ * Step back when the page underneath the caller has been emptied out.
+ *
+ * Every paged list in the app draws its pager *inside* the branch that has
+ * rows to draw, so a page that comes back empty falls through to the empty
+ * state — which says "nothing matches these filters" and offers no way back.
+ * That is honest when the filtered set really is empty. It is not when the set
+ * is merely shorter than it was a moment ago, and there is no Previous button
+ * on the screen to escape with: the only ways out are changing a filter, which
+ * resets the offset as a side effect, and reloading the browser.
+ *
+ * Five screens shrink their own filtered set from a control sitting on them:
+ *
+ * * the calendar, whose *Mark filed* moves rows out of `overdue`, `due_soon`
+ *   and `upcoming` — and narrowing to one of those is exactly when the set is
+ *   long enough to page and exactly when a practitioner is working down it;
+ *   the same is true of the task board's bulk status change;
+ * * the reminders log, where cancelling a queued chase moves it out of
+ *   `scheduled`;
+ * * the billing ledger, where recording a payment or cancelling an invoice
+ *   moves it out of whichever status is being filtered on;
+ * * the document list, where confirming a category moves a file out of the
+ *   category being filtered on.
+ *
+ * A colleague working the same list gets there too, on any of the seven —
+ * including the two whose own controls cannot shrink anything.
+ *
+ * Only ever backwards, and only from a page that came back empty: a short last
+ * page is not stranded, and neither is a genuinely empty set, which clamps to
+ * zero and leaves the empty state saying the true thing. Re-running the load
+ * is the effect of moving the offset, which every one of these pages already
+ * has as a dependency.
+ */
+export function usePageOffsetGuard(page, offset, setOffset, pageSize) {
+  useEffect(() => {
+    if (!page || offset === 0 || page.items.length > 0) return
+    setOffset(lastPageOffset(page.total ?? 0, pageSize))
+  }, [page, offset, setOffset, pageSize])
+}
+
+/**
  * Shown where a page exists but this practitioner's role cannot use it.
  *
  * Hiding the button that leads here is not enough on its own — the URL is

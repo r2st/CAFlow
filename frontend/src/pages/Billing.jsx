@@ -14,6 +14,7 @@ import {
   formatDate,
   formatRupees,
   invoiceTone,
+  usePageOffsetGuard,
 } from '../components/ui'
 
 /**
@@ -452,6 +453,11 @@ export default function Billing() {
         ? 'Nothing to invoice right now.'
         : `Drafted ${result.created} invoice${result.created === 1 ? '' : 's'} worth ${formatRupees(result.total_paise)}.`
     })
+
+  // Recording a payment or cancelling an invoice moves it out of whichever
+  // status is being filtered on, so the page it left can be past the end. See
+  // `usePageOffsetGuard`.
+  usePageOffsetGuard(page, offset, setOffset, PAGE_SIZE)
 
   const invoices = page?.items ?? []
   const total = page?.total ?? 0

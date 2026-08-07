@@ -14,6 +14,7 @@ import {
   formatDate,
   formatDateTime,
   saveBlob,
+  usePageOffsetGuard,
 } from '../components/ui'
 
 /**
@@ -252,6 +253,10 @@ export default function Documents() {
     },
     [loadDocuments],
   )
+
+  // Confirming a category moves a file out of the category being filtered on,
+  // so a page emptied that way can be past the end. See `usePageOffsetGuard`.
+  usePageOffsetGuard(page, offset, setOffset, PAGE_SIZE)
 
   const documents = page?.items ?? []
   const total = page?.total ?? 0

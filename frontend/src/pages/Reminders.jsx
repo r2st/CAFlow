@@ -12,6 +12,7 @@ import {
   TableScroll,
   formatDateTime,
   reminderTone,
+  usePageOffsetGuard,
 } from '../components/ui'
 
 /**
@@ -285,6 +286,10 @@ export default function Reminders() {
     setFilters((prev) => ({ ...prev, [key]: event.target.value }))
     setOffset(0)
   }
+
+  // Cancelling a queued chase moves it out of `scheduled`, so a page emptied
+  // under the status filter can be past the end. See `usePageOffsetGuard`.
+  usePageOffsetGuard(page, offset, setOffset, PAGE_SIZE)
 
   const reminders = page?.items ?? []
   const total = page?.total ?? 0
