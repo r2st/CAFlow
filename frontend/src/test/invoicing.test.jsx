@@ -257,7 +257,8 @@ describe('Billing — invoice lines', () => {
     expect(await screen.findByText('Invoice not found')).toBeInTheDocument()
   })
 
-  it('offers no edit or cancel on an invoice that has been issued', async () => {
+  it('offers no edit on an invoice that has been issued', async () => {
+    /** Once sent, an invoice is a document the client is holding a copy of. */
     const user = userEvent.setup()
     vi.spyOn(api, 'getInvoice').mockResolvedValue(invoiceDetail({ status: 'sent' }))
     renderBilling()
@@ -266,6 +267,132 @@ describe('Billing — invoice lines', () => {
     await screen.findByText('Advisory on the new TDS rates')
 
     expect(screen.queryByRole('button', { name: 'Edit lines' })).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Withdrawing an invoice that has gone out.
+ *
+ * The ledger offered *Cancel invoice* on drafts alone, and a draft is the one
+ * invoice that least needs it. An invoice *issued* in error had no way out of
+ * the app at all: it cannot be edited, it goes overdue on its own due date, it
+ * is counted in the receivables the partner reads, and the payment sweep
+ * chases the client for it at each offset past due.
+ *
+ * The expensive half is quieter. Cancelling is what releases the filings an
+ * invoice cites back to the billable pile — `billing.release_items` — so while
+ * it stood, that work kept `is_billed` for good and could never be invoiced
+ * again. The revenue leakage the billing module exists to catch, caused by the
+ * module, with nothing on any screen naming it.
+ *
+ * `POST /invoices/{id}/cancel` has always allowed this and refuses on the one
+ * thing that matters: money having changed hands.
+ */
+describe('Billing — withdrawing an invoice that has gone out', () => {
+  beforeEach(() => {
+    vi.spyOn(api, 'listClients').mockResolvedValue(pageOf([CLIENT]))
+    vi.spyOn(api, 'revenue').mockResolvedValue(REVENUE)
+    vi.spyOn(api, 'billableWork').mockResolvedValue(BILLABLE_WORK)
+  })
+
+  /** Open the lines of the one invoice in the ledger. */
+  async function openLines(user, overrides) {
+    vi.spyOn(api, 'listInvoices').mockResolvedValue(pageOf([invoice(overrides)]))
+    vi.spyOn(api, 'getInvoice').mockResolvedValue(invoiceDetail(overrides))
+    renderBilling()
+    await user.click(await screen.findByRole('button', { name: 'Lines' }))
+    await screen.findByText('Advisory on the new TDS rates')
+  }
+
+  it('offers the cancel on a sent invoice nobody has paid', async () => {
+    const user = userEvent.setup()
+    await openLines(user, { status: 'sent' })
+
+    expect(screen.getByRole('button', { name: 'Cancel invoice' })).toBeInTheDocument()
+  })
+
+  it('offers it on one that has already gone overdue', async () => {
+    const user = userEvent.setup()
+    await openLines(user, { status: 'overdue', days_overdue: 12 })
+
+    expect(screen.getByRole('button', { name: 'Cancel invoice' })).toBeInTheDocument()
+  })
+
+  it('asks before withdrawing a document the client already has', async () => {
+    const user = userEvent.setup()
+    const cancel = vi.spyOn(api, 'cancelInvoice')
+    await openLines(user, { status: 'sent' })
+
+    await user.click(screen.getByRole('button', { name: 'Cancel invoice' }))
+
+    expect(screen.getByText(/goes back on the unbilled pile/)).toBeInTheDocument()
+    expect(cancel).not.toHaveBeenCalled()
+  })
+
+  it('withdraws it once that is confirmed', async () => {
+    const user = userEvent.setup()
+    const cancel = vi
+      .spyOn(api, 'cancelInvoice')
+      .mockResolvedValue(invoice({ status: 'cancelled' }))
+    await openLines(user, { status: 'sent' })
+
+    await user.click(screen.getByRole('button', { name: 'Cancel invoice' }))
+    await user.click(screen.getByRole('button', { name: 'Yes, cancel it' }))
+
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('inv-1'))
+  })
+
+  it('leaves it alone when the ask is declined', async () => {
+    const user = userEvent.setup()
+    const cancel = vi.spyOn(api, 'cancelInvoice')
+    await openLines(user, { status: 'sent' })
+
+    await user.click(screen.getByRole('button', { name: 'Cancel invoice' }))
+    await user.click(screen.getByRole('button', { name: 'Keep it' }))
+
+    expect(cancel).not.toHaveBeenCalled()
+    expect(screen.queryByText(/goes back on the unbilled pile/)).not.toBeInTheDocument()
+  })
+
+  it('withdraws a draft without asking — nothing has left the firm', async () => {
+    const user = userEvent.setup()
+    const cancel = vi
+      .spyOn(api, 'cancelInvoice')
+      .mockResolvedValue(invoice({ status: 'cancelled' }))
+    await openLines(user, { status: 'draft' })
+
+    await user.click(screen.getByRole('button', { name: 'Cancel invoice' }))
+
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('inv-1'))
+  })
+
+  it('withholds it once a payment has been recorded', async () => {
+    /** The server refuses this with a 409; the button should not offer it. */
+    const user = userEvent.setup()
+    await openLines(user, {
+      status: 'partially_paid',
+      amount_paid_paise: 100000,
+      balance_paise: 490000,
+    })
+
+    expect(screen.queryByRole('button', { name: 'Cancel invoice' })).not.toBeInTheDocument()
+  })
+
+  it('withholds it on an invoice paid in full', async () => {
+    const user = userEvent.setup()
+    await openLines(user, {
+      status: 'paid',
+      amount_paid_paise: 590000,
+      balance_paise: 0,
+    })
+
+    expect(screen.queryByRole('button', { name: 'Cancel invoice' })).not.toBeInTheDocument()
+  })
+
+  it('withholds it on one already cancelled, which the server refuses twice', async () => {
+    const user = userEvent.setup()
+    await openLines(user, { status: 'cancelled' })
+
     expect(screen.queryByRole('button', { name: 'Cancel invoice' })).not.toBeInTheDocument()
   })
 })

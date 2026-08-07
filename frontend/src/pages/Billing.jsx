@@ -188,6 +188,26 @@ function UnbilledPanel({ billable, onGenerate, busy }) {
 }
 
 /**
+ * Whether an invoice can still be withdrawn.
+ *
+ * Money having changed hands is what closes the door, not the label on the
+ * status — the same test `POST /invoices/{id}/cancel` applies, which refuses
+ * only an invoice with payments recorded against it and only a second cancel.
+ *
+ * The ledger offered this on drafts alone, and a draft is the one invoice that
+ * least needs it. An invoice *issued* in error is the one with no way out: it
+ * is a document of record so it cannot be edited, it goes overdue on its own
+ * due date, it sits on the receivables total the partner reads, and the
+ * payment sweep chases the client for it at 0/7/15/30 days past due. Worse,
+ * the filings it cites keep `is_billed` for good — cancelling is what releases
+ * them — so that work can never be re-invoiced, which is the revenue leakage
+ * the whole billing module exists to catch, caused by the module.
+ */
+function canCancel(invoice) {
+  return invoice.status !== 'cancelled' && invoice.amount_paid_paise === 0
+}
+
+/**
  * The lines behind one invoice, opened in place under its row.
  *
  * Lines are fetched rather than carried on the list row: the ledger shows
@@ -195,6 +215,8 @@ function UnbilledPanel({ billable, onGenerate, busy }) {
  * not worth the payload.
  */
 function InvoiceDetail({ invoice, detail, colSpan, onEdit, onCancel, busy }) {
+  const [confirming, setConfirming] = useState(false)
+
   if (!detail) {
     return (
       <tr className="detail-row">
@@ -205,19 +227,63 @@ function InvoiceDetail({ invoice, detail, colSpan, onEdit, onCancel, busy }) {
     )
   }
 
+  const isDraft = invoice.status === 'draft'
+
   return (
     <tr className="detail-row">
       <td colSpan={colSpan}>
         <InvoiceLineTable invoice={detail} />
-        {invoice.status === 'draft' && (
+        {(isDraft || canCancel(invoice)) && (
           <div className="button-row line-actions">
-            <button type="button" className="secondary small" onClick={onEdit} disabled={busy}>
-              Edit lines
-            </button>
-            <button type="button" className="link small" onClick={onCancel} disabled={busy}>
-              Cancel invoice
-            </button>
+            {isDraft && (
+              <button type="button" className="secondary small" onClick={onEdit} disabled={busy}>
+                Edit lines
+              </button>
+            )}
+            {canCancel(invoice) && (
+              // A draft is withdrawn without ceremony; an issued invoice is a
+              // document the client is holding a copy of, so that one is asked
+              // about first — and the ask names what cancelling releases,
+              // since that is the part nothing on the screen shows.
+              <button
+                type="button"
+                className="link small"
+                onClick={() => (isDraft ? onCancel() : setConfirming(true))}
+                disabled={busy}
+              >
+                Cancel invoice
+              </button>
+            )}
           </div>
+        )}
+        {confirming && (
+          <Alert kind="warning">
+            <span>
+              Cancel {invoice.invoice_number}? It stops being owed, and the filed work it
+              covers goes back on the unbilled pile so it can be invoiced again. The client
+              already has their copy.
+              <span className="button-row" style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirming(false)
+                    onCancel()
+                  }}
+                  disabled={busy}
+                >
+                  Yes, cancel it
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setConfirming(false)}
+                  disabled={busy}
+                >
+                  Keep it
+                </button>
+              </span>
+            </span>
+          </Alert>
         )}
       </td>
     </tr>
