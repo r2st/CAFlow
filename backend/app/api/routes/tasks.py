@@ -194,10 +194,18 @@ def bulk_update_tasks(
         entity_type="task",
         actor=practitioner,
         summary=f"Bulk-updated {len(tasks)} task(s)",
+        # All three of the fields this endpoint can set, not two of them. The
+        # priority was the one left out, and it is the one a bulk update is
+        # most often *for* — a manager sweeping a deadline's worth of work up
+        # to urgent on the morning of the twentieth. What the trail held was
+        # "Bulk-updated 40 task(s)" beside a null status and a null assignee:
+        # an entry recording that something happened to forty tasks and not
+        # what, on the one path that changes forty rows at once.
         changes={
             "task_ids": [str(t.id) for t in tasks],
             "status": payload.status.value if payload.status else None,
             "assignee_id": str(payload.assignee_id) if payload.assignee_id else None,
+            "priority": payload.priority.value if payload.priority else None,
         },
     )
     db.commit()

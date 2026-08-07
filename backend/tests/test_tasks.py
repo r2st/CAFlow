@@ -350,6 +350,76 @@ class TestBulkUpdate:
         assert response.status_code == 422
 
 
+class TestTheBulkTrailNamesAllThreeFields:
+    """The trail recorded two of the three fields this endpoint can set.
+
+    The priority was the one left out, and it is what a bulk update is most
+    often *for* — a manager sweeping a deadline's worth of work up to urgent on
+    the morning of the twentieth. What the log held was "Bulk-updated 40
+    task(s)" beside a null status and a null assignee: an entry saying
+    something happened to forty tasks and not what, on the one path that
+    changes forty rows at once.
+    """
+
+    @staticmethod
+    def last_bulk(client, auth_headers) -> dict:
+        entries = client.get(
+            "/api/v1/audit",
+            params={"action": "task.bulk_update"},
+            headers=auth_headers,
+        ).json()["items"]
+        assert entries
+        return entries[0]["changes"]
+
+    def test_a_priority_sweep_says_what_it_set(self, client, auth_headers):
+        ids = [
+            create_task(client, auth_headers, title=f"T{i}").json()["id"]
+            for i in range(2)
+        ]
+        response = client.post(
+            "/api/v1/tasks/bulk",
+            json={"task_ids": ids, "priority": "urgent"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+
+        changes = self.last_bulk(client, auth_headers)
+        assert changes["priority"] == "urgent"
+        assert sorted(changes["task_ids"]) == sorted(ids)
+
+    def test_the_other_two_are_still_recorded(self, client, auth_headers, junior):
+        task_id = create_task(client, auth_headers).json()["id"]
+        client.post(
+            "/api/v1/tasks/bulk",
+            json={
+                "task_ids": [task_id],
+                "status": "done",
+                "assignee_id": junior["id"],
+                "priority": "low",
+            },
+            headers=auth_headers,
+        )
+
+        changes = self.last_bulk(client, auth_headers)
+        assert changes["status"] == "done"
+        assert changes["assignee_id"] == junior["id"]
+        assert changes["priority"] == "low"
+
+    def test_a_field_the_sweep_did_not_touch_reads_as_untouched(
+        self, client, auth_headers
+    ):
+        task_id = create_task(client, auth_headers).json()["id"]
+        client.post(
+            "/api/v1/tasks/bulk",
+            json={"task_ids": [task_id], "status": "in_progress"},
+            headers=auth_headers,
+        )
+
+        changes = self.last_bulk(client, auth_headers)
+        assert changes["priority"] is None
+        assert changes["assignee_id"] is None
+
+
 class TestWorkload:
     def test_reports_load_per_practitioner(self, client, auth_headers, junior, registered_firm):
         owner_id = registered_firm["practitioner"]["id"]
