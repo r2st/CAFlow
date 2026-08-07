@@ -28,6 +28,7 @@ from app.schemas.client import (
 from app.schemas.common import Page
 from app.schemas.compliance import ComplianceGenerateRequest, ComplianceGenerateResponse
 from app.services import audit, firms
+from app.services import reminders as reminder_service
 from app.services import tasks as task_service
 from app.services.compliance_generator import (
     InvalidWindow,
@@ -580,6 +581,30 @@ def deactivate_client(client_id: uuid.UUID, practitioner: Manager, db: DbSession
     # Outstanding obligations for an off-boarded client are no longer tracked,
     # but the close is recorded so that taking them back on can undo it.
     shelved = shelve_open_items(db, client)
+    # And the chases queued against them, which are the same instruction in the
+    # other direction: nothing is sent to an off-boarded client, so a reminder
+    # still waiting is one that can never go out.
+    #
+    # ``POST /reminders`` refuses to *create* one for an off-boarded client, and
+    # says why: the dispatcher's ``_deliverable`` joins the client row and
+    # requires ``is_active``, so the message would sit SCHEDULED for good —
+    # never sent, never failed, never withdrawn, and counted in the pending
+    # badge on the reminders nav for ever. Off-boarding is the other door into
+    # exactly that state, and it was open: a client is off-boarded with a
+    # fortnight of queued document chases and fee reminders behind them, every
+    # one of which is now undeliverable and none of which anything will ever
+    # clear. The practitioner reads a badge saying work is waiting, opens the
+    # screen, and finds reminders addressed to a client the firm stopped acting
+    # for — with no way to tell them from live ones except by checking each
+    # client in turn.
+    #
+    # Cancelled rather than deleted, and reactivation does not undo it: what
+    # was queued was queued against a deadline or a balance that has since been
+    # shelved or moved on, and the sweeps raise whatever is genuinely
+    # outstanding on their next run.
+    stopped = reminder_service.cancel_scheduled(
+        db, firm_id=practitioner.firm_id, client_id=client.id
+    )
     audit.record(
         db,
         action="client.deactivate",
@@ -587,6 +612,7 @@ def deactivate_client(client_id: uuid.UUID, practitioner: Manager, db: DbSession
         entity_id=client.id,
         actor=practitioner,
         summary=f"Deactivated client {client.name}"
-        + (f"; closed {shelved} open filing(s)" if shelved else ""),
+        + (f"; closed {shelved} open filing(s)" if shelved else "")
+        + (f"; cancelled {stopped} scheduled reminder(s)" if stopped else ""),
     )
     db.commit()

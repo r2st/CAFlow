@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import api from '../api/client'
+import { useAuth } from '../context/AuthContext'
 import {
   ACCEPTED_FILE_TYPES,
   Alert,
@@ -135,6 +136,13 @@ function UploadForm({ clients, onUploaded, onError }) {
 }
 
 export default function Documents() {
+  // Releasing a document to the client portal is manager-and-above on the API:
+  // it is the one field on a document that leaves the firm, and a client's
+  // folder holds the practice's working papers beside the client's own files.
+  // Hidden here rather than left to answer a 403, because the toggle sits in
+  // every row of the library and a junior has no way to tell which of the two
+  // buttons beside it they may press.
+  const { canManageClients: canShare } = useAuth()
   const [outstanding, setOutstanding] = useState(null)
   const [page, setPage] = useState(null)
   const [clients, setClients] = useState([])
@@ -406,9 +414,20 @@ export default function Documents() {
                             >
                               {downloadingId === doc.id ? 'Preparing…' : 'Download'}
                             </button>
-                            <button className="secondary small" onClick={() => toggleShare(doc)}>
-                              {doc.is_shared_with_client ? 'Unshare' : 'Share'}
-                            </button>
+                            {/*
+                              Only the decision is withheld, not the fact: the
+                              filename cell already carries a "Shared" tag, so a
+                              junior can still see which documents the client
+                              can reach.
+                            */}
+                            {canShare && (
+                              <button
+                                className="secondary small"
+                                onClick={() => toggleShare(doc)}
+                              >
+                                {doc.is_shared_with_client ? 'Unshare' : 'Share'}
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>

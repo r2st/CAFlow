@@ -363,15 +363,12 @@ def cancel_scheduled_for_client(
     # queue, and a plain read of it is a read of what was true before the
     # message went out. Re-checked per row once the lock is ours, so one the
     # dispatcher has just sent is left as sent rather than recorded cancelled.
-    pending = [
-        reminder
-        for reminder in reminder_service.scheduled_for_client_for_update(
-            db, firm_id=practitioner.firm_id, client_id=client.id
-        )
-        if reminder.status == ReminderStatus.SCHEDULED
-    ]
-    for reminder in pending:
-        reminder.status = ReminderStatus.CANCELLED
+    #
+    # Shared with off-boarding, which gives the same instruction permanently;
+    # see :func:`~app.services.reminders.cancel_scheduled`.
+    cancelled = reminder_service.cancel_scheduled(
+        db, firm_id=practitioner.firm_id, client_id=client.id
+    )
 
     audit.record(
         db,
@@ -379,10 +376,10 @@ def cancel_scheduled_for_client(
         entity_type="client",
         entity_id=client.id,
         actor=practitioner,
-        summary=f"Cancelled {len(pending)} scheduled reminder(s) for {client.name}",
+        summary=f"Cancelled {cancelled} scheduled reminder(s) for {client.name}",
     )
     db.commit()
-    return ReminderCancelResponse(cancelled=len(pending))
+    return ReminderCancelResponse(cancelled=cancelled)
 
 
 @router.get("/pending-count", summary="How many reminders are waiting to go out")

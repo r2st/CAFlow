@@ -2,7 +2,8 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import api from '../api/client'
+import api, { setToken } from '../api/client'
+import { AuthProvider } from '../context/AuthContext'
 import { ACCEPTED_FILE_TYPES } from '../components/ui'
 import Billing from '../pages/Billing'
 import Documents from '../pages/Documents'
@@ -11,6 +12,7 @@ import Tasks from '../pages/Tasks'
 import {
   BILLABLE_WORK,
   CLIENT,
+  FIRM,
   OUTSTANDING,
   PRACTITIONER,
   REVENUE,
@@ -25,6 +27,32 @@ import {
 
 function renderPage(ui, { route = '/' } = {}) {
   return render(<MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>)
+}
+
+/** Sign in as ``role`` before rendering — the gates read it from ``/me``. */
+function signedInAs(role) {
+  setToken('jwt-token')
+  vi.spyOn(api, 'me').mockResolvedValue(
+    role === 'owner' ? PRACTITIONER : practitioner({ role }),
+  )
+  vi.spyOn(api, 'firm').mockResolvedValue(FIRM)
+}
+
+/**
+ * A page that reads the signed-in practitioner's role, rendered under one.
+ *
+ * ``renderPage`` deliberately does not: most of these pages do not ask, and
+ * wrapping them all would put a ``/me`` round-trip in front of every
+ * assertion. The document library does ask — sharing a file with the client is
+ * manager-and-above — so it gets the provider and a role to read.
+ */
+function renderAs(role, ui, { route = '/' } = {}) {
+  signedInAs(role)
+  return render(
+    <MemoryRouter initialEntries={[route]}>
+      <AuthProvider>{ui}</AuthProvider>
+    </MemoryRouter>,
+  )
 }
 
 /** Every one of these pages loads a client list for its pickers. */
@@ -408,7 +436,7 @@ describe('Documents', () => {
   })
 
   it('shows the chase list, deadline first', async () => {
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     // Scoped to the card: "Received" is also a column heading in the library.
     const chase = (await screen.findByText('Still waiting on')).closest('.card')
@@ -420,7 +448,7 @@ describe('Documents', () => {
   })
 
   it('counts what the practice is waiting on', async () => {
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     expect(await screen.findByText('Filings waiting')).toBeInTheDocument()
     expect(screen.getByText('Documents missing')).toBeInTheDocument()
@@ -428,7 +456,7 @@ describe('Documents', () => {
   })
 
   it('lists received documents with their source', async () => {
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     expect(await screen.findByText('bank-statement-july.pdf')).toBeInTheDocument()
     expect(screen.getByText('Portal')).toBeInTheDocument()
@@ -436,7 +464,7 @@ describe('Documents', () => {
   })
 
   it('offers the practitioner the same file types the portal offers a client', async () => {
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     // The picker used to offer everything, so a practitioner could choose an
     // executable, wait for it to upload, and be handed a 415 for it. The
@@ -455,13 +483,13 @@ describe('Documents', () => {
     api.listDocuments.mockResolvedValue(
       pageOf([documentFixture({ category_confidence: 0.41, is_category_confirmed: false })]),
     )
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     expect(await screen.findByText(/Unconfirmed guess · 41%/)).toBeInTheDocument()
   })
 
   it('does not flag a confident guess', async () => {
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     await screen.findByText('bank-statement-july.pdf')
     expect(screen.queryByText(/Unconfirmed guess/)).not.toBeInTheDocument()
@@ -470,7 +498,7 @@ describe('Documents', () => {
   it('confirms the category when a human corrects it', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'updateDocument').mockResolvedValue(documentFixture())
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     await user.selectOptions(
       await screen.findByLabelText('Category for bank-statement-july.pdf'),
@@ -489,7 +517,7 @@ describe('Documents', () => {
   it('shares a document to the client portal and back', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'updateDocument').mockResolvedValue(documentFixture())
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     await user.click(await screen.findByRole('button', { name: 'Share' }))
 
@@ -505,7 +533,7 @@ describe('Documents', () => {
       pageOf([documentFixture({ is_shared_with_client: true })]),
     )
     vi.spyOn(api, 'updateDocument').mockResolvedValue(documentFixture())
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     await user.click(await screen.findByRole('button', { name: 'Unshare' }))
 
@@ -514,10 +542,58 @@ describe('Documents', () => {
     )
   })
 
+  describe('who may release a document to the client', () => {
+    /**
+     * Sharing is the one field on a document that leaves the firm, and the API
+     * restricts it to managers and above — a client's folder holds the
+     * practice's working papers beside the client's own files, one toggle
+     * apart, and a released document cannot be recalled once downloaded.
+     *
+     * Hidden rather than left to answer a 403, because the toggle sits in
+     * every row of the library beside a Download button a junior may press.
+     */
+
+    it('offers a junior no way to share one', async () => {
+      renderAs('junior', <Documents />)
+
+      expect(await screen.findByText('bank-statement-july.pdf')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument()
+    })
+
+    it('still tells a junior which documents the client can see', async () => {
+      api.listDocuments.mockResolvedValue(
+        pageOf([documentFixture({ is_shared_with_client: true })]),
+      )
+      renderAs('junior', <Documents />)
+
+      const row = (await screen.findByText('bank-statement-july.pdf')).closest('tr')
+      // The tag beside the filename, which is not the toggle: what the client
+      // can reach is worth knowing whoever is looking.
+      expect(within(row).getByText('Shared')).toHaveClass('tag')
+      expect(screen.queryByRole('button', { name: 'Unshare' })).not.toBeInTheDocument()
+    })
+
+    it('leaves the rest of a junior’s work on the page', async () => {
+      renderAs('junior', <Documents />)
+
+      const row = (await screen.findByText('bank-statement-july.pdf')).closest('tr')
+      expect(within(row).getByRole('button', { name: 'Download' })).toBeInTheDocument()
+      expect(
+        screen.getByLabelText('Category for bank-statement-july.pdf'),
+      ).toBeInTheDocument()
+    })
+
+    it('offers a manager the toggle', async () => {
+      renderAs('manager', <Documents />)
+
+      expect(await screen.findByRole('button', { name: 'Share' })).toBeInTheDocument()
+    })
+  })
+
   it('downloads through the API so the auth header is sent', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'downloadDocument').mockResolvedValue(new Blob(['pdf']))
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     await user.click(await screen.findByRole('button', { name: 'Download' }))
 
@@ -526,7 +602,7 @@ describe('Documents', () => {
 
   it('filters the library by category', async () => {
     const user = userEvent.setup()
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
     await screen.findByText('bank-statement-july.pdf')
 
     await user.selectOptions(screen.getByLabelText('Category'), 'form_16')
@@ -539,7 +615,7 @@ describe('Documents', () => {
   })
 
   it('will not upload until a client is chosen', async () => {
-    renderPage(<Documents />)
+    renderAs('owner', <Documents />)
 
     await screen.findByText('bank-statement-july.pdf')
     expect(screen.getByLabelText('File')).toBeDisabled()
@@ -752,7 +828,7 @@ describe('deep links from a client page', () => {
     vi.spyOn(api, 'listDocuments').mockResolvedValue(pageOf([documentFixture()]))
     vi.spyOn(api, 'outstandingDocuments').mockResolvedValue(OUTSTANDING)
 
-    renderPage(<Documents />, { route: '/documents?client_id=c-1' })
+    renderAs('owner', <Documents />, { route: '/documents?client_id=c-1' })
 
     await waitFor(() =>
       expect(api.listDocuments).toHaveBeenCalledWith(

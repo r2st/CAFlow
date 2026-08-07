@@ -134,6 +134,21 @@ the broker's `visibility_timeout` so a slow task is never redelivered while it
 is still running, and the worker's `stop_grace_period` outlasts one SMTP
 timeout so a deploy does not kill a send it has already made.
 
+**Nothing is left queued to a client the firm has stopped acting for.** The
+dispatcher joins the client row and requires `is_active`, so a reminder to an
+off-boarded client can never go out — it would sit `scheduled` for good: never
+sent, never failed, never withdrawn, and counted in the pending badge for ever.
+`POST /reminders` refuses to create one and names reactivation as the way to
+write to a departed client. Off-boarding is the same state reached from the
+other side, and it was open: the sweeps queue a fortnight ahead, so a client
+off-boarded on the Tuesday left a queue of undeliverable chases nothing would
+ever clear, indistinguishable on the screen from live ones. `DELETE
+/clients/{id}` now cancels what is still queued for them, alongside shelving
+their open filings and withdrawing the tasks raised for those — one instruction,
+applied to all three. Rows already `sent` are left as sent: what went out
+happened, and the trail has to keep saying so. Reactivation does not resurrect
+them; the sweeps raise whatever is genuinely outstanding on their next run.
+
 **Invoice numbers are allocated, not guessed.** The next number in a firm's
 financial-year sequence is a read followed by a write, and a second request
 fits between them: two practitioners pressing *Create invoice* together both
@@ -178,6 +193,22 @@ own profile, and the audit trail. Role checks live in `api/deps.py` as
 dependency factories, so an endpoint declares who may call it in its signature
 rather than in its body.
 
+Document intake had no role check at all, which left two decisions in the wrong
+hands. Deleting a document takes the row *and* the bytes — the file is unlinked
+from the storage volume — so it was the one irreversible path a junior could
+reach, against the client's statutory record and against what the checklist
+reads to say a requirement was met; a deletion silently reopens the chase and
+the client is asked again for paperwork they already sent. And
+`is_shared_with_client` is the only field on a document that leaves the firm:
+it is what `/portal/me` lists and what `portal_download` serves, so setting it
+hands a file to a party the firm does not employ and cannot be recalled once
+they have it — while a client's folder holds the firm's working papers beside
+the client's own documents, one toggle apart. Every other decision about that
+channel was already a manager's. Both are now, on both doors: the upload form
+carries `share_with_client` too, and a gate on one is a gate on neither. Only a
+*change* of the flag is gated, so an editor round-trip that sends it back
+unchanged is still the junior's edit to make.
+
 **The firm's own particulars decide the tax on its invoices.** `resolve_supply`
 compares the firm's state with the client's to choose between CGST plus SGST
 and IGST, and it takes the firm's state from its GSTIN before the typed state
@@ -190,6 +221,21 @@ credit the client cannot take, surfacing months later against *them*. `PATCH
 tax invoice and which had nowhere to be entered either. `FirmOut` carries the
 resolved `place_of_supply_label` so a firm reads its own tax position off the
 settings screen rather than off a client's complaint.
+
+An undetermined supply records **no place of supply at all**, and the blank is
+the marker. It only became one recently: `resolve_supply` kept the recipient's
+own state when the supplier's was unknown, and the client's state is almost
+always known because their GSTIN is the first thing a firm records — so the
+case the marker exists for was the one case that never showed it. A Maharashtra
+practice with no GSTIN of its own, billing a Karnataka client, issued a tax
+invoice reading *Place of supply: 29-Karnataka* beside CGST and SGST: both
+halves of a determination nobody made, each contradicting the other, on the
+document the client claims credit against. The invoice editor's own *not
+determined — add the firm's and the client's GSTIN* branch was unreachable for
+the one reason that actually causes it. The tax head is unchanged — intra-state
+either way, because IGST charged wrongly is credit the client cannot take — and
+editing the draft after entering the GSTIN resolves it, since a draft is not yet
+a document of record.
 
 The plan and the firm's standing are deliberately absent from `FirmUpdate`.
 `plan` is where the client and user limits are read from, so accepting it would

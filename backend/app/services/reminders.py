@@ -510,6 +510,30 @@ def scheduled_for_client_for_update(
     )
 
 
+def cancel_scheduled(db: Session, *, firm_id: uuid.UUID, client_id: uuid.UUID) -> int:
+    """Cancel everything still queued for a client. Returns how many were stopped.
+
+    The rows are held while their status is read, for the reason
+    :func:`scheduled_for_client_for_update` gives, and each is re-checked once
+    the lock is ours so one the dispatcher has just sent is left as sent rather
+    than recorded cancelled.
+
+    Two callers: "stop chasing this client", which a practitioner reaches for
+    when a client rings in, and off-boarding, which is the same instruction
+    said once and for all.
+    """
+    pending = [
+        reminder
+        for reminder in scheduled_for_client_for_update(
+            db, firm_id=firm_id, client_id=client_id
+        )
+        if reminder.status == ReminderStatus.SCHEDULED
+    ]
+    for reminder in pending:
+        reminder.status = ReminderStatus.CANCELLED
+    return len(pending)
+
+
 # ------------------------------------------------------------------ manual --
 
 

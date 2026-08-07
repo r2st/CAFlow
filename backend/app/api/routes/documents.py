@@ -10,9 +10,9 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Response, Uploa
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import CurrentPractitioner, DbSession
+from app.api.deps import CurrentPractitioner, DbSession, Manager
 from app.core import clock
-from app.models.base import DocumentCategory
+from app.models.base import DocumentCategory, PractitionerRole
 from app.models.client import Client
 from app.models.compliance import ComplianceItem
 from app.models.document import Document
@@ -71,6 +71,44 @@ def clean_requirement_or_422(value: str | None) -> str | None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
         ) from exc
+
+
+def assert_may_share(practitioner) -> None:
+    """Only a manager publishes a document to the client portal.
+
+    Sharing is the one field on a document that reaches outside the firm.
+    ``is_shared_with_client`` is what ``/portal/me`` lists and what
+    ``portal_download`` serves, so setting it hands a file to a party the firm
+    does not employ — and it cannot be recalled, because the client has already
+    downloaded it by the time anyone notices.
+
+    Every other decision about that channel is already a manager's: minting a
+    magic link, enabling the portal, revoking it. Deciding *what goes down it*
+    was the one that was not, and it is the decision with the content in it. A
+    client's folder holds the firm's working papers alongside the client's own
+    documents — the computation behind a return, the draft with the position
+    the partner did not take, the note on a query from the department — and
+    they sit in the same list as the bank statement, one toggle apart.
+
+    Both doors, because the upload form carries ``share_with_client`` too and a
+    gate on only the patch is a gate on neither.
+
+    A 403 naming the role, the same answer ``require_roles`` gives, rather than
+    silently dropping the field: a junior who meant to share something needs to
+    know it did not happen.
+    """
+    if practitioner.role not in (
+        PractitionerRole.OWNER,
+        PractitionerRole.PARTNER,
+        PractitionerRole.MANAGER,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Sharing a document with the client is restricted to managers, "
+                "partners and owners — ask one of them to release it."
+            ),
+        )
 
 
 def compliance_label(item: ComplianceItem | None) -> str | None:
@@ -180,6 +218,8 @@ def upload_document(
     share_with_client: bool = Form(default=False),
 ):
     """Upload a document on the client's behalf and categorise it."""
+    if share_with_client:
+        assert_may_share(practitioner)
     requirement = clean_requirement_or_422(requirement)
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
     item = (
@@ -329,6 +369,15 @@ def update_document(
     document = _get_document_or_404(db, practitioner.firm_id, document_id)
     updates = payload.model_dump(exclude_unset=True)
 
+    # Only when the flag actually moves: a junior re-categorising a document
+    # that is already shared sends the field back unchanged on a round-trip,
+    # and refusing that would refuse the edit they are entitled to make.
+    if (
+        "is_shared_with_client" in updates
+        and updates["is_shared_with_client"] != document.is_shared_with_client
+    ):
+        assert_may_share(practitioner)
+
     if updates.get("satisfies_requirements") is not None:
         # Same column, same reasoning as the upload form — this is the other
         # way a caller writes into it.
@@ -385,10 +434,22 @@ def update_document(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a document",
 )
-def delete_document(
-    document_id: uuid.UUID, practitioner: CurrentPractitioner, db: DbSession
-):
+def delete_document(document_id: uuid.UUID, practitioner: Manager, db: DbSession):
     """Delete a document, record first and bytes second.
+
+    Restricted to managers, which is where every other irreversible path in the
+    firm already sits — deactivating a client, cancelling an invoice, deleting a
+    task. This module had no role check at all, so it was the one place a
+    junior could destroy something that does not come back: the row *and* the
+    bytes, since the file is unlinked from the storage volume below.
+
+    That is not a task or a draft. It is the client's statutory record — the
+    bank statement behind a filed GSTR-3B, the Form 16 a return was built
+    from — and it is what the checklist reads to say a requirement was met, so
+    deleting it silently reopens the chase and the client is emailed for
+    paperwork they already sent. Restoring it means asking them for it again,
+    if they still have it; an assessing officer asking for the working papers
+    behind a lodged return does not accept that.
 
     Only one of the two stores can be rolled back. Unlinking before the commit
     meant a commit that failed — a dropped connection, a statement timeout, a

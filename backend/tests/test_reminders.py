@@ -1978,3 +1978,171 @@ class TestChasingAClientTheFirmHasStoppedActingFor:
             headers=auth_headers,
         )
         assert response.status_code == 201, response.text
+
+
+class TestOffBoardingClearsTheQueueBehindIt:
+    """The other door into the state the class above refuses at the front.
+
+    ``POST /reminders`` will not *create* a reminder for an off-boarded client,
+    and says why. Off-boarding a client who already has a queue was the same
+    thing arrived at from the other side, and nothing touched it: the sweeps
+    queue a fortnight of document chases and fee reminders ahead of time, the
+    client is off-boarded on the Tuesday, and every one of those rows is now
+    undeliverable — ``_deliverable`` requires ``is_active`` — with nothing that
+    will ever clear it.
+
+    What a practitioner sees is a badge saying work is waiting, a screen full of
+    reminders addressed to a client the firm stopped acting for, and no way to
+    tell them from live ones except by opening each client in turn.
+    """
+
+    def _queue_one(self, client, auth_headers, client_id: str) -> str:
+        response = client.post(
+            "/api/v1/reminders",
+            json={
+                "client_id": client_id,
+                "reminder_type": "custom",
+                "subject": "Documents for the quarter",
+                "body": "Could you send the bank statements?",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["id"]
+
+    def test_off_boarding_cancels_what_was_already_queued(
+        self, client, auth_headers, client_id
+    ):
+        reminder_id = self._queue_one(client, auth_headers, client_id)
+
+        assert client.delete(
+            f"/api/v1/clients/{client_id}", headers=auth_headers
+        ).status_code == 204
+
+        row = client.get(
+            "/api/v1/reminders", params={"client_id": client_id}, headers=auth_headers
+        ).json()["items"]
+        assert [r["id"] for r in row] == [reminder_id]
+        assert row[0]["status"] == ReminderStatus.CANCELLED.value
+
+    def test_the_pending_badge_comes_back_down(self, client, auth_headers, client_id):
+        self._queue_one(client, auth_headers, client_id)
+        assert (
+            client.get("/api/v1/reminders/pending-count", headers=auth_headers).json()[
+                "scheduled"
+            ]
+            == 1
+        )
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        counts = client.get("/api/v1/reminders/pending-count", headers=auth_headers).json()
+        assert counts == {"scheduled": 0, "due_now": 0}
+
+    def test_the_automated_chases_go_with_them(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        """Not only the hand-written ones. The queue is mostly swept output —
+        document chases and fee reminders nobody typed — and it is the part that
+        is a fortnight deep."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        db.commit()
+        assert queued, "expected the sweep to queue something to off-board over"
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        remaining = db.scalar(
+            select(func.count(Reminder.id)).where(
+                Reminder.client_id == uuid.UUID(client_id),
+                Reminder.status == ReminderStatus.SCHEDULED,
+            )
+        )
+        assert remaining == 0
+
+    def test_a_reminder_already_sent_is_left_as_sent(
+        self, client, auth_headers, client_id, db
+    ):
+        """The record of what went out is not rewritten by a later decision.
+
+        Cancelling is for what is still waiting; a message the client has
+        already received happened, and the trail has to keep saying so.
+        """
+        reminder_id = self._queue_one(client, auth_headers, client_id)
+        row = db.get(Reminder, uuid.UUID(reminder_id))
+        row.status = ReminderStatus.SENT
+        row.sent_at = datetime.now(UTC)
+        db.commit()
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        db.refresh(row)
+        assert row.status == ReminderStatus.SENT
+        assert row.sent_at is not None
+
+    def test_another_clients_queue_is_untouched(self, client, auth_headers, client_id):
+        """Scoped by client, not swept by firm."""
+        from tests.conftest import make_client_payload
+
+        other = client.post(
+            "/api/v1/clients",
+            json=make_client_payload(name="Kanmani Exports", pan="AABCK9876Q"),
+            headers=auth_headers,
+        ).json()["client"]["id"]
+        kept = self._queue_one(client, auth_headers, other)
+        self._queue_one(client, auth_headers, client_id)
+
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        rows = client.get(
+            "/api/v1/reminders", params={"client_id": other}, headers=auth_headers
+        ).json()["items"]
+        assert [r["id"] for r in rows] == [kept]
+        assert rows[0]["status"] == ReminderStatus.SCHEDULED.value
+
+    def test_the_count_is_recorded_in_the_audit_trail(
+        self, client, auth_headers, client_id
+    ):
+        """The firm's account of what off-boarding did, which is where a
+        practitioner looks when a chase they were expecting never arrives."""
+        self._queue_one(client, auth_headers, client_id)
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        entries = client.get(
+            "/api/v1/audit", params={"action": "client.deactivate"}, headers=auth_headers
+        ).json()["items"]
+        assert entries, "off-boarding writes an audit entry"
+        assert "cancelled 1 scheduled reminder(s)" in entries[0]["summary"]
+
+    def test_off_boarding_a_client_with_an_empty_queue_says_nothing(
+        self, client, auth_headers, client_id
+    ):
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+        entries = client.get(
+            "/api/v1/audit", params={"action": "client.deactivate"}, headers=auth_headers
+        ).json()["items"]
+        assert "scheduled reminder" not in entries[0]["summary"]
+
+    def test_taking_the_client_back_on_does_not_resurrect_them(
+        self, client, auth_headers, client_id
+    ):
+        """Reactivation does not undo it, for the reason the release of a
+        departing member's work is not undone either: what was queued was queued
+        against a deadline or a balance that has since been shelved or moved on,
+        and the sweeps raise whatever is genuinely outstanding on their next run.
+        """
+        self._queue_one(client, auth_headers, client_id)
+        client.delete(f"/api/v1/clients/{client_id}", headers=auth_headers)
+
+        back = client.patch(
+            f"/api/v1/clients/{client_id}", json={"is_active": True}, headers=auth_headers
+        )
+        assert back.status_code == 200, back.text
+
+        rows = client.get(
+            "/api/v1/reminders", params={"client_id": client_id}, headers=auth_headers
+        ).json()["items"]
+        assert all(r["status"] == ReminderStatus.CANCELLED.value for r in rows)

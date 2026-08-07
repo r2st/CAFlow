@@ -266,11 +266,34 @@ def resolve_supply(firm, client) -> tuple[str | None, SupplyType]:
     Resolved from the parties at the moment an invoice is raised and then stored
     on it, never recomputed: a client who later re-registers in another state has
     not changed the tax character of a bill already issued to them.
+
+    The blank has to be *written* for it to be a marker, and only the missing
+    half of the comparison was ever blanking it. An undetermined supply kept the
+    recipient's own state — which is almost always known, because the client's
+    GSTIN is what a firm records first — so the case the marker exists for is
+    precisely the one that never showed it. A Maharashtra practice that has not
+    entered its own GSTIN, billing a Karnataka client, issued a tax invoice
+    reading "Place of supply: 29-Karnataka" beside CGST and SGST: an inter-state
+    supply taxed as a local one, on a document that states both halves and
+    contradicts itself, with nothing anywhere saying the determination had not
+    been made. The client claims CGST/SGST credit that their 2B will not
+    support, and it surfaces months later as a notice against *them*.
+
+    Nothing downstream could tell either. ``InvoiceOut.place_of_supply_label``
+    renders a resolved-looking "29-Karnataka", and the invoice editor's own
+    "not determined — add the firm's and the client's GSTIN" branch was
+    unreachable for the one reason that actually causes it. The firm's settings
+    screen already says so — ``FirmOut.place_of_supply_label`` is None with no
+    GSTIN — but a firm reads that screen once and its invoices every day.
+
+    So both halves being known is what records a place of supply, and either
+    one missing records none. The tax head is unchanged: intra-state either
+    way, for the asymmetry above.
     """
     supplier = firm_state_code(firm)
     recipient = client_place_of_supply(client)
     if supplier is None or recipient is None:
-        return recipient, SupplyType.INTRA_STATE
+        return None, SupplyType.INTRA_STATE
     return recipient, (
         SupplyType.INTRA_STATE if supplier == recipient else SupplyType.INTER_STATE
     )

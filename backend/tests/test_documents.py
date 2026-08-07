@@ -1133,3 +1133,191 @@ class TestDeletingBytesThatAreNotThere:
 
     def test_a_path_that_escapes_the_storage_root(self):
         assert storage.delete_stored("../../etc/passwd") is False
+
+
+def member_headers(client, auth_headers, *, role: str, email: str) -> dict[str, str]:
+    """A second practitioner of the firm, signed in.
+
+    Built by the same two calls a real one is, rather than by minting a token:
+    the role gate reads the practitioner's row on every request, so a token
+    handed out here would prove nothing about what the row says.
+    """
+    password = "another-long-password"
+    created = client.post(
+        "/api/v1/auth/practitioners",
+        json={"full_name": "Team Member", "email": email, "password": password, "role": role},
+        headers=auth_headers,
+    )
+    assert created.status_code == 201, created.text
+    token = client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    ).json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+class TestWhoMayDestroyADocument:
+    """Deleting a document is irreversible and was open to every role.
+
+    The row goes and the bytes go with it — ``delete_stored`` unlinks the file
+    from the storage volume — so there is nothing to undo and nothing to
+    restore from. Every other irreversible path in the firm is already a
+    manager's: deactivating a client, cancelling an invoice, deleting a task.
+
+    It is also the client's statutory record, and it is what the checklist
+    reads to say a requirement was met, so a deletion silently reopens the
+    chase and the client is emailed for paperwork they have already sent.
+    """
+
+    def test_a_junior_cannot_delete_a_document(self, client, auth_headers, client_id):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        junior = member_headers(
+            client, auth_headers, role="junior", email="junior-del@sharma-ca.in"
+        )
+
+        response = client.delete(f"/api/v1/documents/{document['id']}", headers=junior)
+        assert response.status_code == 403
+        assert "permissions" in response.json()["detail"]
+
+        # And the document is still there to be found.
+        still = client.get(f"/api/v1/documents/{document['id']}", headers=auth_headers)
+        assert still.status_code == 200
+
+    def test_the_bytes_survive_the_refusal(self, client, auth_headers, client_id, db):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        path = db.get(Document, uuid.UUID(document["id"])).storage_path
+        junior = member_headers(
+            client, auth_headers, role="junior", email="junior-bytes@sharma-ca.in"
+        )
+
+        client.delete(f"/api/v1/documents/{document['id']}", headers=junior)
+        assert storage.open_stored(path) == PDF_BYTES
+
+    def test_a_manager_may_delete_a_document(self, client, auth_headers, client_id):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        manager = member_headers(
+            client, auth_headers, role="manager", email="manager-del@sharma-ca.in"
+        )
+
+        response = client.delete(f"/api/v1/documents/{document['id']}", headers=manager)
+        assert response.status_code == 204
+
+
+class TestWhoMayShareADocumentWithTheClient:
+    """``is_shared_with_client`` is the one field on a document that leaves the firm.
+
+    It is what ``/portal/me`` lists and what ``portal_download`` serves, so
+    setting it hands a file to a party the firm does not employ — and it cannot
+    be recalled, because the client has downloaded it by the time anyone
+    notices. A client's folder holds the firm's working papers beside the
+    client's own documents, one toggle apart.
+
+    Every other decision about that channel was already a manager's: minting a
+    magic link, enabling the portal, revoking it. This was the one with the
+    content in it, and it was open to every role.
+    """
+
+    def test_a_junior_cannot_share_a_document(self, client, auth_headers, client_id):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        assert document["is_shared_with_client"] is False
+        junior = member_headers(
+            client, auth_headers, role="junior", email="junior-share@sharma-ca.in"
+        )
+
+        response = client.patch(
+            f"/api/v1/documents/{document['id']}",
+            json={"is_shared_with_client": True},
+            headers=junior,
+        )
+        assert response.status_code == 403
+        assert "managers" in response.json()["detail"]
+
+        unchanged = client.get(
+            f"/api/v1/documents/{document['id']}", headers=auth_headers
+        ).json()
+        assert unchanged["is_shared_with_client"] is False
+
+    def test_a_junior_cannot_share_one_on_the_way_in_either(
+        self, client, auth_headers, client_id
+    ):
+        """The upload form carries the same flag, and a gate on one door is neither."""
+        junior = member_headers(
+            client, auth_headers, role="junior", email="junior-upshare@sharma-ca.in"
+        )
+        response = upload(client, junior, client_id=client_id, share_with_client=True)
+        assert response.status_code == 403
+
+    def test_a_junior_may_still_upload_and_recategorise(
+        self, client, auth_headers, client_id
+    ):
+        """The day-to-day work the role exists for is untouched."""
+        junior = member_headers(
+            client, auth_headers, role="junior", email="junior-work@sharma-ca.in"
+        )
+        uploaded = upload(client, junior, client_id=client_id)
+        assert uploaded.status_code == 201
+
+        recategorised = client.patch(
+            f"/api/v1/documents/{uploaded.json()['document']['id']}",
+            json={"category": DocumentCategory.BANK_STATEMENT.value},
+            headers=junior,
+        )
+        assert recategorised.status_code == 200
+        assert recategorised.json()["category"] == DocumentCategory.BANK_STATEMENT.value
+
+    def test_a_junior_may_re_send_the_flag_unchanged(self, client, auth_headers, client_id):
+        """A round-trip is not an instruction.
+
+        The editor sends the whole document back, so a junior correcting the
+        category of an already-shared document carries ``is_shared_with_client``
+        along with it. Refusing that would refuse the edit they are entitled to
+        make; only a change of the flag is the decision being gated.
+        """
+        document = upload(
+            client, auth_headers, client_id=client_id, share_with_client=True
+        ).json()["document"]
+        assert document["is_shared_with_client"] is True
+        junior = member_headers(
+            client, auth_headers, role="junior", email="junior-roundtrip@sharma-ca.in"
+        )
+
+        response = client.patch(
+            f"/api/v1/documents/{document['id']}",
+            json={
+                "is_shared_with_client": True,
+                "category": DocumentCategory.BANK_STATEMENT.value,
+            },
+            headers=junior,
+        )
+        assert response.status_code == 200
+        assert response.json()["is_shared_with_client"] is True
+
+    def test_a_junior_cannot_unshare_one_either(self, client, auth_headers, client_id):
+        """Both directions. Withdrawing a document the client has been told to
+        expect is as much a decision about that channel as releasing one."""
+        document = upload(
+            client, auth_headers, client_id=client_id, share_with_client=True
+        ).json()["document"]
+        junior = member_headers(
+            client, auth_headers, role="junior", email="junior-unshare@sharma-ca.in"
+        )
+
+        response = client.patch(
+            f"/api/v1/documents/{document['id']}",
+            json={"is_shared_with_client": False},
+            headers=junior,
+        )
+        assert response.status_code == 403
+
+    def test_a_manager_may_share_a_document(self, client, auth_headers, client_id):
+        document = upload(client, auth_headers, client_id=client_id).json()["document"]
+        manager = member_headers(
+            client, auth_headers, role="manager", email="manager-share@sharma-ca.in"
+        )
+
+        response = client.patch(
+            f"/api/v1/documents/{document['id']}",
+            json={"is_shared_with_client": True},
+            headers=manager,
+        )
+        assert response.status_code == 200
+        assert response.json()["is_shared_with_client"] is True

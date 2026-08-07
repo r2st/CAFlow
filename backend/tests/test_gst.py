@@ -190,14 +190,38 @@ class TestResolvingTheSupply:
         Intra-state rather than inter-state on purpose: a practice bills the
         clients in its own city, and IGST charged wrongly is credit the client
         cannot take. The blank place of supply is the marker that says nothing
-        established it.
+        established it — and it has to actually be blank to be a marker, which
+        is the half this used to get wrong: the recipient's own state was kept,
+        so the case the marker exists for was the one case that never showed it.
         """
         firm, client = self.make(client_gstin="27AABCN2345P1Z5")
-        assert gst.resolve_supply(firm, client) == ("27", SupplyType.INTRA_STATE)
+        assert gst.resolve_supply(firm, client) == (None, SupplyType.INTRA_STATE)
+
+    def test_an_undetermined_supply_records_nothing_even_across_a_state_line(self):
+        """The expensive shape of the case above, and the one it was silent on.
+
+        Same state is at least the answer a local practice would have got
+        anyway. This is a Karnataka client and no supplier state to compare
+        them against, so the supply is genuinely undetermined *and* genuinely
+        likely to be inter-state — and recording "29" beside CGST and SGST puts
+        both halves on one document, each contradicting the other, with nothing
+        saying the determination was never made.
+        """
+        firm, client = self.make(client_gstin="29AABCN2345P1Z1")
+        assert gst.resolve_supply(firm, client) == (None, SupplyType.INTRA_STATE)
 
     def test_a_client_with_neither_records_no_place_at_all(self):
         firm, client = self.make(firm_gstin="27AAPFU0939F1ZV")
         assert gst.resolve_supply(firm, client) == (None, SupplyType.INTRA_STATE)
+
+    def test_a_place_is_recorded_only_when_both_states_are_known(self):
+        """The other direction: nothing here narrows a supply that *is* resolvable."""
+        firm, client = self.make(
+            firm_gstin="27AAPFU0939F1ZV", client_gstin="29AABCN2345P1Z1"
+        )
+        place, supply = gst.resolve_supply(firm, client)
+        assert (place, supply) == ("29", SupplyType.INTER_STATE)
+        assert gst.place_of_supply_label(place) == "29-Karnataka"
 
 
 class TestSplittingTheTax:

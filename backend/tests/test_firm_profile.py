@@ -135,6 +135,12 @@ class TestWhatTheGstinChangesOnAnInvoice:
         inter-state supply — but with the firm's own state resolvable only from
         that free-text field this is the *best* case. A firm that typed nothing
         recognisable got the same answer for every client it has.
+
+        The blank place of supply is what says so on the face of the invoice.
+        It used to carry "29-Karnataka" beside CGST and SGST — the two halves
+        of a determination that was never made, each contradicting the other,
+        on the document the client claims credit against. Now the label is
+        absent and the editor prints "not determined" in its place.
         """
         client.patch(f"{API}/auth/firm", headers=auth_headers, json={"state": None})
         karnataka = self._client_in(client, auth_headers, "Karnataka", "29AAPFU0939F1ZR")
@@ -142,7 +148,35 @@ class TestWhatTheGstinChangesOnAnInvoice:
 
         assert invoice["supply_type"] == SupplyType.INTRA_STATE.value
         assert invoice["igst_paise"] == 0
-        assert invoice["place_of_supply_label"] == "29-Karnataka"
+        assert invoice["place_of_supply"] is None
+        assert invoice["place_of_supply_label"] is None
+
+    def test_entering_the_gstin_resolves_a_draft_raised_without_one(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The way out of the blank above, and the reason it is only a marker.
+
+        A draft is not a document of record, so editing one re-resolves the
+        supply — see ``billing.apply_place_of_supply``. The firm reads "not
+        determined" off the invoice, enters its GSTIN, and the same draft comes
+        back as the inter-state supply it always was.
+        """
+        client.patch(f"{API}/auth/firm", headers=auth_headers, json={"state": None})
+        karnataka = self._client_in(client, auth_headers, "Karnataka", "29AAPFU0939F1ZR")
+        invoice = self._invoice(client, auth_headers, karnataka)
+        assert invoice["place_of_supply_label"] is None
+
+        client.patch(f"{API}/auth/firm", headers=auth_headers, json={"gstin": FIRM_GSTIN_MH})
+        touched = client.patch(
+            f"{API}/invoices/{invoice['id']}",
+            headers=auth_headers,
+            json={"notes": "Re-checked after entering the firm's GSTIN"},
+        )
+        assert touched.status_code == 200, touched.text
+        resolved = touched.json()
+        assert resolved["place_of_supply_label"] == "29-Karnataka"
+        assert resolved["supply_type"] == SupplyType.INTER_STATE.value
+        assert resolved["igst_paise"] == resolved["tax_paise"]
 
     def test_with_the_firms_gstin_set_an_out_of_state_client_gets_igst(
         self, client: TestClient, auth_headers: dict
