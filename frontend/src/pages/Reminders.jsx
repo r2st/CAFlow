@@ -213,7 +213,16 @@ export default function Reminders() {
   useEffect(() => {
     refreshPending()
     api
-      .listClients({ limit: 200 })
+      // Active clients only — the one picker on which that is not a nicety.
+      // `POST /reminders` refuses an off-boarded client outright, because the
+      // dispatcher joins the client row and requires `is_active`, so a message
+      // queued for one can never go out. Offering them here put a client at the
+      // top of the list that the composer would refuse — and refuse *last*:
+      // drafting has no such check, so a practitioner chose the client, waited
+      // for a model-written message, read it, pressed Queue, and only then was
+      // told the client had been off-boarded. The calendar's picker already
+      // narrows the same way.
+      .listClients({ limit: 200, is_active: true })
       .then((result) => setClients(result.items))
       .catch(() => setClients([]))
   }, [refreshPending])

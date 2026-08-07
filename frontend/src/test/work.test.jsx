@@ -417,6 +417,41 @@ describe('Billing', () => {
     expect(screen.queryByRole('button', { name: 'Payment' })).not.toBeInTheDocument()
   })
 
+  it('offers none on a cancelled invoice either, balance or no balance', async () => {
+    // `balance_paise` is `total - paid`, so a cancelled invoice keeps one:
+    // withdrawing a bill does not collect it. Gated on the balance alone, this
+    // rendered a payment form on a bill the firm had decided not to ask for,
+    // and the server refuses the receipt with a 409 — so typing an amount into
+    // it was the only way to find that out.
+    api.listInvoices.mockResolvedValue(pageOf([invoice({ status: 'cancelled' })]))
+    renderPage(<Billing />)
+
+    await screen.findByText('INV-2026-0001')
+    // Total and balance both, since nothing was collected against it.
+    expect(screen.getAllByText('₹5,900')).toHaveLength(2)
+    expect(screen.queryByRole('button', { name: 'Payment' })).not.toBeInTheDocument()
+  })
+
+  it('still offers one on every state a client has actually been asked to pay', async () => {
+    for (const status of ['sent', 'partially_paid', 'overdue']) {
+      api.listInvoices.mockResolvedValue(pageOf([invoice({ status })]))
+      const view = renderPage(<Billing />)
+
+      await screen.findByText('INV-2026-0001')
+      expect(screen.getByRole('button', { name: 'Payment' })).toBeInTheDocument()
+      view.unmount()
+    }
+  })
+
+  it('a draft is issued rather than receipted', async () => {
+    api.listInvoices.mockResolvedValue(pageOf([invoice({ status: 'draft' })]))
+    renderPage(<Billing />)
+
+    await screen.findByText('INV-2026-0001')
+    expect(screen.getByRole('button', { name: 'Issue' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Payment' })).not.toBeInTheDocument()
+  })
+
   it('surfaces the server error when drafting fails', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'generateInvoices').mockRejectedValue(new Error('No billable work'))
@@ -641,6 +676,24 @@ describe('Reminders', () => {
   it('shows how many are still waiting to go out', async () => {
     renderPage(<Reminders />)
     expect(await screen.findByText(/3 waiting to go out/)).toBeInTheDocument()
+  })
+
+  it('does not offer to write to a client the firm has stopped acting for', async () => {
+    /**
+     * `POST /reminders` refuses an off-boarded client outright — the dispatcher
+     * requires `is_active`, so a message queued for one can never go out. And
+     * it refuses *last*: drafting has no such check, so the composer let a
+     * practitioner pick the client, wait for a model-written message, read it,
+     * press Queue, and only then be told.
+     */
+    renderPage(<Reminders />)
+
+    await screen.findByText('GSTR-3B (Monthly) — 2026-07')
+    await waitFor(() =>
+      expect(api.listClients).toHaveBeenCalledWith(
+        expect.objectContaining({ is_active: true }),
+      ),
+    )
   })
 
   it('drafts a message for review before anything is queued', async () => {

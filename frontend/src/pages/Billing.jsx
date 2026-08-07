@@ -27,6 +27,18 @@ import {
 const PAGE_SIZE = 25
 
 /**
+ * The invoice states a client has actually been asked to pay.
+ *
+ * Mirrors `billing.UNPAID_STATUSES` on the server, which is what
+ * `record_payment` will accept a receipt against. A draft has not been sent
+ * and a cancelled invoice has been withdrawn; both keep an unpaid balance all
+ * the same, so anything reading "is there money to collect" off the balance
+ * alone has to exclude these two first — the same pair `refresh_status` and
+ * `serialise` already refuse to derive anything from.
+ */
+const OWED_STATUSES = new Set(['sent', 'partially_paid', 'overdue'])
+
+/**
  * Record a payment against an invoice.
  *
  * The amount is entered in rupees and sent in paise, and the two have to line
@@ -561,7 +573,16 @@ export default function Billing() {
                                 Issue
                               </button>
                             )}
-                            {invoice.balance_paise > 0 && invoice.status !== 'draft' && (
+                            {/* `balance_paise` is `total - paid`, so a
+                                cancelled invoice keeps one: withdrawing a bill
+                                does not collect it. Gated on the statuses that
+                                are actually owed rather than on the balance
+                                alone — the server refuses a receipt against a
+                                cancelled invoice with a 409, so what this used
+                                to render was a payment form on a bill the firm
+                                had decided not to ask for, and typing an amount
+                                into it was the only way to find that out. */}
+                            {invoice.balance_paise > 0 && OWED_STATUSES.has(invoice.status) && (
                               <button
                                 className="secondary small"
                                 onClick={() => setExpanded(isOpen ? null : invoice.id)}
