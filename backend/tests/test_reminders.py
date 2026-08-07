@@ -1866,6 +1866,68 @@ class TestWhenTheThingBeingChasedHasGone:
         assert reminder_service.withdrawn_reason(db, reminder) is None
 
 
+class TestTheSweepsRecordWhatTheyQuoted:
+    """A queued message states a fact, and the fact is a field a practitioner
+    edits between the sweep and the send.
+
+    ``withdrawn_reason`` is what withholds a message whose figures have moved
+    under it, and it can only do that against what the message actually said.
+    So each sweep writes the fact it wrote the wording from; see
+    :func:`~app.services.reminders.quoted_fact`.
+    """
+
+    def test_a_document_chase_records_the_deadline_it_names(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        reminder = next(r for r in queued if str(r.compliance_item_id) == item["id"])
+        assert reminder.extra["due_date"] == item["due_date"]
+
+    def test_a_fee_chase_records_the_balance_it_names(self, db, firm_id, client, auth_headers, client_id):
+        invoice = client.post(
+            "/api/v1/invoices",
+            json={
+                "client_id": client_id,
+                "issue_date": (clock.today() - timedelta(days=37)).isoformat(),
+                "due_date": (clock.today() - timedelta(days=7)).isoformat(),
+                "lines": [
+                    {"description": "GSTR-3B", "quantity": 1, "unit_price_paise": 200_000}
+                ],
+            },
+            headers=auth_headers,
+        ).json()
+        sent = client.post(
+            f"/api/v1/invoices/{invoice['id']}/send", headers=auth_headers
+        ).json()
+
+        queued = reminder_service.queue_payment_reminders(
+            db, firm_id=uuid.UUID(firm_id), offsets=[7]
+        )
+        assert len(queued) == 1
+        # The same figure the subject and the body quote.
+        assert queued[0].extra["balance_paise"] == sent["balance_paise"]
+        assert "2,360.00" in queued[0].subject
+
+    def test_a_chase_still_standing_on_the_recorded_facts_goes_out(
+        self, client, auth_headers, client_id, db, firm_id
+    ):
+        """The marker is a check, not a new reason to withhold."""
+        item = first_item_of_type(client, auth_headers, "GSTR3B_MONTHLY")
+        run_date = days_before_due(client, auth_headers, item["id"], 10)
+        queued = reminder_service.queue_document_reminders(
+            db, firm_id=uuid.UUID(firm_id), today=run_date, offsets=[10]
+        )
+        reminder = next(r for r in queued if str(r.compliance_item_id) == item["id"])
+        db.commit()
+
+        assert reminder_service.withdrawn_reason(db, reminder) is None
+
+
 class TestChasingAClientTheFirmHasStoppedActingFor:
     """A queued chase to an off-boarded client is one that can never go out.
 

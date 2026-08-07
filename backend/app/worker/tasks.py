@@ -175,7 +175,15 @@ def schedule_compliance_reminders_task(today: str | None = None) -> dict[str, in
                         body=body,
                         recipient=client.email,
                         scheduled_for=_ist_morning(run_date),
-                        extra={"kind": "filing", "offset_days": days_left},
+                        # The deadline this message names, in its subject and
+                        # again in the body, so a reminder written against a
+                        # date the firm has since corrected is withheld rather
+                        # than sent; see ``reminders.withdrawn_reason``.
+                        extra={
+                            "kind": "filing",
+                            "offset_days": days_left,
+                            "due_date": item.due_date.isoformat(),
+                        },
                     )
                 )
                 queued += 1

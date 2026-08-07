@@ -150,6 +150,19 @@ def already_queued(existing: list[Reminder], kind: str, offset: int) -> bool:
 OPEN_ITEM_STATUSES = (ComplianceStatus.PENDING, ComplianceStatus.IN_PROGRESS)
 
 
+def quoted_fact(reminder: Reminder, key: str):
+    """What the queued message *says*, for the one fact that can move under it.
+
+    Written into ``extra`` when the row is queued and read back at the moment
+    it is sent; see :func:`withdrawn_reason`. ``None`` where the marker is
+    absent, which is a row queued before this was recorded and is tolerated for
+    the reason :func:`kind_of` tolerates a missing ``kind`` — a backfill would
+    have to invent what those messages said, and withholding them all is a
+    worse answer than sending them.
+    """
+    return (reminder.extra or {}).get(key)
+
+
 def withdrawn_reason(db: Session, reminder: Reminder) -> str | None:
     """Why a queued chase should no longer go out, or ``None`` if it should.
 
@@ -165,6 +178,36 @@ def withdrawn_reason(db: Session, reminder: Reminder) -> str | None:
     * they surrendered the GST registration behind the filing, which closes the
       item and cancels the task raised for it, and were asked for the paperwork
       anyway.
+
+    Two of those are about the chase having been *answered*, and a chase that
+    is still owed can be just as wrong: the message quotes a fact, and the fact
+    is a field a practitioner edits. Both quoted facts move for ordinary
+    reasons, and neither was re-read.
+
+    * **The deadline.** Every filing and document chase names the date the
+      return is due, in its subject line and again in the body the model drafts
+      from it. CBIC and CBDT extend deadlines routinely — the seeded calendar
+      carries the ordinary dates precisely so a firm can correct them, and
+      :func:`~app.services.tasks.retarget_tasks_for_item` exists because the
+      firm's *own* record of the work has to follow. The client's copy of it
+      did not: a GSTR-3B extended to the 30th on the morning of the sweep was
+      still emailed out at nine saying it was due on the 20th, over the firm's
+      name, and a client who acts on that files eleven days early or panics.
+      The other direction is worse — a deadline corrected *earlier* is chased
+      with a date that gives the client margin they no longer have.
+    * **The balance.** A fee chase names what is outstanding, to the paise, in
+      the subject and the body. Settlement in full was caught below; a *part*
+      payment was not, and it is the commoner of the two — a client paying
+      something against a large bill is exactly what the 7/15/30-day offsets
+      are chasing. What went out demanded the whole of a balance the firm had
+      already banked half of, and the client is holding the receipt.
+
+    Withdrawn rather than rewritten: the wording is drafted once, from these
+    facts, and there is nothing here that could restate a model-written
+    paragraph. The sweeps raise whatever is genuinely outstanding on their next
+    run — ``already_queued`` matches on the offset, and a deadline that has
+    moved is a different offset — so the client is chased with the right
+    figures on the right day instead of the wrong ones today.
 
     Only the automated chases. ``kind`` distinguishes them from a message a
     practitioner composed, which may perfectly well be *about* a filed return —
@@ -185,6 +228,12 @@ def withdrawn_reason(db: Session, reminder: Reminder) -> str | None:
             if item.status == ComplianceStatus.NOT_APPLICABLE:
                 return "the filing is no longer one this client owes"
             return f"the return was {item.status.value} before this went out"
+        # Both kinds name the deadline, so both go stale when it moves.
+        quoted_due = quoted_fact(reminder, "due_date")
+        if quoted_due is not None and quoted_due != item.due_date.isoformat():
+            return (
+                f"the deadline moved to {item.due_date:%d %b %Y} after this was written"
+            )
         # The filing is still open, which settles a *filing* reminder: the
         # deadline is what that one is about and it has not moved. A document
         # chase is about a list, and the list is the part that goes stale.
@@ -213,6 +262,13 @@ def withdrawn_reason(db: Session, reminder: Reminder) -> str | None:
             return f"the invoice is {invoice.status.value}"
         if invoice.balance_paise <= 0:
             return "the invoice has been settled in full"
+        # Still owed, but not the figure this message quotes.
+        quoted_balance = quoted_fact(reminder, "balance_paise")
+        if quoted_balance is not None and quoted_balance != invoice.balance_paise:
+            return (
+                f"a payment has since brought the balance to "
+                f"₹{invoice.balance_paise / 100:,.2f}"
+            )
 
     return None
 
@@ -344,6 +400,10 @@ def queue_document_reminders(
                     "kind": "document",
                     "offset_days": days_left,
                     "missing": checklist.missing,
+                    # The deadline this message names, so a chase written
+                    # against a date the firm has since corrected is withheld
+                    # rather than sent; see :func:`withdrawn_reason`.
+                    "due_date": item.due_date.isoformat(),
                 },
             )
             db.add(reminder)
@@ -434,7 +494,14 @@ def queue_payment_reminders(
                 body=body,
                 recipient=recipient_for(client, channel),
                 scheduled_for=ist_morning(run_date),
-                extra={"kind": "payment", "offset_days": days_overdue},
+                extra={
+                    "kind": "payment",
+                    "offset_days": days_overdue,
+                    # The figure this message names, so a chase for an amount a
+                    # part-payment has since reduced is withheld rather than
+                    # sent; see :func:`withdrawn_reason`.
+                    "balance_paise": invoice.balance_paise,
+                },
             )
             db.add(reminder)
             queued.append(reminder)

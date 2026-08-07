@@ -1578,6 +1578,8 @@ class TestAChaseThatNoLongerStands:
 
         assert tasks.dispatch_due_reminders_task()["sent"] == 1
 
+
+
     def test_a_chase_whose_list_is_still_untouched_goes_out(self, db):
         _, _, item, _ = self._document_chase(db)
         db.commit()
@@ -1700,6 +1702,256 @@ class TestAChaseThatNoLongerStands:
 
 
 # -------------------------------------------- refreshing a status from the row --
+
+
+class TestAChaseWhoseFactsHaveMoved:
+    """The chase is still owed, but the message no longer states it correctly.
+
+    ``TestAChaseThatNoLongerStands`` covers a reason that has been *answered* —
+    filed, settled, withdrawn. This is the other half: the chase stands, and
+    the figure it quotes does not. Both quoted facts are fields a practitioner
+    edits between the 07:00 sweep and the 09:00 send, and neither was re-read.
+    """
+
+    def _chase(self, db, *, kind, offset_days=10, **extra):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        item = make_item(
+            db,
+            firm,
+            client,
+            get_type(db, "GSTR3B_MONTHLY"),
+            due_date=clock.today() + timedelta(days=offset_days),
+        )
+        reminder = make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            compliance_item_id=item.id,
+            reminder_type=(
+                ReminderType.FILING if kind == "filing" else ReminderType.DOCUMENT
+            ),
+            subject=f"due on {item.due_date:%d %b %Y}",
+            extra={
+                "kind": kind,
+                "offset_days": offset_days,
+                "due_date": item.due_date.isoformat(),
+                **extra,
+            },
+        )
+        return firm, client, item, reminder
+
+    # ---------------------------------------------------------- deadlines --
+
+    def test_a_filing_reminder_naming_an_extended_deadline_is_withdrawn(self, db):
+        """CBIC extends a due date on the morning of the sweep.
+
+        The subject line and the drafted body both name the old date, and the
+        firm's own record no longer holds it. A client acting on that files
+        against a deadline that has moved, over their CA's name.
+        """
+        _, _, item, reminder = self._chase(db, kind="filing")
+        item.due_date = item.due_date + timedelta(days=10)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["withdrawn"] == 1
+        db.expire_all()
+        row = db.get(Reminder, reminder.id)
+        assert row.status is ReminderStatus.CANCELLED
+        assert "the deadline moved to" in row.extra["withdrawn_because"]
+        # No attempt was made, so none is counted.
+        assert row.attempt_count == 0
+        assert row.sent_at is None
+
+    def test_a_deadline_corrected_earlier_is_withheld_too(self, db):
+        """The worse direction: the message promises margin that is gone."""
+        _, _, item, _ = self._chase(db, kind="filing")
+        item.due_date = item.due_date - timedelta(days=5)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["withdrawn"] == 1
+
+    def test_a_document_chase_names_the_deadline_and_is_held_to_it(self, db):
+        _, _, item, reminder = self._chase(db, kind="document")
+        item.due_date = item.due_date + timedelta(days=30)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["withdrawn"] == 1
+        db.expire_all()
+        assert "deadline moved" in db.get(Reminder, reminder.id).extra["withdrawn_because"]
+
+    def test_a_deadline_that_has_not_moved_is_still_chased(self, db):
+        self._chase(db, kind="filing")
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    def test_a_row_queued_before_the_deadline_was_recorded_still_goes_out(self, db):
+        """No marker is not evidence the date moved, and a backfill would have
+        to invent what those messages said."""
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        item = make_item(
+            db,
+            firm,
+            client,
+            get_type(db, "GSTR3B_MONTHLY"),
+            due_date=clock.today() + timedelta(days=10),
+        )
+        make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            compliance_item_id=item.id,
+            reminder_type=ReminderType.FILING,
+            extra={"kind": "filing", "offset_days": 10},
+        )
+        item.due_date = item.due_date + timedelta(days=10)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    def test_the_sweep_records_the_deadline_it_wrote_against(self, db):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        item = make_item(
+            db, firm, client, get_type(db, "GSTR3B_MONTHLY"),
+            due_date=RUN_DATE + timedelta(days=10),
+        )
+        db.commit()
+        tasks.schedule_compliance_reminders_task(today=RUN_DATE.isoformat())
+
+        queued = db.scalars(select(Reminder)).all()
+        assert [r.extra["due_date"] for r in queued] == [item.due_date.isoformat()]
+
+    # ------------------------------------------------------------ balances --
+
+    def _sent_invoice(self, db, firm, client, *, paid=0, status=InvoiceStatus.SENT):
+        invoice = Invoice(
+            firm_id=firm.id,
+            client_id=client.id,
+            invoice_number="INV/FY2026-27/0001",
+            issue_date=clock.today() - timedelta(days=40),
+            due_date=clock.today() - timedelta(days=10),
+            subtotal_paise=200_000,
+            tax_paise=36_000,
+            total_paise=236_000,
+            amount_paid_paise=paid,
+            status=status,
+        )
+        db.add(invoice)
+        db.flush()
+        return invoice
+
+    def _fee_chase(self, db, firm, client, invoice):
+        return make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            invoice_id=invoice.id,
+            reminder_type=ReminderType.PAYMENT,
+            subject=f"Invoice {invoice.invoice_number} — ₹2,360.00 outstanding",
+            extra={
+                "kind": "payment",
+                "offset_days": 10,
+                "balance_paise": invoice.balance_paise,
+            },
+        )
+
+    def test_a_part_payment_after_queueing_withdraws_the_chase(self, db):
+        """The commoner half of the settled-invoice case, and the one that was
+        missed: the client paid something, and the message still demands all of
+        it while they are holding the receipt."""
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(db, firm, client)
+        reminder = self._fee_chase(db, firm, client, invoice)
+        invoice.amount_paid_paise = 100_000
+        invoice.status = InvoiceStatus.PARTIALLY_PAID
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["withdrawn"] == 1
+        db.expire_all()
+        row = db.get(Reminder, reminder.id)
+        assert row.status is ReminderStatus.CANCELLED
+        assert "brought the balance to" in row.extra["withdrawn_because"]
+        assert row.attempt_count == 0
+
+    def test_the_reason_names_what_is_actually_left(self, db):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(db, firm, client)
+        reminder = self._fee_chase(db, firm, client, invoice)
+        invoice.amount_paid_paise = 136_000
+        db.commit()
+        tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        assert "₹1,000.00" in db.get(Reminder, reminder.id).extra["withdrawn_because"]
+
+    def test_a_balance_that_has_not_moved_is_still_chased(self, db):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(db, firm, client)
+        self._fee_chase(db, firm, client, invoice)
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    def test_settled_in_full_keeps_its_own_clearer_reason(self, db):
+        """Both tests would fire; the specific one is the useful message."""
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(db, firm, client)
+        reminder = self._fee_chase(db, firm, client, invoice)
+        invoice.amount_paid_paise = invoice.total_paise
+        db.commit()
+        tasks.dispatch_due_reminders_task()
+
+        db.expire_all()
+        assert "settled in full" in db.get(Reminder, reminder.id).extra["withdrawn_because"]
+
+    def test_a_fee_chase_queued_before_the_balance_was_recorded_still_goes_out(self, db):
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(db, firm, client)
+        make_reminder(
+            db,
+            firm,
+            client,
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            invoice_id=invoice.id,
+            reminder_type=ReminderType.PAYMENT,
+            extra={"kind": "payment", "offset_days": 10},
+        )
+        invoice.amount_paid_paise = 100_000
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+
+    def test_a_message_a_practitioner_composed_is_not_second_guessed(self, db):
+        """A manual note may quote whatever the practitioner meant it to."""
+        firm = make_firm(db)
+        client = make_client(db, firm)
+        invoice = self._sent_invoice(db, firm, client)
+        reminder = reminder_service.build_manual_reminder(
+            db,
+            client=client,
+            reminder_type=ReminderType.PAYMENT,
+            subject="About your account",
+            body="Thank you for the part payment.",
+            scheduled_for=datetime.now(UTC) - timedelta(hours=1),
+            invoice_id=invoice.id,
+        )
+        invoice.amount_paid_paise = 100_000
+        db.commit()
+
+        assert tasks.dispatch_due_reminders_task()["sent"] == 1
+        db.expire_all()
+        assert db.get(Reminder, reminder.id).status is ReminderStatus.SENT
 
 
 class TestRefreshingAnInvoiceFromTheRowRatherThanACopy:
