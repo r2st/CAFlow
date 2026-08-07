@@ -213,19 +213,32 @@ export default function Reminders() {
   useEffect(() => {
     refreshPending()
     api
-      // Active clients only — the one picker on which that is not a nicety.
-      // `POST /reminders` refuses an off-boarded client outright, because the
-      // dispatcher joins the client row and requires `is_active`, so a message
-      // queued for one can never go out. Offering them here put a client at the
-      // top of the list that the composer would refuse — and refuse *last*:
-      // drafting has no such check, so a practitioner chose the client, waited
-      // for a model-written message, read it, pressed Queue, and only then was
-      // told the client had been off-boarded. The calendar's picker already
-      // narrows the same way.
-      .listClients({ limit: 200, is_active: true })
+      .listClients({ limit: 200 })
       .then((result) => setClients(result.items))
       .catch(() => setClients([]))
   }, [refreshPending])
+
+  /**
+   * Who a new message may be addressed to.
+   *
+   * `POST /reminders` refuses an off-boarded client outright, because the
+   * dispatcher joins the client row and requires `is_active`, so a message
+   * queued for one can never go out. Offering them in the composer put a
+   * client at the top of the list that queueing would refuse — and refuse
+   * *last*: drafting has no such check, so a practitioner chose the client,
+   * waited for a model-written message, read it, pressed Queue, and only then
+   * was told.
+   *
+   * The *filter* below is a different question and was wrongly narrowed the
+   * same way. The log keeps everything that has ever been sent, off-boarding
+   * cancels the queue rather than erasing it, and "what did we send this
+   * client before we stopped acting for them" is exactly what a firm goes
+   * looking for afterwards — a client ringing back, a fee still owed, a
+   * dispute over what was chased. There was no way to ask it: the client was
+   * not in the list, and a `?client_id=` deep link for one left the control
+   * reading "All clients" over a list showing one.
+   */
+  const addressable = clients.filter((entry) => entry.is_active)
 
   const reload = useCallback(async () => {
     await Promise.all([load(), refreshPending()])
@@ -302,7 +315,7 @@ export default function Reminders() {
       </Alert>
 
       <Composer
-        clients={clients}
+        clients={addressable}
         onError={setError}
         onQueued={async () => {
           setNotice('Reminder queued.')
@@ -346,6 +359,9 @@ export default function Reminders() {
                 {clients.map((client) => (
                   <option key={client.id} value={client.id}>
                     {client.name}
+                    {/* Named, so the reason nothing new can be sent to them is
+                        on the option rather than discovered at the composer. */}
+                    {client.is_active ? '' : ' (off-boarded)'}
                   </option>
                 ))}
               </select>

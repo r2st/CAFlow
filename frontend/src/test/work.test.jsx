@@ -678,22 +678,75 @@ describe('Reminders', () => {
     expect(await screen.findByText(/3 waiting to go out/)).toBeInTheDocument()
   })
 
-  it('does not offer to write to a client the firm has stopped acting for', async () => {
+  describe('an off-boarded client, in the two pickers on this page', () => {
     /**
-     * `POST /reminders` refuses an off-boarded client outright — the dispatcher
-     * requires `is_active`, so a message queued for one can never go out. And
-     * it refuses *last*: drafting has no such check, so the composer let a
-     * practitioner pick the client, wait for a model-written message, read it,
-     * press Queue, and only then be told.
+     * The composer and the filter ask different questions of the same list,
+     * and both were answered with the active clients alone.
+     *
+     * Composing: `POST /reminders` refuses an off-boarded client outright —
+     * the dispatcher requires `is_active`, so a message queued for one can
+     * never go out. And it refuses *last*: drafting has no such check, so the
+     * composer let a practitioner pick the client, wait for a model-written
+     * message, read it, press Queue, and only then be told.
+     *
+     * Filtering: the log keeps everything ever sent, and off-boarding cancels
+     * the queue rather than erasing it. "What did we send this client before
+     * we stopped acting for them" is exactly what a firm looks for afterwards
+     * — a client ringing back, a fee still owed, a dispute over what was
+     * chased — and there was no way to ask it. A `?client_id=` deep link for
+     * one left the control reading "All clients" over a list showing one.
      */
-    renderPage(<Reminders />)
+    const departed = { ...CLIENT, id: 'c-9', name: 'Vega Exports LLP', is_active: false }
 
-    await screen.findByText('GSTR-3B (Monthly) — 2026-07')
-    await waitFor(() =>
-      expect(api.listClients).toHaveBeenCalledWith(
-        expect.objectContaining({ is_active: true }),
-      ),
-    )
+    beforeEach(() => {
+      api.listClients.mockResolvedValue(pageOf([CLIENT, departed]))
+    })
+
+    it('reads the whole client list, not only the active half', async () => {
+      renderPage(<Reminders />)
+
+      await screen.findByText('GSTR-3B (Monthly) — 2026-07')
+      await waitFor(() =>
+        expect(api.listClients).toHaveBeenCalledWith(
+          expect.not.objectContaining({ is_active: true }),
+        ),
+      )
+    })
+
+    it('does not offer to write to them', async () => {
+      renderPage(<Reminders />)
+
+      const composer = await screen.findByLabelText('Send to')
+      expect(within(composer).queryByText(/Vega Exports LLP/)).not.toBeInTheDocument()
+      expect(within(composer).getByText('Nimbus Textiles Pvt Ltd')).toBeInTheDocument()
+    })
+
+    it('still lets the firm look up what was sent to them', async () => {
+      renderPage(<Reminders />)
+
+      const filter = await screen.findByLabelText('Client')
+      expect(within(filter).getByText(/Vega Exports LLP/)).toBeInTheDocument()
+    })
+
+    it('says on the option why nothing new can go to them', async () => {
+      renderPage(<Reminders />)
+
+      const filter = await screen.findByLabelText('Client')
+      expect(within(filter).getByText(/Vega Exports LLP \(off-boarded\)/)).toBeInTheDocument()
+    })
+
+    it('narrows the log to them when that option is chosen', async () => {
+      const user = userEvent.setup()
+      renderPage(<Reminders />)
+
+      await user.selectOptions(await screen.findByLabelText('Client'), 'c-9')
+
+      await waitFor(() =>
+        expect(api.listReminders).toHaveBeenCalledWith(
+          expect.objectContaining({ client_id: 'c-9' }),
+        ),
+      )
+    })
   })
 
   it('drafts a message for review before anything is queued', async () => {
