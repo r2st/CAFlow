@@ -260,6 +260,156 @@ describe('Compliance calendar', () => {
       ),
     )
   })
+
+  /**
+   * The calendar was the one paged list in the app reading without a pager.
+   *
+   * It asked for three hundred rows and printed `total` beside them, and
+   * `total` counts the whole filtered set. A practice past that in the window
+   * saw a heading claiming eight hundred filings above three hundred rows with
+   * nothing saying the rest existed — and "select all" takes what is on
+   * screen, so *Mark filed* reported the batch done over a third of it.
+   */
+  describe('paging the filings the window holds', () => {
+    /** `count` rows on the page, out of `total` in the whole filtered set. */
+    function page(count, total, offset = 0) {
+      const items = Array.from({ length: count }, (_, index) =>
+        complianceItem({ id: `ci-${offset + index + 1}`, period_label: '2026-07' }),
+      )
+      return { ...calendarResponse(items), total, limit: 100, offset }
+    }
+
+    it('asks for one page rather than as much as the endpoint allows', async () => {
+      renderCalendar()
+
+      await waitFor(() =>
+        expect(api.calendar).toHaveBeenCalledWith(
+          expect.objectContaining({ limit: 100, offset: 0 }),
+        ),
+      )
+    })
+
+    it('says which of the filings it is showing when there are more', async () => {
+      api.calendar.mockResolvedValue(page(100, 240))
+      renderCalendar()
+
+      expect(await screen.findByText('Showing 1–100 of 240')).toBeInTheDocument()
+    })
+
+    it('reads the next page rather than leaving the rest unreachable', async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      api.calendar.mockResolvedValue(page(100, 240))
+      renderCalendar()
+
+      await user.click(await screen.findByRole('button', { name: 'Next' }))
+
+      await waitFor(() =>
+        expect(api.calendar).toHaveBeenCalledWith(expect.objectContaining({ offset: 100 })),
+      )
+    })
+
+    it('goes back to the first page when the filter changes', async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      api.calendar.mockResolvedValue(page(100, 240))
+      renderCalendar()
+
+      await user.click(await screen.findByRole('button', { name: 'Next' }))
+      await waitFor(() =>
+        expect(api.calendar).toHaveBeenCalledWith(expect.objectContaining({ offset: 100 })),
+      )
+      api.calendar.mockClear()
+      await user.selectOptions(screen.getByLabelText('Category'), 'gst')
+
+      await waitFor(() =>
+        expect(api.calendar).toHaveBeenCalledWith(
+          expect.objectContaining({ category: 'gst', offset: 0 }),
+        ),
+      )
+    })
+
+    it('offers no pager when everything in the window is on the page', async () => {
+      renderCalendar()
+
+      await screen.findByLabelText(/^Select GSTR-3B \(Monthly\)/)
+      expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument()
+    })
+  })
+
+  /**
+   * *Mark filed* is the only thing this selection drives, and a return already
+   * on the record is not work waiting to be filed. Ticking one asked the
+   * server to re-date a lodgement weeks old — which it now declines, keeping
+   * each filing's own date — but the box should never have offered it. The
+   * default view shows filed work, so "select all" reached this on the
+   * ordinary screen.
+   */
+  describe('a selection that would re-date work already filed', () => {
+    const lodged = complianceItem({
+      id: 'ci-filed',
+      period_label: '2026-06',
+      status: 'filed',
+      display_status: 'filed',
+      filed_on: '2026-07-18',
+    })
+    const open = complianceItem({ id: 'ci-open' })
+
+    it('will not let an already-filed row be ticked', async () => {
+      api.calendar.mockResolvedValue(calendarResponse([lodged, open]))
+      renderCalendar()
+
+      const boxes = await screen.findAllByLabelText(/^Select GSTR-3B \(Monthly\)/)
+      expect(boxes[0]).toBeDisabled()
+      expect(boxes[1]).toBeEnabled()
+    })
+
+    it('leaves it out of select-all, so one click cannot sweep it up', async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      const bulk = vi
+        .spyOn(api, 'bulkUpdateStatus')
+        .mockResolvedValue({ updated: 1, skipped: 0, kept_filing_dates: 0 })
+      api.calendar.mockResolvedValue(calendarResponse([lodged, open]))
+      renderCalendar()
+
+      await user.click(await screen.findByLabelText('Select all filings'))
+      await user.click(screen.getByRole('button', { name: 'Mark filed' }))
+
+      await waitFor(() =>
+        expect(bulk).toHaveBeenCalledWith(expect.objectContaining({ item_ids: ['ci-open'] })),
+      )
+    })
+
+    it('says so when the server kept a lodgement date the batch asked to move', async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      vi.spyOn(api, 'bulkUpdateStatus').mockResolvedValue({
+        updated: 2,
+        skipped: 0,
+        kept_filing_dates: 1,
+      })
+      renderCalendar()
+
+      await user.click(await screen.findByLabelText(/^Select GSTR-3B \(Monthly\)/))
+      await user.click(screen.getByRole('button', { name: 'Mark filed' }))
+
+      expect(
+        await screen.findByText(/1 kept the date they were already lodged on/),
+      ).toBeInTheDocument()
+    })
+
+    it('says nothing extra when every filing took the batch date', async () => {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      vi.spyOn(api, 'bulkUpdateStatus').mockResolvedValue({
+        updated: 1,
+        skipped: 0,
+        kept_filing_dates: 0,
+      })
+      renderCalendar()
+
+      await user.click(await screen.findByLabelText(/^Select GSTR-3B \(Monthly\)/))
+      await user.click(screen.getByRole('button', { name: 'Mark filed' }))
+
+      expect(await screen.findByText('Marked 1 filing(s) as filed.')).toBeInTheDocument()
+    })
+  })
 })
 
 describe('Clients list', () => {

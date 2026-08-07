@@ -597,7 +597,7 @@ class TestFilingUpdates:
             },
         )
         assert response.status_code == 200
-        assert response.json() == {"updated": 4, "skipped": 0}
+        assert response.json() == {"updated": 4, "skipped": 0, "kept_filing_dates": 0}
 
         refreshed = client.get(
             f"{API}/compliance/calendar"
@@ -737,7 +737,7 @@ class TestFilingUpdates:
                 "status": "filed",
             },
         ).json()
-        assert response == {"updated": 1, "skipped": 1}
+        assert response == {"updated": 1, "skipped": 1, "kept_filing_dates": 0}
 
     def test_cannot_update_another_firms_item(
         self, client: TestClient, auth_headers: dict, db: Session
@@ -1711,7 +1711,7 @@ class TestASelectionThatNamesOneFilingTwice:
         )
 
         assert response.status_code == 200, response.text
-        assert response.json() == {"updated": 1, "skipped": 0}
+        assert response.json() == {"updated": 1, "skipped": 0, "kept_filing_dates": 0}
 
     def test_the_repeated_filing_is_still_updated(
         self, client: TestClient, auth_headers: dict, db: Session
@@ -1747,7 +1747,7 @@ class TestASelectionThatNamesOneFilingTwice:
             },
         )
 
-        assert response.json() == {"updated": 1, "skipped": 1}
+        assert response.json() == {"updated": 1, "skipped": 1, "kept_filing_dates": 0}
 
 
 class TestTheCalendarIsCountedAndPagedByTheDatabase:
@@ -2425,3 +2425,279 @@ class TestAnAcknowledgementNumberOnABatchThatIsNotFiled:
             f"/api/v1/compliance/items/{item['id']}", headers=auth_headers
         ).json()
         assert stored["acknowledgement_number"] == "AA270725123456789"
+
+
+class TestABatchThatSweepsUpAReturnAlreadyOnTheRecord:
+    """*Mark filed* over a selection that already contains filed work.
+
+    ``bulk-status`` takes one ``filed_on`` for up to five hundred filings, and
+    it means "the date this batch was lodged". A return already recorded as
+    lodged was not lodged by this batch — but the endpoint wrote the batch's
+    date over it anyway, and the calendar is built to hand it exactly that
+    selection: *Mark filed* sends today's date unconditionally, and the
+    select-all box takes every row on screen, filed ones included. The default
+    view shows filed work, so this is one click away rather than contrived.
+
+    What it rewrote is the firm's own account of when its returns went in, and
+    the one an assessing officer asks about when a late fee is disputed. The
+    filed/delayed split is derived from the date, so a GSTR-3B lodged two days
+    inside its window comes back ``delayed_filed`` dated months late — and
+    there is one ``filed_on``, so the real date is gone. Nothing in the trail
+    contradicts it either: the request genuinely asked for "filed".
+
+    The single-item PATCH is where a lodgement date is corrected, and it
+    already refuses the neighbouring ways of losing one; see
+    :class:`TestClearingTheDateAReturnWasLodgedOn`.
+    """
+
+    def _lodged_on_time(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ) -> tuple[ComplianceItem, str]:
+        """A return lodged two days inside its own window, weeks ago."""
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        lodged = (item.due_date - timedelta(days=2)).isoformat()
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "filed", "filed_on": lodged},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "filed"
+        return item, lodged
+
+    def test_the_date_it_was_really_lodged_on_survives_the_batch(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        item, lodged = self._lodged_on_time(client, auth_headers, db)
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(item.id)],
+                "status": "filed",
+                "filed_on": clock.today().isoformat(),
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        stored = client.get(
+            f"{API}/compliance/items/{item.id}", headers=auth_headers
+        ).json()
+        assert stored["filed_on"] == lodged
+
+    def test_a_return_lodged_on_time_is_not_relabelled_late(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The half that costs the firm money, and the half nothing recovers."""
+        item, _ = self._lodged_on_time(client, auth_headers, db)
+
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(item.id)],
+                "status": "filed",
+                "filed_on": clock.today().isoformat(),
+            },
+        )
+
+        stored = client.get(
+            f"{API}/compliance/items/{item.id}", headers=auth_headers
+        ).json()
+        assert stored["status"] == "filed"
+
+    def test_a_delayed_filing_keeps_its_own_date_too(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Both filed statuses are dates of record, not just the on-time one."""
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        late = (item.due_date + timedelta(days=3)).isoformat()
+        client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"status": "delayed_filed", "filed_on": late},
+        )
+
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(item.id)],
+                "status": "filed",
+                "filed_on": clock.today().isoformat(),
+            },
+        )
+
+        stored = client.get(
+            f"{API}/compliance/items/{item.id}", headers=auth_headers
+        ).json()
+        assert stored["filed_on"] == late
+        assert stored["status"] == "delayed_filed"
+
+    def test_the_filings_this_batch_really_lodged_take_its_date(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The ordinary case is untouched — that is the whole point of the batch."""
+        client_id = client_of_long_standing(client, auth_headers)
+        pending = [
+            item
+            for item in lapsed_items(db, client_id)
+            if item.status == ComplianceStatus.PENDING
+        ][:3]
+        assert len(pending) == 3
+        today = clock.today().isoformat()
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(item.id) for item in pending],
+                "status": "filed",
+                "filed_on": today,
+            },
+        )
+
+        assert response.json()["kept_filing_dates"] == 0
+        for item in pending:
+            stored = client.get(
+                f"{API}/compliance/items/{item.id}", headers=auth_headers
+            ).json()
+            assert stored["filed_on"] == today
+
+    def test_a_mixed_batch_dates_the_new_work_and_leaves_the_rest(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The shape the calendar's select-all actually produces."""
+        already, lodged = self._lodged_on_time(client, auth_headers, db)
+        fresh = next(
+            item
+            for item in lapsed_items(db, str(already.client_id))
+            if item.status == ComplianceStatus.PENDING
+        )
+        today = clock.today().isoformat()
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(already.id), str(fresh.id)],
+                "status": "filed",
+                "filed_on": today,
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["updated"] == 2
+        # Named, so a practitioner is not left believing the whole selection
+        # now reads as filed today.
+        assert body["kept_filing_dates"] == 1
+
+        untouched = client.get(
+            f"{API}/compliance/items/{already.id}", headers=auth_headers
+        ).json()
+        assert untouched["filed_on"] == lodged
+        moved = client.get(
+            f"{API}/compliance/items/{fresh.id}", headers=auth_headers
+        ).json()
+        assert moved["filed_on"] == today
+
+    def test_re_sending_the_same_date_is_not_reported_as_a_kept_one(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Nothing was withheld, so there is nothing to tell the caller about."""
+        client_id = client_of_long_standing(client, auth_headers)
+        item = lapsed_items(db, client_id)[0]
+        today = clock.today().isoformat()
+        for _ in range(2):
+            response = client.post(
+                f"{API}/compliance/items/bulk-status",
+                headers=auth_headers,
+                json={
+                    "item_ids": [str(item.id)],
+                    "status": "filed",
+                    "filed_on": today,
+                },
+            )
+            assert response.status_code == 200, response.text
+        assert response.json()["kept_filing_dates"] == 0
+
+    def test_reverting_a_batch_still_clears_the_stale_date(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Keeping a date of record is not the same as never clearing one."""
+        item, _ = self._lodged_on_time(client, auth_headers, db)
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": [str(item.id)], "status": "pending"},
+        )
+
+        assert response.status_code == 200, response.text
+        stored = client.get(
+            f"{API}/compliance/items/{item.id}", headers=auth_headers
+        ).json()
+        assert stored["filed_on"] is None
+        assert stored["status"] == "pending"
+
+    def test_a_batch_that_names_no_date_leaves_the_record_alone(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """``filed_on`` omitted was already safe; it stays safe."""
+        item, lodged = self._lodged_on_time(client, auth_headers, db)
+
+        response = client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={"item_ids": [str(item.id)], "status": "filed"},
+        )
+
+        assert response.json()["kept_filing_dates"] == 0
+        stored = client.get(
+            f"{API}/compliance/items/{item.id}", headers=auth_headers
+        ).json()
+        assert stored["filed_on"] == lodged
+
+    def test_the_trail_names_the_filings_that_kept_their_own_date(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Otherwise the entry records a date being set across the selection
+        and no way to tell which rows did not take it."""
+        item, _ = self._lodged_on_time(client, auth_headers, db)
+
+        client.post(
+            f"{API}/compliance/items/bulk-status",
+            headers=auth_headers,
+            json={
+                "item_ids": [str(item.id)],
+                "status": "filed",
+                "filed_on": clock.today().isoformat(),
+            },
+        )
+
+        entries = client.get(
+            f"{API}/audit",
+            headers=auth_headers,
+            params={"action": "compliance_item.bulk_status"},
+        ).json()["items"]
+        assert entries[0]["changes"]["kept_filing_dates"] == 1
+
+    def test_the_single_item_patch_still_corrects_one_lodgement_date(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Correcting a date is a decision about one return, and stays open."""
+        item, _ = self._lodged_on_time(client, auth_headers, db)
+        corrected = (item.due_date - timedelta(days=1)).isoformat()
+
+        response = client.patch(
+            f"{API}/compliance/items/{item.id}",
+            headers=auth_headers,
+            json={"filed_on": corrected},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["filed_on"] == corrected

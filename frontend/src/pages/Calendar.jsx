@@ -26,6 +26,25 @@ function defaultRange() {
   return monthWindow(1, 6)
 }
 
+/**
+ * How many filings one page of the calendar shows.
+ *
+ * This was the one paged list in the app reading without a pager. It asked for
+ * three hundred rows and printed `data.total` beside them — and `total` counts
+ * the *whole* filtered set, not the page. A practice with more filings than
+ * that in the window (a year of GST returns across a few dozen clients is
+ * already past it) saw a heading claiming eight hundred filings above three
+ * hundred rows, with nothing saying the rest existed. Narrowing to "Overdue"
+ * is exactly when the set is largest and exactly when a practitioner is
+ * working down it to the end.
+ *
+ * Selection made it worse rather than merely incomplete: "select all" takes
+ * what is on screen, so *Mark filed* reported "Marked 300 filing(s) as filed"
+ * over a filtered set of eight hundred and left five hundred untouched, having
+ * said the batch was done.
+ */
+const PAGE_SIZE = 100
+
 export default function Calendar() {
   const [filters, setFilters] = useState({
     ...defaultRange(),
@@ -34,6 +53,7 @@ export default function Calendar() {
     period: '',
     client_id: '',
   })
+  const [offset, setOffset] = useState(0)
   const [data, setData] = useState(null)
   const [clients, setClients] = useState([])
   const [selectedIds, setSelectedIds] = useState([])
@@ -46,7 +66,7 @@ export default function Calendar() {
     setLoading(true)
     setError('')
     try {
-      const result = await api.calendar({ ...filters, limit: 300 })
+      const result = await api.calendar({ ...filters, limit: PAGE_SIZE, offset })
       setData(result)
       setSelectedIds([])
     } catch (err) {
@@ -54,7 +74,7 @@ export default function Calendar() {
     } finally {
       setLoading(false)
     }
-  }, [filters])
+  }, [filters, offset])
 
   useEffect(() => {
     load()
@@ -68,7 +88,12 @@ export default function Calendar() {
   }, [])
 
   function update(key) {
-    return (event) => setFilters((prev) => ({ ...prev, [key]: event.target.value }))
+    return (event) => {
+      setFilters((prev) => ({ ...prev, [key]: event.target.value }))
+      // A narrower filter has fewer pages, and page four of the old set is
+      // page nothing of the new one.
+      setOffset(0)
+    }
   }
 
   function toggle(id) {
@@ -77,8 +102,20 @@ export default function Calendar() {
     )
   }
 
+  /**
+   * The rows *Mark filed* has anything to say about.
+   *
+   * A filing already on the record is not work waiting to be filed, and the
+   * only action this selection drives is marking work filed. Sweeping filed
+   * rows in asked the server to re-date returns that were lodged weeks ago —
+   * which it now declines, keeping each one's own date, but the tick box
+   * should not have been offering it in the first place. The default view
+   * shows filed work, so "select all" hit this on the ordinary screen.
+   */
+  const fileable = (data?.items ?? []).filter((item) => item.display_status !== 'filed')
+
   function toggleAll(checked) {
-    setSelectedIds(checked ? data.items.map((item) => item.id) : [])
+    setSelectedIds(checked ? fileable.map((item) => item.id) : [])
   }
 
   async function markFiled() {
@@ -94,7 +131,15 @@ export default function Calendar() {
         // decides `filed` against `delayed_filed`. See `todayInIndia`.
         filed_on: todayInIndia(),
       })
-      setNotice(`Marked ${result.updated} filing(s) as filed.`)
+      setNotice(
+        `Marked ${result.updated} filing(s) as filed.` +
+          // The server keeps the lodgement date of anything already on the
+          // record. Said out loud, because otherwise the count reads as "all
+          // of these are now dated today".
+          (result.kept_filing_dates
+            ? ` ${result.kept_filing_dates} kept the date they were already lodged on.`
+            : ''),
+      )
       await load()
     } catch (err) {
       setError(err.message)
@@ -104,6 +149,8 @@ export default function Calendar() {
   }
 
   const buckets = data?.buckets ?? []
+  const total = data?.total ?? 0
+  const showingTo = Math.min(offset + PAGE_SIZE, total)
 
   return (
     <>
@@ -171,7 +218,10 @@ export default function Calendar() {
             {filters.period && (
               <button
                 className="secondary"
-                onClick={() => setFilters((prev) => ({ ...prev, period: '' }))}
+                onClick={() => {
+                  setFilters((prev) => ({ ...prev, period: '' }))
+                  setOffset(0)
+                }}
               >
                 Clear period: {filters.period}
               </button>
@@ -187,12 +237,13 @@ export default function Calendar() {
               key={bucket.period_label}
               type="button"
               className={`period-chip ${filters.period === bucket.period_label ? 'active' : ''}`}
-              onClick={() =>
+              onClick={() => {
                 setFilters((prev) => ({
                   ...prev,
                   period: prev.period === bucket.period_label ? '' : bucket.period_label,
                 }))
-              }
+                setOffset(0)
+              }}
             >
               <div className="period-label">{bucket.period_label}</div>
               <div className="period-counts">
@@ -226,16 +277,43 @@ export default function Calendar() {
         {loading && !data ? (
           <Skeleton rows={8} />
         ) : data && data.items.length > 0 ? (
-          <div className={loading ? 'is-refreshing' : ''}>
-            <ComplianceTable
-              items={data.items}
-              selectable
-              selectedIds={selectedIds}
-              onToggle={toggle}
-              onToggleAll={toggleAll}
-              showFee
-            />
-          </div>
+          <>
+            <div className={loading ? 'is-refreshing' : ''}>
+              <ComplianceTable
+                items={data.items}
+                selectable
+                selectableIds={fileable.map((item) => item.id)}
+                selectedIds={selectedIds}
+                onToggle={toggle}
+                onToggleAll={toggleAll}
+                showFee
+              />
+            </div>
+
+            {total > PAGE_SIZE && (
+              <div className="card-header pager">
+                <span className="small muted">
+                  Showing {offset + 1}–{showingTo} of {total}
+                </span>
+                <div className="button-row">
+                  <button
+                    className="secondary small"
+                    disabled={offset === 0}
+                    onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+                  >
+                    Previous
+                  </button>
+                  <button
+                    className="secondary small"
+                    disabled={showingTo >= total}
+                    onClick={() => setOffset(offset + PAGE_SIZE)}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         ) : (
           <EmptyState title="No filings match these filters">
             Widen the date range or clear a filter.

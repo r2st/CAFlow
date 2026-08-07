@@ -493,14 +493,46 @@ def bulk_update_status(
     # same to the same database.
     withdraw: list[uuid.UUID] = []
     reinstate: list[uuid.UUID] = []
+    kept_dates = 0
     for item in items:
         was_status = item.status
+        was_filed_on = item.filed_on
         item.status = payload.status
         if payload.acknowledgement_number:
             item.acknowledgement_number = payload.acknowledgement_number
+        # ``filed_on`` here means "the date *this batch* was lodged", and a
+        # return already recorded as lodged was not lodged by this batch. So a
+        # date of record already on the row is kept, and only the filings this
+        # call actually moved into a filed status take the batch's date.
+        #
+        # Left alone, this was the bulk half of the re-dating
+        # ``update_compliance_item`` refuses one item at a time. The calendar's
+        # *Mark filed* sends today's date unconditionally and its select-all
+        # box takes every row on screen, filed ones included — so one click on
+        # a list that shows filed work rewrote the lodgement date of every
+        # return in it to today. That is the firm's own account of when its
+        # returns went in, and the one an assessing officer asks about: a
+        # GSTR-3B lodged on the 18th against a deadline on the 20th comes back
+        # ``delayed_filed``, dated months late, and there is one ``filed_on``
+        # so the real date is gone. Nothing in the trail says it moved, because
+        # the request genuinely asked for "filed".
+        #
+        # Correcting a single lodgement date is still the single-item PATCH,
+        # where the caller is naming one return rather than up to five hundred.
+        keeps_its_date = (
+            payload.filed_on is not None
+            and was_status in FILED_STATUSES
+            and was_filed_on is not None
+        )
+        if keeps_its_date and was_filed_on != payload.filed_on:
+            kept_dates += 1
         # Never "given" here: a non-filed status has just been refused a date
         # above, so reverting a batch always clears the stale one.
-        _normalise_filing(item, filed_on=payload.filed_on, filed_on_given=False)
+        _normalise_filing(
+            item,
+            filed_on=None if keeps_its_date else payload.filed_on,
+            filed_on_given=False,
+        )
         match _task_follow_up(item, was_status):
             case "withdraw":
                 withdraw.append(item.id)
@@ -522,6 +554,10 @@ def bulk_update_status(
             # lodged after its own deadline is stored as delayed_filed, so a
             # batch marked filed routinely lands on both.
             "resulting_statuses": sorted({item.status.value for item in items}),
+            # Named, because the batch asked for a date these filings did not
+            # take. Without it the trail records a lodgement date being set
+            # across the selection and no way to tell which rows kept theirs.
+            **({"kept_filing_dates": kept_dates} if kept_dates else {}),
         },
     )
     db.commit()
@@ -534,7 +570,9 @@ def bulk_update_status(
     # a practitioner is meant to act on is the one naming filings the firm
     # cannot reach — a stale id, or another firm's.
     return BulkStatusUpdateResult(
-        updated=len(items), skipped=len(set(payload.item_ids)) - len(items)
+        updated=len(items),
+        skipped=len(set(payload.item_ids)) - len(items),
+        kept_filing_dates=kept_dates,
     )
 
 

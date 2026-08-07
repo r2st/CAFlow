@@ -13,17 +13,27 @@ import {
  *
  * `selectable` turns on the checkbox column that drives bulk filing updates —
  * the end-of-deadline workflow where a CA marks twenty GSTR-3Bs filed at once.
+ *
+ * `selectableIds` narrows that to the rows the bulk action has anything to say
+ * about; anything else is shown with the box disabled rather than hidden, so
+ * the row still reads as a filing and not as one waiting to be actioned.
+ * Omitting it leaves every row selectable, which is what the plain table wants.
  */
 export default function ComplianceTable({
   items,
   selectable = false,
+  selectableIds = null,
   selectedIds = [],
   onToggle,
   onToggleAll,
   showClient = true,
   showFee = false,
 }) {
-  const allSelected = items.length > 0 && selectedIds.length === items.length
+  const canSelect = (item) => selectableIds === null || selectableIds.includes(item.id)
+  const selectableCount = items.filter(canSelect).length
+  // Measured against what *can* be selected, so the header box does not sit
+  // unticked for ever on a page whose remaining rows will never be selected.
+  const allSelected = selectableCount > 0 && selectedIds.length === selectableCount
 
   return (
     <TableScroll label="Filings">
@@ -36,6 +46,7 @@ export default function ComplianceTable({
                   type="checkbox"
                   aria-label="Select all filings"
                   checked={allSelected}
+                  disabled={selectableCount === 0}
                   onChange={(e) => onToggleAll?.(e.target.checked)}
                 />
               </th>
@@ -57,6 +68,12 @@ export default function ComplianceTable({
                     type="checkbox"
                     aria-label={`Select ${item.compliance_type_name} ${item.period_label}`}
                     checked={selectedIds.includes(item.id)}
+                    disabled={!canSelect(item)}
+                    title={
+                      canSelect(item)
+                        ? undefined
+                        : 'Already on the record — open the filing to correct it'
+                    }
                     onChange={() => onToggle?.(item.id)}
                   />
                 </td>

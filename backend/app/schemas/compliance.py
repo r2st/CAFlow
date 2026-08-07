@@ -117,6 +117,12 @@ class BulkStatusUpdate(SanitizedModel):
 class BulkStatusUpdateResult(SanitizedModel):
     updated: int
     skipped: int
+    # How many of the batch were already recorded as lodged on a different day
+    # and therefore kept their own date rather than taking this batch's. Not a
+    # failure — the filings were updated — but the caller asked for a date that
+    # some of them did not take, and saying so is what stops a practitioner
+    # believing the whole selection now reads as filed today.
+    kept_filing_dates: int = 0
 
 
 class ComplianceCalendarBucket(SanitizedModel):
