@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -91,6 +92,62 @@ def shelve_open_items(db: Session, client: Client) -> int:
     # has stopped acting for.
     task_service.withdraw_tasks_for_items(db, [item.id for item in items])
     return len(items)
+
+
+@dataclass(frozen=True)
+class OffBoarded:
+    """What stopping work for a client actually stopped."""
+
+    shelved: int
+    reminders_cancelled: int
+
+
+def off_board(db: Session, client: Client) -> OffBoarded:
+    """Everything that follows from a firm ceasing to act for a client.
+
+    Two doors reach this transition — ``DELETE /clients/{id}`` and ``PATCH``
+    with ``is_active: false`` — and it has to mean the same thing through
+    either. It did not. The delete closed the open filings *and* cancelled the
+    queued chases; the patch closed only the filings, and left the queue.
+
+    A queued reminder for an off-boarded client is not merely stale, it is
+    stuck. The dispatcher's ``_deliverable`` joins the client row and requires
+    ``is_active``, so the row can never be claimed: never sent, never failed,
+    never withdrawn, and counted in the pending badge on the reminders nav for
+    ever. ``POST /reminders`` refuses to *create* one for exactly this reason
+    and says so. Off-boarding a client with a fortnight of document chases and
+    fee reminders behind them is the other way into the same state, and through
+    the patch it was still open — a practitioner reads a badge saying work is
+    waiting, opens the screen, and finds reminders addressed to a client the
+    firm stopped acting for, indistinguishable from the live ones except by
+    checking each client in turn.
+
+    Both halves are gathered here rather than repeated at the two call sites,
+    so a third thing that has to happen on off-boarding cannot be added to one
+    door and forgotten on the other.
+
+    Rows already ``sent`` are left as sent: what went out happened, and the
+    trail has to keep saying so. Reactivation does not resurrect the cancelled
+    ones either — what was queued was queued against a deadline or a balance
+    that has since been shelved or moved on, and the sweeps raise whatever is
+    genuinely outstanding on their next run.
+    """
+    shelved = shelve_open_items(db, client)
+    stopped = reminder_service.cancel_scheduled(
+        db, firm_id=client.firm_id, client_id=client.id
+    )
+    return OffBoarded(shelved=shelved, reminders_cancelled=stopped)
+
+
+def off_boarding_summary(result: OffBoarded) -> str:
+    """The audit fragment naming what an off-boarding closed, if anything."""
+    return (
+        f"; closed {result.shelved} open filing(s)" if result.shelved else ""
+    ) + (
+        f"; cancelled {result.reminders_cancelled} scheduled reminder(s)"
+        if result.reminders_cancelled
+        else ""
+    )
 
 
 def restore_shelved_items(db: Session, client: Client) -> int:
@@ -441,10 +498,13 @@ def update_client(
 
     created = 0
     restored = 0
-    shelved = 0
     withdrawn = 0
+    # The same instruction ``DELETE /clients/{id}`` gives, given through the
+    # other door — the open filings *and* the queued chases. See
+    # :func:`off_board` for what the patch used to leave behind.
+    off_boarded = OffBoarded(shelved=0, reminders_cancelled=0)
     if deactivating:
-        shelved = shelve_open_items(db, client)
+        off_boarded = off_board(db, client)
     if reactivating:
         # A client back on the books owes what they owed. Both halves are
         # needed: the reopen covers the periods off-boarding closed, and the
@@ -487,7 +547,7 @@ def update_client(
         entity_id=client.id,
         actor=practitioner,
         summary=f"Updated client {client.name}"
-        + (f"; closed {shelved} open filing(s)" if shelved else "")
+        + off_boarding_summary(off_boarded)
         + (f"; withdrew {withdrawn} filing(s) no longer applicable" if withdrawn else "")
         + (f"; reopened {restored} filing(s)" if restored else "")
         + (f"; generated {created} new compliance item(s)" if created else ""),
@@ -579,40 +639,16 @@ def deactivate_client(client_id: uuid.UUID, practitioner: Manager, db: DbSession
     client = _get_client_or_404(db, practitioner.firm_id, client_id)
     client.is_active = False
     # Outstanding obligations for an off-boarded client are no longer tracked,
-    # but the close is recorded so that taking them back on can undo it.
-    shelved = shelve_open_items(db, client)
-    # And the chases queued against them, which are the same instruction in the
-    # other direction: nothing is sent to an off-boarded client, so a reminder
-    # still waiting is one that can never go out.
-    #
-    # ``POST /reminders`` refuses to *create* one for an off-boarded client, and
-    # says why: the dispatcher's ``_deliverable`` joins the client row and
-    # requires ``is_active``, so the message would sit SCHEDULED for good —
-    # never sent, never failed, never withdrawn, and counted in the pending
-    # badge on the reminders nav for ever. Off-boarding is the other door into
-    # exactly that state, and it was open: a client is off-boarded with a
-    # fortnight of queued document chases and fee reminders behind them, every
-    # one of which is now undeliverable and none of which anything will ever
-    # clear. The practitioner reads a badge saying work is waiting, opens the
-    # screen, and finds reminders addressed to a client the firm stopped acting
-    # for — with no way to tell them from live ones except by checking each
-    # client in turn.
-    #
-    # Cancelled rather than deleted, and reactivation does not undo it: what
-    # was queued was queued against a deadline or a balance that has since been
-    # shelved or moved on, and the sweeps raise whatever is genuinely
-    # outstanding on their next run.
-    stopped = reminder_service.cancel_scheduled(
-        db, firm_id=practitioner.firm_id, client_id=client.id
-    )
+    # and neither are the chases queued against them. Both are recorded so that
+    # taking them back on can undo the first; see :func:`off_board`, which the
+    # patch door goes through as well so the two cannot drift apart.
+    off_boarded = off_board(db, client)
     audit.record(
         db,
         action="client.deactivate",
         entity_type="client",
         entity_id=client.id,
         actor=practitioner,
-        summary=f"Deactivated client {client.name}"
-        + (f"; closed {shelved} open filing(s)" if shelved else "")
-        + (f"; cancelled {stopped} scheduled reminder(s)" if stopped else ""),
+        summary=f"Deactivated client {client.name}" + off_boarding_summary(off_boarded),
     )
     db.commit()

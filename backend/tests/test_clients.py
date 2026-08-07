@@ -19,10 +19,12 @@ from app.models.base import (
     EntityType,
     Frequency,
     GSTFilingFrequency,
+    ReminderStatus,
     TaskStatus,
 )
 from app.models.client import Client as ClientModel
 from app.models.compliance import ComplianceItem, ComplianceType
+from app.models.reminder import Reminder
 from app.models.task import Task
 from app.schemas.common import MAX_AMOUNT_PAISE
 from app.services import compliance_generator
@@ -1177,6 +1179,157 @@ class TestOffBoardingMeansTheSameThingByEitherDoor:
 
         db.refresh(item)
         assert item.status == ComplianceStatus.NOT_APPLICABLE
+
+    # ------------------------------------------------------------------ #
+    # The queued chases, which are the other half of the same instruction.
+
+    @staticmethod
+    def queue_a_chase(client: TestClient, auth_headers: dict, client_id: str) -> str:
+        """A reminder still waiting to go out for this client."""
+        response = client.post(
+            f"{API}/reminders",
+            headers=auth_headers,
+            json={
+                "client_id": client_id,
+                "reminder_type": "custom",
+                "subject": "Your GSTR-3B",
+                "body": "A quick note about the return due this month.",
+                "scheduled_for": (
+                    clock.today() + timedelta(days=3)
+                ).isoformat() + "T09:00:00Z",
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["id"]
+
+    @staticmethod
+    def reminder_status(db: Session, reminder_id: str) -> ReminderStatus:
+        db.expire_all()
+        return db.get(Reminder, uuid.UUID(reminder_id)).status
+
+    def test_patching_a_client_inactive_cancels_their_queued_reminders(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """The delete door cancelled them; the patch door left them stuck.
+
+        Nothing is sent to an off-boarded client — the dispatcher joins the
+        client row and requires ``is_active`` — so a reminder left ``scheduled``
+        can never be claimed: never sent, never failed, never withdrawn, and
+        counted in the pending badge for ever.
+        """
+        client_id = self.onboard(client, auth_headers)
+        reminder_id = self.queue_a_chase(client, auth_headers, client_id)
+
+        response = client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+        assert response.status_code == 200
+
+        assert self.reminder_status(db, reminder_id) == ReminderStatus.CANCELLED
+
+    def test_both_doors_leave_the_queue_in_the_same_state(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Whichever the UI reaches for, the client stops being written to."""
+        through_patch = self.onboard(client, auth_headers)
+        patched = self.queue_a_chase(client, auth_headers, through_patch)
+        client.patch(
+            f"{API}/clients/{through_patch}",
+            headers=auth_headers,
+            json={"is_active": False},
+        )
+
+        through_delete = client.post(
+            f"{API}/clients",
+            headers=auth_headers,
+            json=make_client_payload(name="Vaidya Exports LLP", pan="AABCV3456Q"),
+        ).json()["client"]["id"]
+        deleted = self.queue_a_chase(client, auth_headers, through_delete)
+        client.delete(f"{API}/clients/{through_delete}", headers=auth_headers)
+
+        assert self.reminder_status(db, patched) == self.reminder_status(db, deleted)
+        assert self.reminder_status(db, patched) == ReminderStatus.CANCELLED
+
+    def test_the_pending_badge_clears_when_a_client_is_let_go(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The screen a practitioner checks must not show undeliverable work."""
+        client_id = self.onboard(client, auth_headers)
+        self.queue_a_chase(client, auth_headers, client_id)
+        before = client.get(f"{API}/reminders/pending-count", headers=auth_headers).json()
+        assert before["scheduled"] == 1
+
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+
+        after = client.get(f"{API}/reminders/pending-count", headers=auth_headers).json()
+        assert after["scheduled"] == 0
+
+    def test_a_reminder_already_sent_is_left_as_sent(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """What went out happened, and the trail has to keep saying so."""
+        client_id = self.onboard(client, auth_headers)
+        reminder_id = self.queue_a_chase(client, auth_headers, client_id)
+        sent = db.get(Reminder, uuid.UUID(reminder_id))
+        sent.status = ReminderStatus.SENT
+        db.commit()
+
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+
+        assert self.reminder_status(db, reminder_id) == ReminderStatus.SENT
+
+    def test_the_patch_records_what_it_cancelled(
+        self, client: TestClient, auth_headers: dict
+    ):
+        """The audit line says what the off-boarding closed, by either door."""
+        client_id = self.onboard(client, auth_headers)
+        self.queue_a_chase(client, auth_headers, client_id)
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+
+        entry = client.get(
+            f"{API}/audit", params={"action": "client.update"}, headers=auth_headers
+        ).json()["items"][0]
+        assert "cancelled 1 scheduled reminder(s)" in entry["summary"]
+
+    def test_an_edit_that_does_not_off_board_leaves_the_queue_alone(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """Only the transition. Renaming a client is not stopping the chase."""
+        client_id = self.onboard(client, auth_headers)
+        reminder_id = self.queue_a_chase(client, auth_headers, client_id)
+
+        client.patch(
+            f"{API}/clients/{client_id}",
+            headers=auth_headers,
+            json={"contact_person": "Meera Iyer"},
+        )
+
+        assert self.reminder_status(db, reminder_id) == ReminderStatus.SCHEDULED
+
+    def test_reactivation_does_not_resurrect_a_cancelled_chase(
+        self, client: TestClient, auth_headers: dict, db: Session
+    ):
+        """It was queued against a deadline that has since been shelved.
+
+        The sweeps raise whatever is genuinely outstanding on their next run,
+        which is the same position ``DELETE`` already took.
+        """
+        client_id = self.onboard(client, auth_headers)
+        reminder_id = self.queue_a_chase(client, auth_headers, client_id)
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": False}
+        )
+        client.patch(
+            f"{API}/clients/{client_id}", headers=auth_headers, json={"is_active": True}
+        )
+
+        assert self.reminder_status(db, reminder_id) == ReminderStatus.CANCELLED
 
 
 class TestTenantIsolation:
