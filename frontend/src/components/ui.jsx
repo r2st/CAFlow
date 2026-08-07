@@ -130,6 +130,74 @@ export function formatDate(value) {
   return date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
+/**
+ * The clock the practice runs on, on this side of the wire.
+ *
+ * Every business date in CAFlow is a date in India, and the server says so at
+ * length: `app/core/clock.py` exists because `date.today()` in a UTC container
+ * answers a different question, and UTC is five and a half hours behind IST.
+ * The browser had the same gap and nothing named it. `new Date()` is an
+ * instant, and the two ways of getting a date out of one are both wrong here:
+ *
+ * - `toISOString().slice(0, 10)` is the *UTC* date. Between midnight and 05:30
+ *   IST it is yesterday — and those five and a half hours are working hours on
+ *   a deadline, which is exactly the window the server-side docstring is
+ *   about. `Mark filed` sends `filed_on`, and `_normalise_filing` compares it
+ *   with the due date to decide `filed` against `delayed_filed`: a batch of
+ *   GSTR-3Bs lodged at 01:00 IST on the 21st, a day past the deadline, was
+ *   recorded as filed on the 20th and stored as on time. That is the firm's
+ *   own account of when a return was lodged, and it is the record an assessing
+ *   officer asks about.
+ * - the local date is right for a browser in India and wrong for one anywhere
+ *   else, which is a partner opening the app from abroad.
+ *
+ * So the date is asked for in `Asia/Kolkata` explicitly, which is what the
+ * server means by today. `en-CA` because its short form *is* ISO 8601 —
+ * `2026-08-20` — so there is nothing to reassemble.
+ */
+const IN_INDIA = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Kolkata',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+})
+
+/** `2026-08-20` — the Indian calendar date an instant falls on. */
+export function isoDateInIndia(instant = new Date()) {
+  return IN_INDIA.format(instant)
+}
+
+/** Today, as the server means it. See {@link isoDateInIndia}. */
+export function todayInIndia() {
+  return isoDateInIndia()
+}
+
+/**
+ * `{ from_date, to_date }` for a window counted in whole months around today.
+ *
+ * Shared by the dashboard and the calendar, which drew the same window from
+ * `new Date(y, m, d).toISOString()` — a local midnight re-expressed in UTC, so
+ * in India both ends landed a day early. The `to` end is a month's last day,
+ * so losing a day there dropped every filing due on the last of the month
+ * from the view entirely.
+ *
+ * Built from the Indian date rather than the browser's, for the reason
+ * {@link isoDateInIndia} gives, and as strings throughout so no local-midnight
+ * `Date` is ever re-expressed in another zone.
+ */
+export function monthWindow(monthsBack, monthsAhead) {
+  const [year, month] = todayInIndia().split('-').map(Number)
+  const from = new Date(Date.UTC(year, month - 1 - monthsBack, 1))
+  // Day 0 of a month is the last day of the one before it, so this is the end
+  // of the month `monthsAhead - 1` past the current one — the same span the
+  // two pages already drew, without the timezone shift that clipped it.
+  const to = new Date(Date.UTC(year, month - 1 + monthsAhead, 0))
+  return {
+    from_date: from.toISOString().slice(0, 10),
+    to_date: to.toISOString().slice(0, 10),
+  }
+}
+
 /** "in 4 days" / "6 days ago" — the number a CA actually reacts to. */
 export function formatDaysRemaining(days) {
   if (days === null || days === undefined) return '—'

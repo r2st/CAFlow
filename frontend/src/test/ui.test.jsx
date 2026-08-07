@@ -1,8 +1,16 @@
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import ComplianceTable from '../components/ComplianceTable'
-import { formatDate, formatDaysRemaining, formatRupees, statusLabel } from '../components/ui'
+import {
+  formatDate,
+  formatDaysRemaining,
+  formatRupees,
+  isoDateInIndia,
+  monthWindow,
+  statusLabel,
+  todayInIndia,
+} from '../components/ui'
 import { complianceItem } from './fixtures'
 
 describe('formatters', () => {
@@ -68,6 +76,83 @@ describe('formatters', () => {
   it('labels stored statuses readably', () => {
     expect(statusLabel('delayed_filed')).toBe('Filed (late)')
     expect(statusLabel('in_progress')).toBe('In progress')
+  })
+})
+
+describe('the business date', () => {
+  /**
+   * Every business date in CAFlow is a date in India — `app/core/clock.py` says
+   * so at length, and the server refuses a `filed_on` past *its* today. The
+   * browser had the same gap and nothing named it: `toISOString()` is the UTC
+   * date, and UTC is five and a half hours behind IST, so for the first five
+   * and a half hours of every Indian day the two disagree. Those are working
+   * hours on a deadline, and `filed_on` is what decides `filed` against
+   * `delayed_filed`.
+   */
+  afterEach(() => vi.useRealTimers())
+
+  it('is the Indian date, not the UTC one', () => {
+    // 20:00 UTC on the 19th is 01:30 IST on the 20th — a CA working the night
+    // of a deadline. `toISOString().slice(0, 10)` answers "2026-08-19".
+    expect(isoDateInIndia(new Date('2026-08-19T20:00:00Z'))).toBe('2026-08-20')
+  })
+
+  it('does not run ahead of India either', () => {
+    // 18:00 UTC is 23:30 IST the same day; nothing has rolled over yet.
+    expect(isoDateInIndia(new Date('2026-08-20T18:00:00Z'))).toBe('2026-08-20')
+  })
+
+  it('crosses the Indian midnight, not the UTC one', () => {
+    expect(isoDateInIndia(new Date('2026-08-20T18:29:00Z'))).toBe('2026-08-20')
+    expect(isoDateInIndia(new Date('2026-08-20T18:30:00Z'))).toBe('2026-08-21')
+  })
+
+  it('is an ISO date the API can take as it stands', () => {
+    expect(todayInIndia()).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  })
+
+  it('reads the same however the browser is zoned', () => {
+    // A partner opening the app from abroad still means the Indian date; the
+    // firm's filings are not dated by where they happen to be standing.
+    const instant = new Date('2026-08-19T20:00:00Z')
+    expect(isoDateInIndia(instant)).toBe('2026-08-20')
+    expect(instant.toISOString().slice(0, 10)).toBe('2026-08-19')
+  })
+})
+
+describe('monthWindow', () => {
+  afterEach(() => vi.useRealTimers())
+
+  function at(instant) {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(instant))
+  }
+
+  it('runs from the first of a whole month to the last of another', () => {
+    at('2026-08-14T06:00:00Z')
+    expect(monthWindow(1, 6)).toEqual({ from_date: '2026-07-01', to_date: '2027-01-31' })
+  })
+
+  it('keeps the last day of the range, which the UTC shift used to clip', () => {
+    // `new Date(y, m, 0)` is a local midnight; re-expressed in UTC from India
+    // it lands on the day before, so every filing due on the last of the month
+    // fell outside the window entirely.
+    at('2026-01-14T06:00:00Z')
+    expect(monthWindow(1, 6).to_date).toBe('2026-06-30')
+  })
+
+  it('is counted from the Indian date, so it does not shift overnight', () => {
+    // 01:30 IST on 1 September. In UTC it is still 31 August, and the window
+    // built from that starts and ends a month early.
+    at('2026-08-31T20:00:00Z')
+    expect(monthWindow(1, 6)).toEqual({ from_date: '2026-08-01', to_date: '2027-02-28' })
+  })
+
+  it('carries across the year end in both directions', () => {
+    at('2026-01-05T06:00:00Z')
+    expect(monthWindow(1, 6)).toEqual({ from_date: '2025-12-01', to_date: '2026-06-30' })
+    at('2026-12-05T06:00:00Z')
+    expect(monthWindow(1, 6)).toEqual({ from_date: '2026-11-01', to_date: '2027-05-31' })
   })
 })
 

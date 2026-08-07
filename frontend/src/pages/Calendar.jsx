@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '../api/client'
 import ComplianceTable from '../components/ComplianceTable'
-import { Alert, EmptyState, Skeleton } from '../components/ui'
+import { Alert, EmptyState, Skeleton, monthWindow, todayInIndia } from '../components/ui'
 
 const CATEGORIES = [
   ['', 'All categories'],
@@ -21,14 +21,9 @@ const DISPLAY_STATUSES = [
   ['filed', 'Filed'],
 ]
 
+/** A month of history for overdue work, six months ahead. */
 function defaultRange() {
-  const today = new Date()
-  const from = new Date(today.getFullYear(), today.getMonth() - 1, 1)
-  const to = new Date(today.getFullYear(), today.getMonth() + 6, 0)
-  return {
-    from_date: from.toISOString().slice(0, 10),
-    to_date: to.toISOString().slice(0, 10),
-  }
+  return monthWindow(1, 6)
 }
 
 export default function Calendar() {
@@ -94,7 +89,10 @@ export default function Calendar() {
       const result = await api.bulkUpdateStatus({
         item_ids: selectedIds,
         status: 'filed',
-        filed_on: new Date().toISOString().slice(0, 10),
+        // Today in India, not in UTC. A batch marked filed before 05:30 IST
+        // would otherwise be recorded a day early — and the date is what
+        // decides `filed` against `delayed_filed`. See `todayInIndia`.
+        filed_on: todayInIndia(),
       })
       setNotice(`Marked ${result.updated} filing(s) as filed.`)
       await load()

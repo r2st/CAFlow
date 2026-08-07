@@ -1,9 +1,10 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import api, { setToken } from '../api/client'
 import { AuthProvider } from '../context/AuthContext'
+import Calendar from '../pages/Calendar'
 import ClientDetail from '../pages/ClientDetail'
 import Clients from '../pages/Clients'
 import Dashboard from '../pages/Dashboard'
@@ -203,6 +204,61 @@ describe('Dashboard', () => {
     renderWithProviders(<Dashboard />)
 
     expect(await screen.findByText('Calendar unavailable')).toBeInTheDocument()
+  })
+})
+
+describe('Compliance calendar', () => {
+  beforeEach(() => {
+    vi.spyOn(api, 'listClients').mockResolvedValue(pageOf([CLIENT]))
+    vi.spyOn(api, 'calendar').mockResolvedValue(calendarResponse([complianceItem()]))
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+  })
+  afterEach(() => vi.useRealTimers())
+
+  function renderCalendar() {
+    return render(
+      <MemoryRouter>
+        <Calendar />
+      </MemoryRouter>,
+    )
+  }
+
+  it('marks a filing filed on today in India, not today in UTC', async () => {
+    /**
+     * 20:00 UTC on the 19th is 01:30 IST on the 20th — the last night of a GST
+     * window, and exactly when the work gets done. `toISOString()` answers the
+     * 19th, and `_normalise_filing` compares whatever arrives with the due date
+     * to decide `filed` against `delayed_filed`: a return lodged a day late is
+     * then stored as on time, in the record an assessing officer asks about.
+     */
+    vi.setSystemTime(new Date('2026-08-19T20:00:00Z'))
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    const bulk = vi
+      .spyOn(api, 'bulkUpdateStatus')
+      .mockResolvedValue({ updated: 1, skipped: 0 })
+
+    renderCalendar()
+    await user.click(await screen.findByLabelText(/^Select GSTR-3B \(Monthly\)/))
+    await user.click(screen.getByRole('button', { name: 'Mark filed' }))
+
+    await waitFor(() =>
+      expect(bulk).toHaveBeenCalledWith({
+        item_ids: ['ci-1'],
+        status: 'filed',
+        filed_on: '2026-08-20',
+      }),
+    )
+  })
+
+  it('draws its default window from the Indian date too', async () => {
+    vi.setSystemTime(new Date('2026-08-31T20:00:00Z'))
+    renderCalendar()
+
+    await waitFor(() =>
+      expect(api.calendar).toHaveBeenCalledWith(
+        expect.objectContaining({ from_date: '2026-08-01', to_date: '2027-02-28' }),
+      ),
+    )
   })
 })
 

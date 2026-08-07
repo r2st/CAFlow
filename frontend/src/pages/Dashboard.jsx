@@ -9,15 +9,13 @@ import {
   SkeletonStats,
   Stat,
   formatRupees,
+  monthWindow,
 } from '../components/ui'
 import { useAuth } from '../context/AuthContext'
 
 /** Show a rolling window: a month of history for overdue work, six months ahead. */
 function calendarWindow() {
-  const today = new Date()
-  const from = new Date(today.getFullYear(), today.getMonth() - 1, 1)
-  const to = new Date(today.getFullYear(), today.getMonth() + 6, 0)
-  return { from_date: from.toISOString().slice(0, 10), to_date: to.toISOString().slice(0, 10) }
+  return monthWindow(1, 6)
 }
 
 export default function Dashboard() {
