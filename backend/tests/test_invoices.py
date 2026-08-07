@@ -255,10 +255,12 @@ class TestRedatingADraft:
             "/api/v1/audit", params={"action": "invoice.update"}, headers=auth_headers
         ).json()["items"]
         assert entries
-        assert entries[0]["changes"]["invoice_number"] == [
-            "INV/FY2025-26/0001",
-            "INV/FY2026-27/0001",
-        ]
+        # The number is a field of the record, so it moves in the before/after
+        # every other patch in the API writes — which is also the one shape the
+        # audit screen renders. See ``AUDITED_INVOICE_FIELDS``.
+        changes = entries[0]["changes"]
+        assert changes["before"]["invoice_number"] == "INV/FY2025-26/0001"
+        assert changes["after"]["invoice_number"] == "INV/FY2026-27/0001"
 
     def test_a_sent_invoice_is_refused_the_edit_before_any_of_this(
         self, client, auth_headers, client_id
@@ -3585,3 +3587,150 @@ class TestRedatingADraftIntoANumberSomebodyElseJustTook:
         monkeypatch.setattr(billing, "next_invoice_number", not_a_numbering_problem)
         with pytest.raises(IntegrityError, match="FOREIGN KEY"):
             billing.renumber_for_issue_date(db, invoice, date(2026, 4, 15))
+
+
+class TestEditingADraftIsWrittenIntoTheTrail:
+    """``PATCH /invoices/{id}`` was the one patch handler recording no diff.
+
+    Every other one — a filing, a document, a task, a client, the firm's own
+    profile — writes the before/after of the fields that moved. This is the one
+    where the subject is a bill, and it wrote a single line reading "Updated
+    draft invoice INV/FY2026-27/0001" and nothing else. A draft edited from
+    ₹5,00,000 to ₹50,000, or from 18% GST to 5%, then goes out, and the only
+    record of what it used to say is gone.
+    """
+
+    @staticmethod
+    def last_update(client, auth_headers) -> dict:
+        entries = client.get(
+            "/api/v1/audit", params={"action": "invoice.update"}, headers=auth_headers
+        ).json()["items"]
+        assert entries
+        return entries[0]["changes"]
+
+    def test_a_rewritten_line_moves_the_money_in_the_trail(
+        self, client, auth_headers, client_id
+    ):
+        draft = make_invoice(client, auth_headers, client_id).json()
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={
+                "lines": [
+                    {"description": "GSTR-3B filing", "unit_price_paise": 20_000}
+                ]
+            },
+            headers=auth_headers,
+        )
+
+        changes = self.last_update(client, auth_headers)
+        assert changes["before"]["subtotal_paise"] == 200_000
+        assert changes["after"]["subtotal_paise"] == 20_000
+        assert changes["before"]["total_paise"] == 236_000
+        assert changes["after"]["total_paise"] == 23_600
+
+    def test_the_rate_and_the_tax_it_derives_are_both_recorded(
+        self, client, auth_headers, client_id
+    ):
+        """The rate is what the caller sent; the tax is what it did."""
+        draft = make_invoice(client, auth_headers, client_id).json()
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"gst_rate_bps": 500},
+            headers=auth_headers,
+        )
+
+        changes = self.last_update(client, auth_headers)
+        assert (changes["before"]["gst_rate_bps"], changes["after"]["gst_rate_bps"]) == (
+            1800,
+            500,
+        )
+        assert changes["before"]["tax_paise"] == 36_000
+        assert changes["after"]["tax_paise"] == 10_000
+
+    def test_the_heads_the_client_claims_credit_against_are_recorded(
+        self, client, auth_headers, client_id
+    ):
+        """CGST and SGST are derived from the tax total, and never sent."""
+        draft = make_invoice(client, auth_headers, client_id).json()
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"gst_rate_bps": 500},
+            headers=auth_headers,
+        )
+
+        changes = self.last_update(client, auth_headers)
+        assert changes["before"]["cgst_paise"] == 18_000
+        assert changes["after"]["cgst_paise"] == 5_000
+        assert changes["after"]["sgst_paise"] == 5_000
+
+    def test_lines_added_or_taken_away_are_counted(
+        self, client, auth_headers, client_id
+    ):
+        """The contents are not recorded — two hundred lines of them would be a
+        quarter of a megabyte per entry — but the count says they moved."""
+        draft = make_invoice(client, auth_headers, client_id).json()
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={
+                "lines": [
+                    {"description": "GSTR-3B filing", "unit_price_paise": 200_000},
+                    {"description": "Advisory", "unit_price_paise": 100_000},
+                ]
+            },
+            headers=auth_headers,
+        )
+
+        changes = self.last_update(client, auth_headers)
+        assert (changes["before"]["line_count"], changes["after"]["line_count"]) == (1, 2)
+
+    def test_the_dates_a_client_is_held_to_are_recorded(
+        self, client, auth_headers, client_id
+    ):
+        draft = make_invoice(client, auth_headers, client_id).json()
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"due_date": "2027-01-31"},
+            headers=auth_headers,
+        )
+
+        changes = self.last_update(client, auth_headers)
+        assert changes["after"]["due_date"] == "2027-01-31"
+
+    def test_an_edit_that_changes_nothing_records_nothing(
+        self, client, auth_headers, client_id
+    ):
+        """An editor round-trip that sends the draft back unchanged is not a
+        change, and the trail should not claim one."""
+        draft = make_invoice(client, auth_headers, client_id).json()
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={
+                "lines": [
+                    {
+                        "description": "GSTR-3B filing",
+                        "quantity": 1,
+                        "unit_price_paise": 200_000,
+                    }
+                ]
+            },
+            headers=auth_headers,
+        )
+
+        assert self.last_update(client, auth_headers) == {}
+
+    def test_clearing_the_due_date_is_recorded_as_cleared(
+        self, client, auth_headers, client_id
+    ):
+        """It is what starts the payment clock, and taking it off is an edit."""
+        draft = make_invoice(
+            client, auth_headers, client_id, due_date="2027-01-31"
+        ).json()
+        client.patch(
+            f"/api/v1/invoices/{draft['id']}",
+            json={"due_date": None},
+            headers=auth_headers,
+        )
+
+        changes = self.last_update(client, auth_headers)
+        assert changes["before"]["due_date"] == "2027-01-31"
+        assert changes["after"]["due_date"] is None

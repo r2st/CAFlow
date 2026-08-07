@@ -220,6 +220,52 @@ CLEARABLE_FIELDS = ("due_date", "notes")
 REQUIRED_FIELDS = ("issue_date", "gst_rate_bps")
 
 
+# What an edit to a draft is recorded as having changed.
+#
+# Four of these are fields the caller sends. The rest are *derived* from them
+# and never appear in a payload — which is exactly why they are watched, for
+# the reason :func:`~app.services.audit.snapshot` gives: an editor round-trip
+# sends lines and a rate, and what actually moved is the money.
+#
+# ``update_invoice`` was the one PATCH handler in the API recording no
+# before/after at all. Every other one diffs the record — a filing, a document,
+# a task, a client, the firm's own profile — and this is the one where the
+# subject is a bill. A draft edited from ₹5,00,000 to ₹50,000, or from 18% GST
+# to 5%, or re-dated into another month, left a single line reading "Updated
+# draft invoice INV/FY2026-27/0004" and nothing else: the trail could say that
+# somebody touched the invoice and never what they did to it. The invoice then
+# goes out, and the only record of what it used to say is gone.
+#
+# The line *contents* are deliberately not here. A draft takes up to two
+# hundred lines of five hundred characters each, so recording both sides of
+# them is a quarter of a megabyte in a JSON column that the audit screen reads
+# on every page — and the money they add up to is already on the row. The count
+# is kept, which is what says lines were added or taken away.
+AUDITED_INVOICE_FIELDS = (
+    "invoice_number",
+    "issue_date",
+    "due_date",
+    "gst_rate_bps",
+    "notes",
+    "subtotal_paise",
+    "tax_paise",
+    "total_paise",
+    "cgst_paise",
+    "sgst_paise",
+    "igst_paise",
+    "place_of_supply",
+    "supply_type",
+)
+
+
+def _invoice_snapshot(invoice: Invoice) -> dict:
+    """One side of the before/after for a draft edit. See :data:`AUDITED_INVOICE_FIELDS`."""
+    return {
+        **audit.snapshot(invoice, AUDITED_INVOICE_FIELDS),
+        "line_count": len(invoice.lines),
+    }
+
+
 def _apply_lines(db: Session, invoice: Invoice, lines, firm_id: uuid.UUID) -> None:
     """Set an invoice's lines, translating billing refusals into HTTP.
 
@@ -471,6 +517,9 @@ def update_invoice(
         )
 
     updates = payload.model_dump(exclude_unset=True)
+    # Taken before anything is applied, and off the record rather than off the
+    # payload — see :data:`AUDITED_INVOICE_FIELDS`.
+    before = _invoice_snapshot(invoice)
     # Checked against the pair this patch leaves behind, not against what the
     # caller happened to name: moving either date alone can put the two out of
     # order, and only one of them is ever in the request. A due date being
@@ -510,7 +559,10 @@ def update_invoice(
             f"Updated draft invoice {invoice.invoice_number}"
             + (f", renumbered from {was}" if renumbered else "")
         ),
-        changes={"invoice_number": [was, invoice.invoice_number]} if renumbered else None,
+        # The number is in the snapshot like every other field, so a renumber
+        # needs no separate entry — and the whole diff is now the one shape the
+        # rest of the trail uses, which is the shape the audit screen renders.
+        changes=audit.diff(before, _invoice_snapshot(invoice)),
     )
     db.commit()
     db.refresh(invoice)
