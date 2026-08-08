@@ -322,6 +322,33 @@ class TestRevocation:
 
         assert client.get("/api/v1/portal/me", headers=portal_headers).status_code == 401
 
+    def test_the_trail_dates_the_cut_off_by_the_indian_clock(
+        self, client, auth_headers, client_id, db
+    ):
+        """The cut-off is a UTC instant, and this sentence is read by a firm.
+
+        It is the only place in the API that renders a *time of day* into prose,
+        and it rendered it five and a half hours behind the clock the
+        practitioner was watching press the button: revoking at 09:00 IST was
+        recorded as "03:30", and anything done after 18:30 IST was filed under
+        the previous day's date — in the one entry whose job is to say when a
+        client's access was cut off, beside filing dates that are Indian dates.
+        """
+        from app.core import clock
+        from app.models.audit import AuditLog
+
+        response = client.post(
+            f"/api/v1/clients/{client_id}/portal-access/revoke", headers=auth_headers
+        )
+        cutoff = datetime.fromisoformat(response.json()["portal_token_valid_from"])
+
+        entry = db.query(AuditLog).filter(AuditLog.action == "portal.links_revoked").one()
+        assert entry.summary.endswith(f"{clock.to_ist(cutoff):%d %b %Y %H:%M} IST")
+        # And not the instant as stored. IST is never UTC, so this is the whole
+        # of what the entry used to say — the wrong hour, and for the last five
+        # and a half hours of every Indian day the wrong date with it.
+        assert f"{cutoff:%d %b %Y %H:%M}" not in entry.summary
+
     def test_a_link_issued_after_revocation_still_works(
         self, client, auth_headers, portal_headers, client_id
     ):

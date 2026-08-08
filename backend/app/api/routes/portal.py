@@ -194,7 +194,19 @@ def revoke_portal_links(client_id: uuid.UUID, practitioner: Manager, db: DbSessi
         entity_type="client",
         entity_id=client.id,
         actor=practitioner,
-        summary=f"Revoked all portal links issued for {client.name} before {cutoff:%d %b %Y %H:%M}",
+        # In IST, and marked. ``revoke_portal_access`` stamps the cut-off as a
+        # UTC instant, which is right for the column and wrong for the sentence:
+        # this is the only place in the API that renders a *time of day* into
+        # prose a firm reads, and it rendered it five and a half hours behind
+        # the clock the practitioner was watching. Revoking at 09:00 IST was
+        # recorded as "03:30", and anything done after 18:30 IST was recorded
+        # under the previous day's date — in the trail whose whole job is to say
+        # when a client's access was cut off, beside filing dates that are
+        # Indian dates. See :mod:`app.core.clock`.
+        summary=(
+            f"Revoked all portal links issued for {client.name} before "
+            f"{clock.to_ist(cutoff):%d %b %Y %H:%M} IST"
+        ),
     )
     db.commit()
     db.refresh(client)

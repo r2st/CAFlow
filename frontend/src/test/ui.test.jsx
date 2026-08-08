@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import ComplianceTable from '../components/ComplianceTable'
 import {
   formatDate,
+  formatDateTime,
   formatDaysRemaining,
   formatRupees,
   isoDateInIndia,
@@ -77,6 +78,59 @@ describe('formatters', () => {
   it('labels stored statuses readably', () => {
     expect(statusLabel('delayed_filed')).toBe('Filed (late)')
     expect(statusLabel('in_progress')).toBe('In progress')
+  })
+})
+
+describe('the business timestamp', () => {
+  /**
+   * The other half of the clock the practice runs on. Dates were pinned to
+   * India; instants were left to the browser, so every timestamp in the app —
+   * a reminder's scheduled time, an audit entry, an upload, a last sign-in —
+   * was rendered in whatever zone the reader happened to be standing in,
+   * beside dates that were not.
+   *
+   * These assertions are the same on any machine precisely because the answer
+   * no longer depends on where the machine is; before the fix they failed
+   * everywhere, in India for the missing marker and elsewhere for the time.
+   */
+  it('is the Indian time, not the browser’s', () => {
+    // 03:30 UTC is 09:00 IST — the hour `reminders.ist_morning` queues every
+    // automated chase for, and the only time of day this column ever shows.
+    expect(formatDateTime('2026-08-20T03:30:00Z')).toBe('20 Aug 2026, 09:00 am IST')
+  })
+
+  it('lands on the same day the dates beside it are counted in', () => {
+    // The sharp end, and the invariant behind it: a timestamp and a date sit in
+    // the same row, so the day a timestamp renders on has to be the day
+    // `isoDateInIndia` puts that instant on. West of India it was not — a chase
+    // queued for the 20th read as the 19th under a heading of "Scheduled",
+    // beside a due date that still said the 20th.
+    for (const instant of [
+      '2026-08-20T03:30:00Z', // 09:00 IST, the hour every chase is queued for
+      '2026-08-19T20:00:00Z', // 01:30 IST — a CA working the night of a deadline
+      '2026-08-20T18:45:00Z', // 00:15 IST, already the next Indian day
+    ]) {
+      expect(formatDateTime(instant)).toContain(formatDate(isoDateInIndia(new Date(instant))))
+    }
+  })
+
+  it('crosses the Indian midnight, not the UTC one', () => {
+    // 18:29 UTC is 23:59 IST on the 20th; a minute later India is on the 21st
+    // while UTC has not moved.
+    expect(formatDateTime('2026-08-20T18:29:00Z')).toContain('20 Aug 2026')
+    expect(formatDateTime('2026-08-20T18:30:00Z')).toContain('21 Aug 2026')
+  })
+
+  it('says which clock it is quoting', () => {
+    // A bare "09:00" is a claim about the reader's own clock, and for a partner
+    // abroad it is a false one.
+    expect(formatDateTime('2026-08-20T03:30:00Z')).toMatch(/ IST$/)
+  })
+
+  it('still has nothing to say about a missing or unreadable instant', () => {
+    expect(formatDateTime(null)).toBe('—')
+    expect(formatDateTime('')).toBe('—')
+    expect(formatDateTime('not a timestamp')).toBe('not a timestamp')
   })
 })
 

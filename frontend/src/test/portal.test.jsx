@@ -321,4 +321,42 @@ describe('PortalAccessCard', () => {
     expect(screen.getByRole('button', { name: 'Generate a magic link' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Enable portal' })).toBeInTheDocument()
   })
+
+  it('dates the last visit by the Indian clock', async () => {
+    // 22:15 UTC is 03:45 IST the next morning. Rendered in the browser's own
+    // zone this card said the client had last opened their portal on the 30th,
+    // in a firm whose every other date is an Indian one.
+    vi.spyOn(api, 'portalAccess').mockResolvedValue({
+      ...ACCESS,
+      portal_last_seen_at: '2026-07-30T22:15:00Z',
+    })
+
+    render(<PortalAccessCard clientId="c-1" />)
+
+    expect(
+      await screen.findByText(/Last opened 31 Jul 2026, 03:45 am IST/),
+    ).toBeInTheDocument()
+  })
+
+  it('does not understate how long a magic link lasts', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'portalAccess').mockResolvedValue(ACCESS)
+    // A link minted at 09:00 IST on the 1st is good until 09:00 IST on the 8th.
+    // West of India that instant falls on the 7th, so the card told the
+    // practitioner the link died a day before it did — and re-issuing early
+    // puts a second live link to a client's whole record into circulation.
+    vi.spyOn(api, 'createPortalLink').mockResolvedValue({
+      client_id: 'c-1',
+      client_name: 'Nimbus Textiles Pvt Ltd',
+      url: 'https://app.caflow.in/portal?token=abc',
+      token: 'abc',
+      expires_at: '2026-08-08T03:30:00Z',
+      delivered_to: 'accounts@nimbustextiles.in',
+    })
+
+    render(<PortalAccessCard clientId="c-1" />)
+    await user.click(await screen.findByRole('button', { name: 'Generate a magic link' }))
+
+    expect(await screen.findByText(/Expires 08 Aug 2026\./)).toBeInTheDocument()
+  })
 })

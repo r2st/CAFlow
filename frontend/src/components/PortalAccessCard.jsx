@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '../api/client'
-import { Alert, Skeleton } from './ui'
+import { Alert, Skeleton, formatDate, formatDateTime, isoDateInIndia } from './ui'
 
 /**
  * Practitioner-side control over one client's portal.
@@ -10,17 +10,30 @@ import { Alert, Skeleton } from './ui'
  * was issued either way.
  */
 
+// Both timestamps on this card are instants, and both were rendered in the
+// browser's own zone rather than the practice's — see `formatDateTime`, which
+// is the shared version of what these two had copied.
 function formatSeen(value) {
   if (!value) return 'Never opened'
-  const seen = new Date(value)
-  if (Number.isNaN(seen.getTime())) return 'Never opened'
-  return `Last opened ${seen.toLocaleString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })}`
+  if (Number.isNaN(new Date(value).getTime())) return 'Never opened'
+  return `Last opened ${formatDateTime(value)}`
+}
+
+/**
+ * The Indian date a magic link stops working on.
+ *
+ * A link lives ``magic_link_expire_minutes`` from the moment it was minted — a
+ * week by default — so its expiry is an instant at whatever time of day the
+ * practitioner pressed the button. Read in a browser west of India that instant
+ * falls on the previous day for most of the working morning, so the card
+ * understated the link's life by a day: a practitioner reading "Expires 26 Aug"
+ * on a link good until the 27th re-issues it a day early, which revokes nothing
+ * but does put a second live link in circulation for a client's whole record.
+ */
+function formatExpiry(value) {
+  const expires = new Date(value)
+  if (Number.isNaN(expires.getTime())) return value
+  return formatDate(isoDateInIndia(expires))
 }
 
 export default function PortalAccessCard({ clientId }) {
@@ -146,12 +159,8 @@ export default function PortalAccessCard({ clientId }) {
                 </button>
               </div>
               <p className="small muted">
-                Expires {new Date(link.expires_at).toLocaleDateString('en-IN', {
-                  day: '2-digit',
-                  month: 'short',
-                  year: 'numeric',
-                })}
-                . Anyone holding this link can see this client&apos;s filings.
+                Expires {formatExpiry(link.expires_at)}. Anyone holding this link can see this
+                client&apos;s filings.
               </p>
             </div>
           )}

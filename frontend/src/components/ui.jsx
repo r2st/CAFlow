@@ -551,18 +551,50 @@ export function Pill({ tone, children }) {
   return <span className={`badge ${tone ?? ''}`}>{children}</span>
 }
 
-/** ISO timestamp -> "02 Aug 2026, 14:30". Reminders are scheduled to the minute. */
+/**
+ * ISO timestamp -> "20 Aug 2026, 09:00 am IST".
+ *
+ * Every *date* in the app is already an Indian date — {@link isoDateInIndia}
+ * says why at length, and the server keeps its own clock in
+ * `app/core/clock.py` for the same reason. Every *instant* was rendered in
+ * whatever zone the browser happened to sit in, which is the same mistake in
+ * the one place nothing had named it.
+ *
+ * These are not the reader's timestamps. A reminder's `scheduled_for` is
+ * 09:00 IST by construction — `reminders.ist_morning` builds it and nothing
+ * else writes one — so it is a time the firm chose, not a time anything
+ * happened to the reader. The audit trail, a document's upload time and a
+ * member's last sign-in are all instants recorded beside Indian dates on the
+ * same screen.
+ *
+ * Read from a browser west of India they came out wrong by more than the
+ * clock. 09:00 IST on the 20th renders as "19 Aug 2026, 11:30 pm" in Toronto
+ * and "19 Aug 2026, 08:30 pm" in California: the wrong *day*, in a column
+ * headed "Scheduled", beside a due date that is still the 20th. So the
+ * reminders screen said a chase had gone out — or was going out — the day
+ * before the one the firm queued it for, the audit trail dated the morning's
+ * work to the previous evening, and neither disagreed with anything visibly
+ * enough to be doubted. That is a partner travelling, which is the one reader
+ * of the audit trail most likely to be somewhere else.
+ *
+ * Pinned to Asia/Kolkata, and marked, because a bare "09:00" is a claim about
+ * the reader's own clock. The overwhelming majority of readers are in India
+ * and see exactly what they saw before, plus three letters saying so.
+ */
+const IN_INDIA_DATETIME = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata',
+  day: '2-digit',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+})
+
 export function formatDateTime(value) {
   if (!value) return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+  return `${IN_INDIA_DATETIME.format(date)} IST`
 }
 
 /** Estimated effort is stored in minutes; a CA thinks in hours. */
