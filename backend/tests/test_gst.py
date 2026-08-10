@@ -61,6 +61,15 @@ class TestTheCheckDigit:
         assert not gst.gstin_checksum_valid("27AAPFU0939F1Z")
         assert not gst.gstin_checksum_valid("")
 
+    def test_a_character_outside_the_checksum_alphabet_is_refused_not_raised(self):
+        """``validate_gstin`` only ever hands this a string ``GSTIN_RE`` has
+        already matched, so every character is one this function's own
+        alphabet knows — but the function is public, and a caller that reaches
+        it some other way should get ``False`` back, not a ``ValueError`` out
+        of the checksum arithmetic."""
+        assert not gst.gstin_checksum_valid("27AAPFU0939F1Z@")
+        assert not gst.gstin_checksum_valid("2#AAPFU0939F1ZV")
+
 
 class TestValidatingAGstin:
     """What the schema layer refuses, and what it says about why."""

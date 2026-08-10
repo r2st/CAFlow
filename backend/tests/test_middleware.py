@@ -20,6 +20,7 @@ from app.core.middleware import (
     client_ip,
 )
 from app.main import app
+from app.services import storage
 
 # A whole number of minutes, so the frozen instant below sits exactly on a
 # window boundary and ``Retry-After`` is a full window rather than whatever
@@ -581,6 +582,27 @@ class TestForwardedChainsAreReadFromTheRight:
         assert client_ip(request) == "203.0.113.7"
 
 
+def _raising(exc, path="/api/v1/_exception_handler_test_route"):
+    """Mount a temporary route that raises ``exc``, call it, and unmount it.
+
+    A distinct ``path`` per caller keeps two test classes mounting one at the
+    same time — however unlikely under pytest's default sequential run — from
+    treading on each other.
+    """
+
+    @app.get(path)
+    def fault():
+        raise exc
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as bare:
+            return bare.get(path)
+    finally:
+        app.router.routes = [
+            route for route in app.router.routes if getattr(route, "path", "") != path
+        ]
+
+
 class TestTheDatabaseFailuresCallersAreToldAbout:
     """A database fault is not one shape, and the three it comes in read differently.
 
@@ -592,22 +614,7 @@ class TestTheDatabaseFailuresCallersAreToldAbout:
     """
 
     def raising(self, exc):
-        """Mount a temporary route that raises ``exc``, and call it."""
-        path = "/api/v1/_database_fault_for_tests"
-
-        @app.get(path)
-        def fault():
-            raise exc
-
-        try:
-            with TestClient(app, raise_server_exceptions=False) as bare:
-                return bare.get(path)
-        finally:
-            app.router.routes = [
-                route
-                for route in app.router.routes
-                if getattr(route, "path", "") != path
-            ]
+        return _raising(exc, "/api/v1/_database_fault_for_tests")
 
     def test_a_constraint_violation_is_a_conflict_rather_than_a_fault(self):
         """The row could not be written because of what is already there.
@@ -651,6 +658,45 @@ class TestTheDatabaseFailuresCallersAreToldAbout:
         )
         assert response.status_code == 500
         assert response.json()["error"]["code"] == "server_error"
+
+
+class TestTheUploadRefusalsHaveABackstopBeyondTheirTwoCallSites:
+    """``storage.UploadTooLarge``/``UnsupportedFileType`` are also caught here.
+
+    ``documents.upload_document`` and ``portal.portal_upload`` each already
+    turn these into the right ``HTTPException`` themselves, which is what a
+    caller of either endpoint actually sees today — so these two handlers are
+    unreached by the current test suite's HTTP-level tests, and would show as
+    dead code in a coverage report read without this in mind.
+
+    They are not dead: they are the backstop for the caller that has not been
+    written yet. Anything that calls :func:`~app.services.storage.save_upload`
+    or :func:`~app.services.storage.validate_upload` without repeating the
+    local ``except`` block — a bulk-import endpoint, a background job that
+    ingests attachments some other way — would otherwise turn an oversized or
+    disguised upload into a bare 500, the one shape every error here is meant
+    to avoid. Raised directly, bypassing both existing call sites, to prove the
+    backstop actually answers 413/415 rather than assuming the registration
+    alone is enough.
+    """
+
+    def test_an_oversized_upload_is_a_413_even_without_the_route_s_own_catch(self):
+        response = _raising(
+            storage.UploadTooLarge("File exceeds the 20 MB upload limit"),
+            "/api/v1/_upload_too_large_for_tests",
+        )
+        assert response.status_code == 413
+        assert response.json()["error"]["code"] == "payload_too_large"
+        assert response.json()["detail"] == "File exceeds the 20 MB upload limit"
+
+    def test_a_disguised_upload_is_a_415_even_without_the_route_s_own_catch(self):
+        response = _raising(
+            storage.UnsupportedFileType("This file looks like a Windows executable"),
+            "/api/v1/_unsupported_file_for_tests",
+        )
+        assert response.status_code == 415
+        assert response.json()["error"]["code"] == "unsupported_media_type"
+        assert response.json()["detail"] == "This file looks like a Windows executable"
 
 
 class TestStrictTransportSecurity:
