@@ -55,8 +55,3 @@ def token_is_current(client: Client, issued_at_ms: int | None) -> bool:
     sessions are revoked by in exactly the same way.
     """
     return security.issued_after(client.portal_token_valid_from, issued_at_ms)
-
-
-def issued_at_ms(payload: dict) -> int | None:
-    """Issue time in milliseconds, tolerating a token that predates ``iat_ms``."""
-    return security.issued_at_ms(payload)

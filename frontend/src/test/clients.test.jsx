@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation, useParams } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import api, { setToken } from '../api/client'
 import { AuthProvider } from '../context/AuthContext'
@@ -8,7 +8,7 @@ import ClientDetail from '../pages/ClientDetail'
 import ClientEdit, { changedFields } from '../pages/ClientEdit'
 import ClientNew from '../pages/ClientNew'
 import Clients from '../pages/Clients'
-import { EMPTY_CLIENT, clientToForm } from '../components/ClientForm'
+import { EMPTY_CLIENT, OPTIONAL_TEXT_FIELDS, clientToForm } from '../components/ClientForm'
 import {
   CLIENT,
   FIRM,
@@ -320,6 +320,157 @@ describe('client permissions', () => {
       await screen.findByRole('heading', { name: 'You do not have access to this' }),
     ).toBeInTheDocument()
     expect(screen.queryByLabelText('Client name')).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * Onboarding a client — the form that decides what the calendar will generate.
+ *
+ * Only the refusal shown to a junior was covered here, which left the submit
+ * path itself unwatched: the optional-field stripping, where the new client's
+ * id comes from, and whether a rejected save leaves the practitioner able to
+ * try again.
+ */
+describe('adding a client', () => {
+  beforeEach(() => {
+    signedInAs('manager')
+    vi.spyOn(api, 'listPractitioners').mockResolvedValue([PRACTITIONER])
+  })
+
+  /** The page, plus the detail route it sends the practitioner to on success. */
+  function renderNew() {
+    return render(
+      <MemoryRouter initialEntries={['/clients/new']}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/clients/new" element={<ClientNew />} />
+            <Route path="/clients/:clientId" element={<Arrived />} />
+            <Route path="/clients" element={<h1>Client list</h1>} />
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+  }
+
+  /** Stands in for the detail page, reporting which client it was sent to. */
+  function Arrived() {
+    const { clientId } = useParams()
+    const { state } = useLocation()
+    return <h1>{`Arrived at ${clientId} with ${state?.created} generated`}</h1>
+  }
+
+  async function fillNameAndSubmit(user, name = 'Nimbus Traders') {
+    await user.type(await screen.findByLabelText('Client name'), name)
+    await user.click(screen.getByRole('button', { name: 'Create client' }))
+  }
+
+  it('lands on the new client with the number of filings generated for them', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'createClient').mockResolvedValue({
+      client: { ...CLIENT, id: 'c-9' },
+      compliance_items_created: 14,
+    })
+
+    renderNew()
+    await fillNameAndSubmit(user)
+
+    // The count is carried in router state rather than re-fetched, and it is
+    // the only place the practitioner is told the calendar was populated.
+    expect(
+      await screen.findByRole('heading', { name: 'Arrived at c-9 with 14 generated' }),
+    ).toBeInTheDocument()
+  })
+
+  it('omits the optional fields left blank instead of sending empty strings', async () => {
+    const user = userEvent.setup()
+    const create = vi.spyOn(api, 'createClient').mockResolvedValue({
+      client: { ...CLIENT, id: 'c-9' },
+      compliance_items_created: 0,
+    })
+
+    renderNew()
+    await fillNameAndSubmit(user)
+
+    await waitFor(() => expect(create).toHaveBeenCalled())
+    const [payload] = create.mock.calls[0]
+    // The API distinguishes absent from empty on these, and rejects "" — a
+    // form submitted with only a name would 422 on every one of them.
+    for (const field of OPTIONAL_TEXT_FIELDS) {
+      expect(payload).not.toHaveProperty(field)
+    }
+    // What the practitioner did fill in still goes.
+    expect(payload.name).toBe('Nimbus Traders')
+    expect(payload.entity_type).toBe('individual')
+  })
+
+  it('keeps an optional field the practitioner actually filled in', async () => {
+    const user = userEvent.setup()
+    const create = vi.spyOn(api, 'createClient').mockResolvedValue({
+      client: { ...CLIENT, id: 'c-9' },
+      compliance_items_created: 0,
+    })
+
+    renderNew()
+    await user.type(await screen.findByLabelText('Client name'), 'Nimbus Traders')
+    await user.type(screen.getByLabelText('PAN'), 'AABCN2345P')
+    await user.click(screen.getByRole('button', { name: 'Create client' }))
+
+    await waitFor(() => expect(create).toHaveBeenCalled())
+    expect(create.mock.calls[0][0].pan).toBe('AABCN2345P')
+  })
+
+  it('shows why the save was refused and stays on the form', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'createClient').mockRejectedValue(
+      new Error('A client with PAN AABCN2345P already exists'),
+    )
+
+    renderNew()
+    await fillNameAndSubmit(user)
+
+    expect(
+      await screen.findByText('A client with PAN AABCN2345P already exists'),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Client name')).toHaveValue('Nimbus Traders')
+  })
+
+  it('lets the practitioner try again after a refusal', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'createClient').mockRejectedValue(new Error('Client limit reached'))
+
+    renderNew()
+    await fillNameAndSubmit(user)
+    await screen.findByText('Client limit reached')
+
+    // Left disabled, the only way out of a failed save is a page reload — and
+    // the typed record goes with it.
+    expect(screen.getByRole('button', { name: 'Create client' })).toBeEnabled()
+  })
+
+  it('still offers the form when the practitioner list cannot be loaded', async () => {
+    const user = userEvent.setup()
+    api.listPractitioners.mockRejectedValue(new Error('Practitioners unavailable'))
+    const create = vi.spyOn(api, 'createClient').mockResolvedValue({
+      client: { ...CLIENT, id: 'c-9' },
+      compliance_items_created: 0,
+    })
+
+    renderNew()
+    await fillNameAndSubmit(user)
+
+    // The picker is an optional field; losing it must not cost the whole page.
+    await waitFor(() => expect(create).toHaveBeenCalled())
+  })
+
+  it('goes back to the list on cancel without creating anything', async () => {
+    const user = userEvent.setup()
+    const create = vi.spyOn(api, 'createClient')
+
+    renderNew()
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }))
+
+    expect(await screen.findByRole('heading', { name: 'Client list' })).toBeInTheDocument()
+    expect(create).not.toHaveBeenCalled()
   })
 })
 

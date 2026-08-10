@@ -16,6 +16,8 @@ coverage.xml
 node_modules/
 dist/
 .vite/
+# `vitest run --coverage` writes its HTML report here.
+coverage/
 
 # --- Secrets & local config ---
 # .env holds a real SECRET_KEY and API keys — commit .env.example instead.

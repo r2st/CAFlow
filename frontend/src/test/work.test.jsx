@@ -655,6 +655,141 @@ describe('Documents', () => {
     await screen.findByText('bank-statement-july.pdf')
     expect(screen.getByLabelText('File')).toBeDisabled()
   })
+
+  /**
+   * The practitioner's own upload, which is the route most documents arrive
+   * by — a client emails a statement to their CA far more often than they sign
+   * into a portal to post it. Only the disabled-until-a-client-is-chosen guard
+   * was covered; what happens once a file is actually picked was not.
+   */
+  describe('uploading on a client behalf', () => {
+    const file = () =>
+      new File(['bytes'], 'sales-register-july.pdf', { type: 'application/pdf' })
+
+    async function chooseClientAndUpload(user) {
+      await user.selectOptions(await screen.findByLabelText('Upload for'), CLIENT.id)
+      await user.upload(screen.getByLabelText('File'), file())
+    }
+
+    it('files the document against the client that was picked', async () => {
+      const user = userEvent.setup()
+      const upload = vi
+        .spyOn(api, 'uploadDocument')
+        .mockResolvedValue({ document: documentFixture({ original_filename: 'sales-register-july.pdf' }) })
+
+      renderAs('owner', <Documents />)
+      await chooseClientAndUpload(user)
+
+      await waitFor(() =>
+        expect(upload).toHaveBeenCalledWith(expect.any(File), { clientId: CLIENT.id }),
+      )
+    })
+
+    it('says the file landed and refreshes both lists behind it', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(api, 'uploadDocument').mockResolvedValue({
+        document: documentFixture({ original_filename: 'sales-register-july.pdf' }),
+      })
+
+      renderAs('owner', <Documents />)
+      await screen.findByText('bank-statement-july.pdf')
+      const listedBefore = api.listDocuments.mock.calls.length
+      const chasedBefore = api.outstandingDocuments.mock.calls.length
+
+      await chooseClientAndUpload(user)
+
+      expect(await screen.findByText('sales-register-july.pdf uploaded.')).toBeInTheDocument()
+      // The chase list is the point of the upload: a document that arrives
+      // should stop the practice chasing it, without a reload.
+      await waitFor(() => {
+        expect(api.listDocuments.mock.calls.length).toBeGreaterThan(listedBefore)
+        expect(api.outstandingDocuments.mock.calls.length).toBeGreaterThan(chasedBefore)
+      })
+    })
+
+    it('reports a refused upload and lets the same file be picked again', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(api, 'uploadDocument').mockRejectedValue(
+        new Error('That file is larger than the 10 MB limit'),
+      )
+
+      renderAs('owner', <Documents />)
+      await chooseClientAndUpload(user)
+
+      expect(
+        await screen.findByText('That file is larger than the 10 MB limit'),
+      ).toBeInTheDocument()
+      // The input is cleared on the way out, so re-picking the same file
+      // fires a fresh change event rather than being ignored as unchanged.
+      expect(screen.getByLabelText('File')).toHaveValue('')
+      expect(screen.getByLabelText('File')).toBeEnabled()
+    })
+
+    it('lets the practitioner dismiss the failure once it has been read', async () => {
+      const user = userEvent.setup()
+      vi.spyOn(api, 'uploadDocument').mockRejectedValue(new Error('Upload refused'))
+
+      renderAs('owner', <Documents />)
+      await chooseClientAndUpload(user)
+      await screen.findByText('Upload refused')
+
+      await user.click(screen.getByRole('button', { name: 'Dismiss' }))
+
+      await waitFor(() => expect(screen.queryByText('Upload refused')).not.toBeInTheDocument())
+    })
+  })
+
+  describe('a library with more documents than one page holds', () => {
+    beforeEach(() => {
+      // 25 to a page, so a practice with more than that has a second one.
+      api.listDocuments.mockResolvedValue(
+        pageOf([documentFixture()], { total: 120, limit: 25, offset: 0 }),
+      )
+    })
+
+    it('offers the next page and asks for it by offset', async () => {
+      const user = userEvent.setup()
+      renderAs('owner', <Documents />)
+      await screen.findByText('bank-statement-july.pdf')
+
+      await user.click(screen.getByRole('button', { name: 'Next' }))
+
+      await waitFor(() =>
+        expect(api.listDocuments).toHaveBeenCalledWith(expect.objectContaining({ offset: 25 })),
+      )
+    })
+
+    it('comes back to the previous page', async () => {
+      const user = userEvent.setup()
+      renderAs('owner', <Documents />)
+      await screen.findByText('bank-statement-july.pdf')
+
+      await user.click(screen.getByRole('button', { name: 'Next' }))
+      await waitFor(() =>
+        expect(api.listDocuments).toHaveBeenCalledWith(expect.objectContaining({ offset: 25 })),
+      )
+      await user.click(screen.getByRole('button', { name: 'Previous' }))
+
+      await waitFor(() =>
+        expect(api.listDocuments).toHaveBeenCalledWith(expect.objectContaining({ offset: 0 })),
+      )
+    })
+
+    it('holds the practitioner at the ends of the list', async () => {
+      renderAs('owner', <Documents />)
+      await screen.findByText('bank-statement-july.pdf')
+
+      // Nothing before the first page.
+      expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+    })
+
+    it('says which slice of the library is on screen', async () => {
+      renderAs('owner', <Documents />)
+
+      expect(await screen.findByText('Showing 1–25 of 120')).toBeInTheDocument()
+    })
+  })
 })
 
 describe('Reminders', () => {

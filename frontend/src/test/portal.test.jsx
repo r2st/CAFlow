@@ -359,4 +359,144 @@ describe('PortalAccessCard', () => {
 
     expect(await screen.findByText(/Expires 08 Aug 2026\./)).toBeInTheDocument()
   })
+
+  it('switches the portal on for a client who did not have it', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'portalAccess').mockResolvedValue({ ...ACCESS, portal_enabled: false })
+    const enable = vi
+      .spyOn(api, 'enablePortal')
+      .mockResolvedValue({ ...ACCESS, portal_enabled: true })
+
+    render(<PortalAccessCard clientId="c-1" />)
+    await user.click(await screen.findByRole('button', { name: 'Enable portal' }))
+
+    await waitFor(() => expect(enable).toHaveBeenCalledWith('c-1'))
+    expect(await screen.findByText('Portal access enabled.')).toBeInTheDocument()
+    // The card re-reads its own state from the reply, so the badge and the
+    // buttons move together rather than waiting for a reload.
+    expect(await screen.findByText('Enabled')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Generate a magic link' })).toBeEnabled()
+  })
+
+  it('takes the link off the screen when the portal is switched off', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'portalAccess').mockResolvedValue(ACCESS)
+    vi.spyOn(api, 'createPortalLink').mockResolvedValue({
+      client_id: 'c-1',
+      client_name: 'Nimbus Textiles Pvt Ltd',
+      url: 'https://app.caflow.in/portal?token=abc',
+      token: 'abc',
+      expires_at: '2026-08-08T03:30:00Z',
+      delivered_to: null,
+    })
+    vi.spyOn(api, 'disablePortal').mockResolvedValue({ ...ACCESS, portal_enabled: false })
+
+    render(<PortalAccessCard clientId="c-1" />)
+    await user.click(await screen.findByRole('button', { name: 'Generate a magic link' }))
+    await screen.findByLabelText('Magic link — send this to the client')
+
+    await user.click(screen.getByRole('button', { name: 'Disable portal' }))
+
+    expect(await screen.findByText('Portal access disabled.')).toBeInTheDocument()
+    // Leaving it up invites the practitioner to send a link that has just
+    // stopped working.
+    await waitFor(() =>
+      expect(
+        screen.queryByLabelText('Magic link — send this to the client'),
+      ).not.toBeInTheDocument(),
+    )
+  })
+
+  /** Renders the card with a link already minted and on screen. */
+  async function withLinkOnScreen(user) {
+    vi.spyOn(api, 'portalAccess').mockResolvedValue(ACCESS)
+    vi.spyOn(api, 'createPortalLink').mockResolvedValue({
+      client_id: 'c-1',
+      client_name: 'Nimbus Textiles Pvt Ltd',
+      url: 'https://app.caflow.in/portal?token=abc',
+      token: 'abc',
+      expires_at: '2026-08-08T03:30:00Z',
+      delivered_to: null,
+    })
+    render(<PortalAccessCard clientId="c-1" />)
+    await user.click(await screen.findByRole('button', { name: 'Generate a magic link' }))
+    await screen.findByLabelText('Magic link — send this to the client')
+  }
+
+  it('copies the link to the clipboard', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { ...window.navigator, clipboard: { writeText } })
+
+    await withLinkOnScreen(user)
+    await user.click(screen.getByRole('button', { name: 'Copy' }))
+
+    expect(writeText).toHaveBeenCalledWith('https://app.caflow.in/portal?token=abc')
+    expect(await screen.findByText('Link copied to the clipboard.')).toBeInTheDocument()
+  })
+
+  it('says what to do instead when the clipboard is blocked', async () => {
+    const user = userEvent.setup()
+    // Clipboard access is refused outside a secure context, which is every
+    // plain-HTTP deployment — a silent failure there reads as a dead button.
+    vi.stubGlobal('navigator', {
+      ...window.navigator,
+      clipboard: { writeText: vi.fn().mockRejectedValue(new Error('Denied')) },
+    })
+
+    await withLinkOnScreen(user)
+    await user.click(screen.getByRole('button', { name: 'Copy' }))
+
+    expect(await screen.findByText('Select the link above and copy it.')).toBeInTheDocument()
+  })
+
+  it('reports a card it could not load at all', async () => {
+    vi.spyOn(api, 'portalAccess').mockRejectedValue(new Error('Portal access unavailable'))
+
+    render(<PortalAccessCard clientId="c-1" />)
+
+    expect(await screen.findByText('Portal access unavailable')).toBeInTheDocument()
+    // The skeleton has to give way even when the load failed, or the card
+    // stays a grey box with no explanation in it.
+    expect(screen.getByRole('button', { name: 'Revoke all links' })).toBeInTheDocument()
+  })
+
+  it('reports a refused link rather than showing an empty one', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'portalAccess').mockResolvedValue(ACCESS)
+    vi.spyOn(api, 'createPortalLink').mockRejectedValue(
+      new Error('This client has no email address on record'),
+    )
+
+    render(<PortalAccessCard clientId="c-1" />)
+    await user.click(await screen.findByRole('button', { name: 'Generate a magic link' }))
+
+    expect(
+      await screen.findByText('This client has no email address on record'),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByLabelText('Magic link — send this to the client'),
+    ).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Generate a magic link' })).toBeEnabled()
+  })
+
+  it('says so plainly when the client has never opened their portal', async () => {
+    vi.spyOn(api, 'portalAccess').mockResolvedValue({ ...ACCESS, portal_last_seen_at: null })
+
+    render(<PortalAccessCard clientId="c-1" />)
+
+    expect(await screen.findByText(/Never opened/)).toBeInTheDocument()
+  })
+
+  it('does not print an unparseable last-seen stamp at the practitioner', async () => {
+    vi.spyOn(api, 'portalAccess').mockResolvedValue({
+      ...ACCESS,
+      portal_last_seen_at: 'not-a-timestamp',
+    })
+
+    render(<PortalAccessCard clientId="c-1" />)
+
+    expect(await screen.findByText(/Never opened/)).toBeInTheDocument()
+    expect(screen.queryByText(/Invalid Date/)).not.toBeInTheDocument()
+  })
 })
