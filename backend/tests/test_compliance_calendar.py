@@ -216,6 +216,12 @@ class TestCalendar:
         )
         assert response.status_code == 422
 
+    def test_overlong_period_filter_is_rejected(self, client: TestClient, auth_headers: dict):
+        response = client.get(
+            f"{API}/compliance/calendar?period={'x' * 33}", headers=auth_headers
+        )
+        assert response.status_code == 422
+
     def test_inverted_date_range_is_rejected(self, client: TestClient, auth_headers: dict):
         response = client.get(
             f"{API}/compliance/calendar?from_date=2026-12-01&to_date=2026-01-01",

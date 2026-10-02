@@ -167,7 +167,7 @@ def compliance_calendar(
     db: DbSession,
     from_date: date | None = Query(default=None, description="Due date lower bound (inclusive)"),
     to_date: date | None = Query(default=None, description="Due date upper bound (inclusive)"),
-    period: str | None = Query(default=None, description="Exact period label, e.g. 2026-07"),
+    period: str | None = Query(default=None, max_length=32, description="Exact period label, e.g. 2026-07"),
     client_id: uuid.UUID | None = Query(default=None),
     category: ComplianceCategory | None = Query(default=None),
     compliance_status: ComplianceStatus | None = Query(

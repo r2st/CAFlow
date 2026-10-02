@@ -40,6 +40,9 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
+    # Every response carries PAN numbers, invoices, or other financial data
+    # that must not sit in a browser cache or a shared proxy.
+    "Cache-Control": "no-store",
     # The API itself has no browsing context to speak of; a restrictive
     # policy costs nothing and stops a reflected payload from executing.
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",

@@ -91,6 +91,7 @@ class TestSecurityHeaders:
         assert headers["X-Content-Type-Options"] == "nosniff"
         assert headers["X-Frame-Options"] == "DENY"
         assert headers["Referrer-Policy"] == "no-referrer"
+        assert headers["Cache-Control"] == "no-store"
         assert "frame-ancestors 'none'" in headers["Content-Security-Policy"]
 
     def test_hsts_is_only_sent_in_production(self, client: TestClient):
