@@ -203,7 +203,7 @@ describe('a stored token that no longer works', () => {
   })
 
   it('lands on sign-in with the reason, rather than a silent bounce', async () => {
-    renderApp('/')
+    renderApp('/dashboard')
 
     expect(await screen.findByText(/Your session has expired/i)).toBeInTheDocument()
   })

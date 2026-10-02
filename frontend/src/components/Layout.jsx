@@ -44,7 +44,7 @@ export default function Layout() {
         </div>
 
         <nav className="nav" id="firm-nav" aria-label="Sections">
-          <NavLink to="/" end>
+          <NavLink to="/dashboard" end>
             Dashboard
           </NavLink>
           <NavLink to="/calendar">Compliance calendar</NavLink>

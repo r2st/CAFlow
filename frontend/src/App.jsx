@@ -14,6 +14,7 @@ import ClientNew from './pages/ClientNew'
 import Clients from './pages/Clients'
 import Dashboard from './pages/Dashboard'
 import Documents from './pages/Documents'
+import Landing from './pages/Landing'
 import Login from './pages/Login'
 import Portal from './pages/Portal'
 import Register from './pages/Register'
@@ -47,6 +48,7 @@ export default function App() {
           no app shell — the portal, and both auth pages. */}
       <RouteAnnouncer />
       <Routes>
+        <Route path="/" element={<Landing />} />
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
 
@@ -60,7 +62,7 @@ export default function App() {
             </RequireAuth>
           }
         >
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/calendar" element={<Calendar />} />
           <Route path="/clients" element={<Clients />} />
           <Route path="/clients/new" element={<ClientNew />} />

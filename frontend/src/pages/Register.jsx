@@ -27,7 +27,7 @@ export default function Register() {
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
-  if (isAuthenticated) return <Navigate to="/" replace />
+  if (isAuthenticated) return <Navigate to="/dashboard" replace />
 
   function update(key) {
     return (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }))
@@ -43,7 +43,7 @@ export default function Register() {
         Object.entries(form).filter(([, value]) => value !== ''),
       )
       await register(payload)
-      navigate('/', { replace: true })
+      navigate('/dashboard', { replace: true })
     } catch (err) {
       setError(err.message)
     } finally {
