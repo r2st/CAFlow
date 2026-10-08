@@ -728,13 +728,13 @@ class TestTheTemplateSaysTheRightThing:
 
         assert message.endswith("Regards,\nSharma & Associates")
         # The client is the CA's client and has never heard of the product.
-        assert "CAFlow" not in message
+        assert "DoAide Reach" not in message
 
     def test_without_a_firm_it_signs_generically_rather_than_as_the_product(self):
         message = self._draft("fee_reminder", {})
 
         assert message.endswith("Regards,\nYour Chartered Accountant")
-        assert "CAFlow" not in message
+        assert "DoAide Reach" not in message
 
     def test_the_model_is_told_who_it_is_writing_for(self, capture_posts):
         calls, queue = capture_posts

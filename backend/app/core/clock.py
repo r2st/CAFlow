@@ -1,6 +1,6 @@
 """The clock the practice runs on.
 
-Every business date in CAFlow is a date in India. A return is due on the 20th
+Every business date in DoAide Reach is a date in India. A return is due on the 20th
 IST, a filing lodged at 02:00 on the 31st was lodged on the 31st, and an
 invoice raised on 1 April belongs to the new financial year — none of those
 questions have anything to do with where the server happens to be.

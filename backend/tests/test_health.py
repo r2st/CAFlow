@@ -17,7 +17,7 @@ class TestHealth:
         body = client.get("/health").json()
         assert body["status"] == "ok"
         assert body["version"] == __version__
-        assert body["service"] == "CAFlow"
+        assert body["service"] == "DoAide Reach"
 
     def test_liveness_never_touches_a_dependency(self, client: TestClient, monkeypatch):
         # A database outage must not restart the container.

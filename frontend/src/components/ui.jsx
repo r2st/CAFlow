@@ -133,7 +133,7 @@ export function formatDate(value) {
 /**
  * The clock the practice runs on, on this side of the wire.
  *
- * Every business date in CAFlow is a date in India, and the server says so at
+ * Every business date in DoAide Reach is a date in India, and the server says so at
  * length: `app/core/clock.py` exists because `date.today()` in a UTC container
  * answers a different question, and UTC is five and a half hours behind IST.
  * The browser had the same gap and nothing named it. `new Date()` is an
@@ -310,12 +310,12 @@ export function ServerUnreachable({ message, onRetry }) {
       <main className="auth-card">
         <div className="auth-head">
           <div className="brand">
-            <span className="brand-mark">CA</span>
-            CAFlow
+            <span className="brand-mark">DR</span>
+            DoAide Reach
           </div>
         </div>
 
-        <h1>Can&apos;t reach CAFlow</h1>
+        <h1>Can&apos;t reach DoAide Reach</h1>
         <Alert kind="warning">{message}</Alert>
         <p className="small muted">
           You are still signed in. Nothing has been lost — this will pick up where you left off.

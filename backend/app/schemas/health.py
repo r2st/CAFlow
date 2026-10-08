@@ -17,7 +17,7 @@ class HealthOut(BaseModel):
         "json_schema_extra": {
             "example": {
                 "status": "ok",
-                "service": "CAFlow",
+                "service": "DoAide Reach",
                 "version": "0.1.0",
                 "environment": "production",
             }
@@ -38,7 +38,7 @@ class ReadinessOut(HealthOut):
         "json_schema_extra": {
             "example": {
                 "status": "ok",
-                "service": "CAFlow",
+                "service": "DoAide Reach",
                 "version": "0.1.0",
                 "environment": "production",
                 "checks": {

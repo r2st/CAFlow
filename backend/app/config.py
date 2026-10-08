@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # --- App ---
-    app_name: str = "CAFlow"
+    app_name: str = "DoAide Reach"
     environment: str = "development"
     debug: bool = True
     api_v1_prefix: str = "/api/v1"
@@ -138,7 +138,7 @@ class Settings(BaseSettings):
     smtp_use_ssl: bool = False  # implicit TLS, usually port 465
     smtp_timeout_seconds: float = Field(default=20.0, gt=0)
     email_from_address: str = "no-reply@caflow.local"
-    email_from_name: str = "CAFlow"
+    email_from_name: str = "DoAide Reach"
     # A reminder is retried on the next dispatcher run until this many tries.
     reminder_max_attempts: int = Field(default=3, ge=1)
 
@@ -352,7 +352,7 @@ def get_settings() -> Settings:
     except ValueError as exc:
         # Pydantic's own report is accurate but noisy; lead with the fix.
         raise ConfigError(
-            "CAFlow could not start: the environment is invalid.\n"
+            "DoAide Reach could not start: the environment is invalid.\n"
             "Check your .env against .env.example.\n\n"
             f"{exc}"
         ) from exc

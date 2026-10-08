@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CAFlow — put the previous release back on the shared Hetzner box.
+# DoAide Reach — put the previous release back on the shared Hetzner box.
 #
 #   ./deploy/hetzner/rollback.sh --list       what is available to go back to
 #   ./deploy/hetzner/rollback.sh              the state before the last deploy

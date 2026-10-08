@@ -125,7 +125,7 @@ describe('a connection that fails before the server answers', () => {
     mockUnreachable()
     pretendOnline(true)
 
-    await expect(api.listClients()).rejects.toThrow(/Could not reach CAFlow/i)
+    await expect(api.listClients()).rejects.toThrow(/Could not reach DoAide Reach/i)
   })
 
   it('does not leak the browser-specific phrasing into the message', async () => {
@@ -191,7 +191,7 @@ describe('a connection that fails before the server answers', () => {
 
     await expect(
       api.uploadDocument(new File(['x'], 'ledger.pdf'), { clientId: 'c-1' }),
-    ).rejects.toThrow(/Could not reach CAFlow|You appear to be offline/i)
+    ).rejects.toThrow(/Could not reach DoAide Reach|You appear to be offline/i)
   })
 
   it('covers downloads', async () => {
@@ -199,7 +199,7 @@ describe('a connection that fails before the server answers', () => {
     mockUnreachable()
 
     await expect(api.downloadDocument('d-1')).rejects.toThrow(
-      /Could not reach CAFlow|You appear to be offline/i,
+      /Could not reach DoAide Reach|You appear to be offline/i,
     )
   })
 })
@@ -411,7 +411,7 @@ describe('practitioner work endpoints', () => {
  * What the app is reading when the reply did not come from the API.
  *
  * A request that reaches the network can still be answered by something that
- * is not CAFlow: nginx returning its own 502 page while the API restarts, a
+ * is not DoAide Reach: nginx returning its own 502 page while the API restarts, a
  * captive portal on hotel wifi, a corporate proxy interposing an error. Every
  * one of those answers with a status and a body of HTML, and `readBody` runs
  * `JSON.parse` on it — so without a fallback the failure a practitioner is

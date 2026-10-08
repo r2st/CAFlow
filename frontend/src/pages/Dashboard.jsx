@@ -229,7 +229,7 @@ function DashboardBody({ stats, calendar, revenue, workload, outstanding }) {
           <ComplianceTable items={calendar.items} />
         ) : (
           <EmptyState title="Nothing due in this window">
-            Add a client and CAFlow will generate their filing calendar automatically.
+            Add a client and DoAide Reach will generate their filing calendar automatically.
           </EmptyState>
         )}
       </div>

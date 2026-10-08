@@ -181,7 +181,7 @@ export default function AuditLog() {
           <h1>Audit trail</h1>
           <p>
             {total} recorded action{total === 1 ? '' : 's'} — append-only, and not editable from
-            anywhere in CAFlow
+            anywhere in DoAide Reach
           </p>
         </div>
       </div>
@@ -325,7 +325,7 @@ export default function AuditLog() {
           </>
         ) : (
           <EmptyState title="Nothing recorded in this window">
-            Every change made in CAFlow is logged here as it happens.
+            Every change made in DoAide Reach is logged here as it happens.
           </EmptyState>
         )}
       </div>

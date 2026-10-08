@@ -7,7 +7,7 @@ import { matchPath, useLocation } from 'react-router-dom'
  * A single-page app changes the whole screen without the browser doing
  * anything a screen reader notices. Two things go missing as a result. The
  * tab title stays on whatever the first load said, so every history entry and
- * every bookmark reads "CAFlow" and none of them can be told apart. And the
+ * every bookmark reads "DoAide Reach" and none of them can be told apart. And the
  * navigation itself is silent: a sighted user sees the page swap, a screen
  * reader user gets nothing until they go hunting for what changed.
  *
@@ -38,7 +38,7 @@ const ROUTE_TITLES = [
   ['/team', 'Team'],
   ['/audit', 'Audit trail'],
   // Both were missing, and a missing entry is not a cosmetic one: the tab title
-  // stays on the bare "CAFlow" so the history entry cannot be told from any
+  // stays on the bare "DoAide Reach" so the history entry cannot be told from any
   // other, and the live region is set to the empty string — so navigating here
   // announces nothing at all and a screen-reader user is left on a page that
   // never said what it was.
@@ -47,7 +47,7 @@ const ROUTE_TITLES = [
   ['/', 'Dashboard'],
 ]
 
-const SUFFIX = 'CAFlow'
+const SUFFIX = 'DoAide Reach'
 
 export function titleForPath(pathname) {
   const found = ROUTE_TITLES.find(([pattern]) => matchPath(pattern, pathname))

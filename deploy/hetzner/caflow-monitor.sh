@@ -1,5 +1,5 @@
 #!/bin/sh
-# Ask, every few minutes, whether CAFlow is actually working — and say so once
+# Ask, every few minutes, whether DoAide Reach is actually working — and say so once
 # when the answer changes.
 #
 # `/health/ready` is the obvious check and not a sufficient one. It answers for
@@ -189,7 +189,7 @@ deliver() {
       -H "Authorization: Bearer $SENDGRID_API_KEY" \
       -H 'Content-Type: application/json' \
       -d "{\"personalizations\":[{\"to\":[{\"email\":\"$ALERT_EMAIL_TO\"}]}],
-           \"from\":{\"email\":\"$ALERT_EMAIL_FROM\",\"name\":\"CAFlow monitor\"},
+           \"from\":{\"email\":\"$ALERT_EMAIL_FROM\",\"name\":\"DoAide Reach monitor\"},
            \"subject\":\"$subject\",
            \"content\":[{\"type\":\"text/plain\",\"value\":\"$escaped\"}]}" \
       || echo "caflow-monitor: the alert email did not send — see the line above" >&2
@@ -205,7 +205,7 @@ deliver() {
 
 if [ -z "$signature" ]; then
   if [ -n "$previous_signature" ]; then
-    deliver "CAFlow recovered on $HOSTNAME_LABEL" \
+    deliver "DoAide Reach recovered on $HOSTNAME_LABEL" \
       "Everything that was failing is answering again. Was failing: $(
         printf '%s' "$previous_signature" | sed -e 's/,$//' -e 's/,/, /g'
       )"
@@ -226,7 +226,7 @@ alerted_at="$previous_alert"
 if [ "$count" -ge "$FAILURES_BEFORE_ALERT" ]; then
   repeat_due=$((now - previous_alert >= ALERT_REPEAT_HOURS * 3600))
   if [ "$signature" != "$previous_signature" ] || [ "$repeat_due" = 1 ]; then
-    deliver "CAFlow is unhealthy on $HOSTNAME_LABEL" "$report"
+    deliver "DoAide Reach is unhealthy on $HOSTNAME_LABEL" "$report"
     alerted_at="$now"
   fi
   save_state "$count" "$signature" "$alerted_at"

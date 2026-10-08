@@ -53,8 +53,8 @@ function LinkProblem({ message }) {
     <PortalShell>
       <main className="portal-card portal-notice">
         <div className="brand">
-          <span className="brand-mark">CA</span>
-          CAFlow
+          <span className="brand-mark">DR</span>
+          DoAide Reach
         </div>
         <h1>This link isn&apos;t working</h1>
         <p className="muted">{message}</p>
@@ -287,7 +287,7 @@ export default function Portal() {
   const { summary } = overview
   const filings = sortFilings(overview.filings)
   const needsAttention = summary.documents_outstanding > 0
-  // A firm that does not bill through CAFlow sends no invoices, and a client
+  // A firm that does not bill through DoAide Reach sends no invoices, and a client
   // of theirs should not be shown an empty bills section or a "₹0 due" tile.
   const invoices = overview.invoices ?? []
   const amountDue = summary.amount_due_paise ?? 0

@@ -136,7 +136,7 @@ describe('the business timestamp', () => {
 
 describe('the business date', () => {
   /**
-   * Every business date in CAFlow is a date in India — `app/core/clock.py` says
+   * Every business date in DoAide Reach is a date in India — `app/core/clock.py` says
    * so at length, and the server refuses a `filed_on` past *its* today. The
    * browser had the same gap and nothing named it: `toISOString()` is the UTC
    * date, and UTC is five and a half hours behind IST, so for the first five

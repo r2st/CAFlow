@@ -183,7 +183,7 @@ export default function Clients() {
           </>
         ) : (
           <EmptyState title="No clients yet">
-            Add your first client — CAFlow will build their compliance calendar from their
+            Add your first client — DoAide Reach will build their compliance calendar from their
             registrations.
           </EmptyState>
         )}

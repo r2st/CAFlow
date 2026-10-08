@@ -55,7 +55,7 @@ export default function ClientNew() {
         <div>
           <h1>Add client</h1>
           <p>
-            Registrations drive the calendar: tick GST and CAFlow generates GSTR-1 and GSTR-3B for
+            Registrations drive the calendar: tick GST and DoAide Reach generates GSTR-1 and GSTR-3B for
             every period, tick TDS and it adds the quarterly returns.
           </p>
         </div>

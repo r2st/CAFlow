@@ -1,5 +1,5 @@
 /**
- * Thin fetch wrapper around the CAFlow API.
+ * Thin fetch wrapper around the DoAide Reach API.
  *
  * Holds the JWT in localStorage, attaches it to every request, and surfaces
  * every failure as `ApiError` — the server's own `detail` message when there
@@ -45,7 +45,7 @@ export const NETWORK_ERROR_STATUS = 0
  * Chrome, "Load failed" in Safari, "NetworkError when attempting to fetch
  * resource" in Firefox. Every page in this app renders `err.message` straight
  * into an alert, so left alone, a train going into a tunnel reads as a bug in
- * CAFlow — and reads differently depending on the browser it broke in.
+ * DoAide Reach — and reads differently depending on the browser it broke in.
  *
  * The original is kept as `cause`, because it is the useful thing in a console.
  */
@@ -54,7 +54,7 @@ function networkError(cause) {
   return new ApiError(
     offline
       ? 'You appear to be offline. Check your connection and try again.'
-      : 'Could not reach CAFlow. Check your connection and try again.',
+      : 'Could not reach DoAide Reach. Check your connection and try again.',
     NETWORK_ERROR_STATUS,
     null,
     { cause },

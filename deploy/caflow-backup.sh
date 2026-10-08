@@ -46,12 +46,12 @@ $compose exec -T postgres pg_dump -U caflow -d caflow --format=custom >"$db_targ
 # pg_restore --list walks the archive's table of contents, so a truncated or
 # non-archive file fails here. Grepping for the clients table on top of that is
 # what distinguishes a valid archive of the wrong database from this one: every
-# CAFlow database has that table, and losing it is what this whole file exists
+# DoAide Reach database has that table, and losing it is what this whole file exists
 # to prevent. pg_restore comes from the postgres image, so there is no version
 # skew with the pg_dump that wrote the file.
 $compose exec -T postgres pg_restore --list <"$db_target.part" \
   | grep -q 'TABLE DATA public clients' \
-  || { echo "caflow: the database dump is not a restorable CAFlow archive" >&2; exit 1; }
+  || { echo "caflow: the database dump is not a restorable DoAide Reach archive" >&2; exit 1; }
 mv "$db_target.part" "$db_target"
 
 # The volume is mounted in the api container; tar it from there rather than

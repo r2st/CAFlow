@@ -273,7 +273,7 @@ class TestABackupIsReadBackBeforeItIsNamed:
         result = backup(FAKE_DB_DUMP="ERROR:  could not connect to server")
 
         assert result.returncode != 0
-        assert "not a restorable CAFlow archive" in result.stderr
+        assert "not a restorable DoAide Reach archive" in result.stderr
         assert _names(backup.dir) == []
 
     def test_an_empty_dump_is_not_kept(self, backup):

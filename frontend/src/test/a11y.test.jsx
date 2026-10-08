@@ -157,7 +157,7 @@ describe('naming the current page', () => {
 
   it('leaves no reachable page unnamed', () => {
     /**
-     * An unnamed page sets the tab title to a bare "CAFlow" — so every history
+     * An unnamed page sets the tab title to a bare "DoAide Reach" — so every history
      * entry and bookmark reads the same — and sets the live region to the empty
      * string, which announces nothing. Both `/settings` and `/account` were
      * missing, so the route table is checked against the routes rather than
@@ -194,7 +194,7 @@ describe('naming the current page', () => {
       </MemoryRouter>,
     )
 
-    await waitFor(() => expect(document.title).toBe('Billing · CAFlow'))
+    await waitFor(() => expect(document.title).toBe('Billing · DoAide Reach'))
   })
 
   it('starts its live region empty, so a first load is not announced', () => {
@@ -239,11 +239,11 @@ describe('naming pages as the app is navigated', () => {
       </MemoryRouter>,
     )
 
-    await waitFor(() => expect(document.title).toBe('Clients · CAFlow'))
+    await waitFor(() => expect(document.title).toBe('Clients · DoAide Reach'))
 
     await user.click(await screen.findByRole('link', { name: 'Compliance calendar' }))
 
-    await waitFor(() => expect(document.title).toBe('Compliance calendar · CAFlow'))
+    await waitFor(() => expect(document.title).toBe('Compliance calendar · DoAide Reach'))
   })
 
   it('says out loud that a new page arrived', async () => {
@@ -339,7 +339,7 @@ describe('the screens with no app shell', () => {
     )
 
     const main = await screen.findByRole('main')
-    expect(within(main).getByRole('heading', { name: /Can't reach CAFlow/i })).toBeInTheDocument()
+    expect(within(main).getByRole('heading', { name: /Can't reach DoAide Reach/i })).toBeInTheDocument()
   })
 
   it('gives the expired-link notice a main landmark too', async () => {

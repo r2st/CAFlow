@@ -132,8 +132,8 @@ class OpenRouterClient:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://caflow.aiknol.com",
-            "X-Title": "CAFlow",
+            "HTTP-Referer": "https://reach.doaide.com",
+            "X-Title": "DoAide Reach",
         }
 
         last_error: Exception | None = None
@@ -479,7 +479,7 @@ def draft_client_message(
 
 # The signature on a message with no firm behind it. Never the product name:
 # this is a message from a CA to their own client, delivered under the firm's
-# sender name and reply-to, and a client has no idea what CAFlow is.
+# sender name and reply-to, and a client has no idea what DoAide Reach is.
 DEFAULT_SIGNATORY = "Your Chartered Accountant"
 
 

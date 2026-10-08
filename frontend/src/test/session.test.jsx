@@ -240,7 +240,7 @@ describe('a session that could not be confirmed', () => {
   it('says the connection failed, rather than showing a sign-in form', async () => {
     renderApp('/clients')
 
-    expect(await screen.findByText(/Could not reach CAFlow/i)).toBeInTheDocument()
+    expect(await screen.findByText(/Could not reach DoAide Reach/i)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
   })
 

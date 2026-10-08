@@ -56,8 +56,8 @@ export default function Register() {
       <main className="auth-card wide">
         <div className="auth-head">
           <div className="brand">
-            <span className="brand-mark">CA</span>
-            CAFlow
+            <span className="brand-mark">DR</span>
+            DoAide Reach
           </div>
           <p>Register your practice</p>
         </div>

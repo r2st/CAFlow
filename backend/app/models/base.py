@@ -1,4 +1,4 @@
-"""Shared column types, mixins and enums for all CAFlow models."""
+"""Shared column types, mixins and enums for all DoAide Reach models."""
 
 import enum
 import uuid

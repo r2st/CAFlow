@@ -245,7 +245,7 @@ describe('Portal billing', () => {
     expect(within(bills).queryByText(/outstanding/)).not.toBeInTheDocument()
   })
 
-  it('hides the bills section for a firm that does not invoice through CAFlow', async () => {
+  it('hides the bills section for a firm that does not invoice through DoAide Reach', async () => {
     vi.spyOn(api, 'portalOverview').mockResolvedValue(portalOverview({ invoices: [] }))
 
     renderPortal('/portal?token=magic-token-123')

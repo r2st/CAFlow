@@ -36,7 +36,7 @@ configure_logging()
 logger = logging.getLogger(__name__)
 
 DESCRIPTION = """
-CAFlow — AI practice management for Indian Chartered Accountants.
+DoAide Reach — AI-powered email outreach automation for Indian startups and businesses.
 
 Compliance calendar, client management, document intake and billing for CA firms.
 
@@ -162,7 +162,7 @@ def create_app() -> FastAPI:
         version=__version__,
         summary="Compliance, documents and billing for Indian CA firms.",
         openapi_tags=TAGS_METADATA,
-        contact={"name": "CAFlow"},
+        contact={"name": "DoAide Reach"},
         license_info={"name": "Proprietary"},
         docs_url="/docs" if docs else None,
         redoc_url="/redoc" if docs else None,

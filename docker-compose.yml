@@ -1,4 +1,4 @@
-# The whole CAFlow stack.
+# The whole DoAide Reach stack.
 #
 #   docker compose up -d                   # everything, migrated and seeded
 #   docker compose up -d postgres redis    # just the backing services, for
@@ -34,7 +34,7 @@ x-backend-env: &backend-env
   SMTP_USERNAME: ${SMTP_USERNAME:-}
   SMTP_PASSWORD: ${SMTP_PASSWORD:-}
   EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-no-reply@caflow.local}
-  EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-CAFlow}
+  EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-DoAide Reach}
 
 x-backend: &backend
   build:

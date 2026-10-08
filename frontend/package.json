@@ -1,9 +1,9 @@
 {
-  "name": "caflow-web",
+  "name": "doaide-reach-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "CAFlow — AI practice management for Indian Chartered Accountants",
+  "description": "DoAide Reach — AI-powered email outreach automation for Indian startups and businesses",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

@@ -68,11 +68,11 @@ sudo -u postgres pg_dump -d "$PGDATABASE" --format=custom >"$db_target.part"
 # pg_restore --list walks the archive's table of contents, so a truncated or
 # non-archive file fails here. Grepping for the clients table on top of that is
 # what distinguishes a valid archive of the wrong database from this one: every
-# CAFlow database has that table, and losing it is what this whole file exists
+# DoAide Reach database has that table, and losing it is what this whole file exists
 # to prevent.
 pg_restore --list <"$db_target.part" \
   | grep -q 'TABLE DATA public clients' \
-  || { echo "caflow: the database dump is not a restorable CAFlow archive" >&2; exit 1; }
+  || { echo "caflow: the database dump is not a restorable DoAide Reach archive" >&2; exit 1; }
 mv "$db_target.part" "$db_target"
 
 # The documents directory is owned by the caflow user and mode 750; this runs

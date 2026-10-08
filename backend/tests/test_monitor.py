@@ -514,7 +514,7 @@ class TestDelivery:
         payload = json.loads(raw[-1])
         assert payload["personalizations"][0]["to"][0]["email"] == "ops@example.com"
         assert "caflow-worker" in payload["content"][0]["value"]
-        assert payload["subject"].startswith("CAFlow is unhealthy")
+        assert payload["subject"].startswith("DoAide Reach is unhealthy")
 
     def test_a_quote_in_a_failure_message_does_not_break_the_payload(self, monitor):
         r"""systemd error text is not JSON-safe, and the escaping is one sed apart.

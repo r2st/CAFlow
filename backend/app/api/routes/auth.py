@@ -80,7 +80,7 @@ def _refuse_duplicate_email(db: Session, email: str) -> None:
         status_code=status.HTTP_409_CONFLICT,
         detail=(
             "This email address is already in use. An address signs in to one "
-            "CAFlow account, so each team member needs their own."
+            "DoAide Reach account, so each team member needs their own."
         ),
     )
 

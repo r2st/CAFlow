@@ -1,6 +1,6 @@
 #!/bin/sh
 # Restore last night's backup into a scratch database and see whether it is
-# actually a working CAFlow database.
+# actually a working DoAide Reach database.
 #
 # `caflow-backup` already reads each archive back before it calls it a backup,
 # and that catches the loud half: a truncated file, a redirect that captured an
@@ -47,8 +47,8 @@ ENV_FILE="${ENV_FILE:-$APP_DIR/.env}"
 STATE_FILE="${STATE_FILE:-/var/lib/caflow/restore-check.state}"
 KEEP_SCRATCH="${KEEP_SCRATCH:-0}"
 
-# Every CAFlow database has these, and a restore that produces a schema without
-# one of them is not a CAFlow database however cleanly pg_restore exited.
+# Every DoAide Reach database has these, and a restore that produces a schema without
+# one of them is not a DoAide Reach database however cleanly pg_restore exited.
 REQUIRED_TABLES="firms practitioners clients compliance_types compliance_items documents invoices"
 
 # This file's whole job is to drop a database. The one thing it must never drop
@@ -114,7 +114,7 @@ done
 
 # ------------------------------------------------------------------ the data --
 
-# The seeded statutory calendar: 18 compliance types, present in every CAFlow
+# The seeded statutory calendar: 18 compliance types, present in every DoAide Reach
 # database from the first migration onwards and never deleted by anything the
 # app does. That makes it the one table whose emptiness is unambiguous — a firm
 # can legitimately have no clients and no invoices on the day it signs up, but

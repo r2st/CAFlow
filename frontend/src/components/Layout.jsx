@@ -28,8 +28,8 @@ export default function Layout() {
       <aside className={`sidebar ${navOpen ? 'open' : ''}`}>
         <div className="sidebar-top">
           <div className="brand">
-            <span className="brand-mark">CA</span>
-            CAFlow
+            <span className="brand-mark">DR</span>
+            DoAide Reach
           </div>
           <button
             type="button"
