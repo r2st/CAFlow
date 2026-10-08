@@ -39,3 +39,7 @@ backend/var/
 .idea/
 .vscode/
 *.swp
+
+# Environment
+.env*
+!.env.example
