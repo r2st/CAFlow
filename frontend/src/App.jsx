@@ -15,6 +15,7 @@ import Clients from './pages/Clients'
 import Dashboard from './pages/Dashboard'
 import Documents from './pages/Documents'
 import Landing from './pages/Landing'
+import { BlogIndex, BlogPost } from './pages/Blog'
 import Login from './pages/Login'
 import Portal from './pages/Portal'
 import Register from './pages/Register'
@@ -49,6 +50,8 @@ export default function App() {
       <RouteAnnouncer />
       <Routes>
         <Route path="/" element={<Landing />} />
+        <Route path="/blog" element={<BlogIndex />} />
+        <Route path="/blog/:slug" element={<BlogPost />} />
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
 

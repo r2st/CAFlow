@@ -3,10 +3,73 @@ import { Link, Navigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
 const FEATURES = [
-  { icon: '\u{1F4E7}', title: 'Smart Emails' },
-  { icon: '\u{1F3AF}', title: 'Targeting' },
-  { icon: '\u{1F4CA}', title: 'Campaign AI' },
-  { icon: '\u{1F504}', title: 'Auto Follow-up' },
+  { icon: '\u{1F4E7}', title: 'Smart Emails', desc: 'AI-crafted personalized emails that resonate with each recipient' },
+  { icon: '\u{1F3AF}', title: 'Targeting', desc: 'Precision audience segmentation by industry, role, and company size' },
+  { icon: '\u{1F4CA}', title: 'Campaign AI', desc: 'Real-time analytics with AI recommendations to optimize every send' },
+  { icon: '\u{1F504}', title: 'Auto Follow-up', desc: 'Behavior-triggered follow-ups that adapt timing and messaging' },
+]
+
+const TESTIMONIALS = [
+  {
+    quote: 'Reach cut our outreach time by 70%. The AI personalization actually sounds human, and our reply rates tripled in the first month.',
+    name: 'Priya Sharma',
+    role: 'Founder, GrowthLab India',
+  },
+  {
+    quote: 'We switched from Mailchimp to Reach for cold outreach. The auto follow-up sequences alone paid for themselves in the first week.',
+    name: 'Arjun Mehta',
+    role: 'Head of Sales, FinStack',
+  },
+  {
+    quote: 'As a solo founder, I needed something that could run campaigns while I focused on product. Reach does exactly that.',
+    name: 'Kavita Reddy',
+    role: 'CEO, CloudBridge Solutions',
+  },
+]
+
+const FAQ_ITEMS = [
+  {
+    q: 'What is DoAide Reach?',
+    a: 'DoAide Reach is an AI-powered email outreach automation platform designed for Indian startups and businesses. It helps you create targeted email campaigns, automate follow-ups, and track engagement with built-in analytics.',
+  },
+  {
+    q: 'Is DoAide Reach free to use?',
+    a: 'Yes, DoAide Reach offers a free plan that includes core features like email campaign creation, basic targeting, and analytics. Premium plans unlock advanced AI personalization and higher sending limits.',
+  },
+  {
+    q: 'How does the AI personalization work?',
+    a: 'DoAide Reach uses AI to analyze your target audience and generate personalized email content for each recipient. It considers industry, role, company size, and previous interactions to craft messages that resonate.',
+  },
+  {
+    q: 'Can I automate follow-up emails?',
+    a: 'Yes. You can set up automated follow-up sequences triggered by recipient behavior — opens, clicks, or no response. The AI adjusts follow-up timing and messaging based on engagement patterns.',
+  },
+  {
+    q: 'How is DoAide Reach different from cold email tools?',
+    a: 'Unlike generic cold email tools, DoAide Reach is built for the Indian market with features like regional targeting, vernacular support, and pricing optimized for Indian startups.',
+  },
+  {
+    q: 'What analytics does DoAide Reach provide?',
+    a: 'Campaign-level and email-level analytics including open rates, click rates, reply rates, bounce rates, and engagement heatmaps. The AI also generates actionable recommendations to improve future campaigns.',
+  },
+]
+
+const BLOG_ARTICLES = [
+  {
+    slug: 'email-outreach-automation-guide',
+    title: 'Email Outreach Automation: The Complete Guide for 2026',
+    excerpt: 'Learn how to set up automated email outreach campaigns that generate replies, not spam complaints.',
+  },
+  {
+    slug: 'cold-email-best-practices-indian-startups',
+    title: 'Cold Email Best Practices for Indian Startups',
+    excerpt: 'What works (and what gets you blacklisted) when cold emailing in the Indian B2B market.',
+  },
+  {
+    slug: 'outreach-vs-ads-roi-comparison',
+    title: 'Outreach vs Ads: Which Delivers Better ROI for Early-Stage Startups?',
+    excerpt: 'A data-driven comparison of email outreach and paid advertising for startups with limited budgets.',
+  },
 ]
 
 const DOAIDE_PRODUCTS = [
@@ -55,8 +118,8 @@ function HeroRobot({ color }) {
   )
 }
 
-const ACCENT = '#F0B429'
-const ACCENT_DARK = '#D4A017'
+const ACCENT = '#D4AF37'
+const ACCENT_DARK = '#B8962F'
 
 export default function Landing() {
   const { isAuthenticated, loading } = useAuth()
@@ -110,8 +173,57 @@ export default function Landing() {
           >
             <span className="landing-feature-icon">{f.icon}</span>
             <span className="landing-feature-title">{f.title}</span>
+            <span className="landing-feature-desc">{f.desc}</span>
           </div>
         ))}
+      </section>
+
+      <section className="landing-testimonials">
+        <h2 className="landing-section-title">What founders are saying</h2>
+        <div className="landing-testimonials-grid">
+          {TESTIMONIALS.map((t) => (
+            <div key={t.name} className="landing-testimonial-card">
+              <p className="landing-testimonial-quote">&ldquo;{t.quote}&rdquo;</p>
+              <div className="landing-testimonial-author">
+                <span className="landing-testimonial-name">{t.name}</span>
+                <span className="landing-testimonial-role">{t.role}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="landing-blog">
+        <h2 className="landing-section-title">From the blog</h2>
+        <div className="landing-blog-grid">
+          {BLOG_ARTICLES.map((a) => (
+            <Link key={a.slug} to={`/blog/${a.slug}`} className="landing-blog-card">
+              <h3 className="landing-blog-title">{a.title}</h3>
+              <p className="landing-blog-excerpt">{a.excerpt}</p>
+              <span className="landing-blog-read">Read more &rarr;</span>
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      <section className="landing-faq">
+        <h2 className="landing-section-title">Frequently Asked Questions</h2>
+        <div className="landing-faq-list">
+          {FAQ_ITEMS.map((item) => (
+            <details key={item.q} className="landing-faq-item">
+              <summary className="landing-faq-question">{item.q}</summary>
+              <p className="landing-faq-answer">{item.a}</p>
+            </details>
+          ))}
+        </div>
+      </section>
+
+      <section className="landing-final-cta">
+        <h2 className="landing-section-title">Ready to automate your outreach?</h2>
+        <p className="landing-final-cta-sub">Start sending smarter emails in minutes. No credit card required.</p>
+        <div className="landing-cta-group">
+          <Link to="/register" className="landing-btn-primary landing-btn-lg">Get started free</Link>
+        </div>
       </section>
 
       <footer className="landing-footer">
