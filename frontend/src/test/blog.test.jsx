@@ -20,7 +20,7 @@ describe('Blog index', () => {
     expect(screen.getByText('Blog')).toBeInTheDocument()
   })
 
-  it('lists all 3 articles', () => {
+  it('lists all 6 articles', () => {
     renderAt('/blog')
     for (const article of ARTICLES) {
       expect(screen.getByText(article.title)).toBeInTheDocument()
@@ -47,6 +47,21 @@ describe('Blog post', () => {
   it('renders the outreach vs ads article', () => {
     renderAt('/blog/outreach-vs-ads-roi-comparison')
     expect(screen.getByText(/Outreach vs Ads/)).toBeInTheDocument()
+  })
+
+  it('renders the B2B lead generation article', () => {
+    renderAt('/blog/b2b-lead-generation-strategies-india')
+    expect(screen.getByText(/B2B Lead Generation Strategies/)).toBeInTheDocument()
+  })
+
+  it('renders the email deliverability article', () => {
+    renderAt('/blog/email-deliverability-guide-indian-domains')
+    expect(screen.getByText(/Email Deliverability Guide/)).toBeInTheDocument()
+  })
+
+  it('renders the cold email list building article', () => {
+    renderAt('/blog/build-cold-email-list-india-without-buying-data')
+    expect(screen.getByText(/How to Build a Cold Email List/)).toBeInTheDocument()
   })
 
   it('shows 404 for unknown slug', () => {
