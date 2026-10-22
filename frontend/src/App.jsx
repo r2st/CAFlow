@@ -18,6 +18,7 @@ import Landing from './pages/Landing'
 import { BlogIndex, BlogPost } from './pages/Blog'
 import Login from './pages/Login'
 import Outreach from './pages/Outreach'
+import OutreachDashboard from './pages/OutreachDashboard'
 import Portal from './pages/Portal'
 import Register from './pages/Register'
 import Reminders from './pages/Reminders'
@@ -58,6 +59,7 @@ export default function App() {
 
         {/* The free outreach workspace: no account, stored in this browser. */}
         <Route path="/outreach" element={<Outreach />} />
+        <Route path="/outreach/dashboard" element={<OutreachDashboard />} />
 
         {/* The client portal: a magic-link token, no account, no app shell. */}
         <Route path="/portal" element={<Portal />} />

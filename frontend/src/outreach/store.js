@@ -197,3 +197,53 @@ export function useOutreach() {
     setOnboarded,
   }
 }
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/** Midnight local time — activity is bucketed by the day the user lived it. */
+function startOfDay(date) {
+  const d = new Date(date)
+  d.setHours(0, 0, 0, 0)
+  return d
+}
+
+/**
+ * The numbers the dashboard shows. Reply rate is over prospects actually
+ * contacted, not over the whole list — a list full of people not yet written
+ * to says nothing about how the messages are landing.
+ */
+export function computeMetrics(prospects, now = new Date()) {
+  const byStatus = Object.fromEntries(STATUSES.map((s) => [s, 0]))
+  const byChannel = {}
+  for (const p of prospects) {
+    byStatus[p.status] = (byStatus[p.status] ?? 0) + 1
+    for (const h of p.history) byChannel[h.channel] = (byChannel[h.channel] ?? 0) + 1
+  }
+
+  const reached = prospects.length - byStatus.new
+  const engaged = byStatus.replied + byStatus.meeting
+  const today = startOfDay(now)
+  const activity = Array.from({ length: 7 }, (_, i) => {
+    const day = new Date(today.getTime() - (6 - i) * DAY_MS)
+    return { day, count: 0 }
+  })
+  for (const p of prospects) {
+    for (const h of p.history) {
+      const index = 6 - Math.round((today - startOfDay(h.at)) / DAY_MS)
+      if (index >= 0 && index < 7) activity[index].count += 1
+    }
+  }
+
+  return {
+    total: prospects.length,
+    reached,
+    engaged,
+    meetings: byStatus.meeting,
+    replyRate: reached ? Math.round((engaged / reached) * 100) : 0,
+    messagesSent: Object.values(byChannel).reduce((a, b) => a + b, 0),
+    followUpsDue: prospects.filter((p) => isFollowUpDue(p, now)),
+    byStatus,
+    byChannel,
+    activity,
+  }
+}

@@ -1993,3 +1993,34 @@ th.tick input, td.tick input { width: auto; margin: 0; }
   .prospect-actions button { flex: 1 1 auto; }
   .composer-actions > * { flex: 1 1 100%; }
 }
+
+.dashboard-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0 16px;
+}
+.bar-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 32px;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 0.88rem;
+}
+.bar-track { height: 10px; background: var(--neutral-bg); border-radius: 5px; overflow: hidden; }
+.bar-fill { display: block; height: 100%; background: var(--brand); border-radius: 5px; }
+.bar-value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+
+.activity-chart {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+  height: 140px;
+  align-items: end;
+}
+.activity-chart li { display: flex; flex-direction: column; justify-content: flex-end; height: 100%; gap: 6px; }
+.activity-bar { display: block; min-height: 2px; background: var(--brand); border-radius: 4px 4px 0 0; }
+.activity-day { font-size: 0.75rem; color: var(--text-muted); text-align: center; }
