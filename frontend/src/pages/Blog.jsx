@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import WhatsAppShare from '../components/WhatsAppShare'
 
 const ARTICLES = [
   {
@@ -601,6 +602,10 @@ function BlogPost() {
         <div className="blog-list-meta">{article.date} &middot; {article.readTime}</div>
         <h1 className="blog-page-title">{article.title}</h1>
         <div className="blog-content" dangerouslySetInnerHTML={{ __html: article.content }} />
+        <div className="blog-share">
+          <p>Found this useful? Send it to someone who does outreach.</p>
+          <WhatsAppShare text={`${article.title} — https://reach.doaide.com/blog/${article.slug}`} />
+        </div>
       </div>
     </div>
   )

@@ -247,3 +247,16 @@ export function computeMetrics(prospects, now = new Date()) {
     activity,
   }
 }
+
+/**
+ * A wa.me link that opens WhatsApp with the message typed in. A bare
+ * ten-digit Indian mobile gets the 91 country code, since wa.me needs the
+ * full international number and that is how most people write theirs. With no
+ * number at all, WhatsApp asks the user which chat to send it to.
+ */
+export function whatsappLink(phone, text) {
+  let digits = String(phone ?? '').replace(/\D/g, '')
+  if (digits.length === 11 && digits.startsWith('0')) digits = digits.slice(1)
+  if (digits.length === 10) digits = `91${digits}`
+  return `https://wa.me/${digits}?text=${encodeURIComponent(text)}`
+}

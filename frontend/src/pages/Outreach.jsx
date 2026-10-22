@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
+import WhatsAppShare from '../components/WhatsAppShare'
 import { Alert, EmptyState, Pill, formatDate } from '../components/ui'
 import {
   STATUSES,
@@ -279,6 +280,12 @@ function Composer({ prospect, profile, onSent }) {
         <p className="small due-note">Fill in the {'{placeholders}'} — add your name and offer under “About you”.</p>
       )}
       <div className="button-row composer-actions">
+        <WhatsAppShare
+          text={body}
+          phone={prospect.phone}
+          label={prospect.phone ? 'Send on WhatsApp' : 'Pick a WhatsApp chat'}
+          onClick={() => onSent('whatsapp')}
+        />
         {prospect.email && (
           <a className="button-link" href={mailtoLink(prospect.email, subject, body)} onClick={() => onSent('email')}>
             Send email

@@ -1,6 +1,14 @@
 import { Link } from 'react-router-dom'
+import WhatsAppShare from '../components/WhatsAppShare'
 import { EmptyState, Stat, formatDate } from '../components/ui'
-import { STATUSES, STATUS_LABELS, computeMetrics, useOutreach } from '../outreach/store'
+import {
+  STATUSES,
+  STATUS_LABELS,
+  TEMPLATES,
+  computeMetrics,
+  fillTemplate,
+  useOutreach,
+} from '../outreach/store'
 import { OutreachHeader } from './Outreach'
 
 const CHANNEL_LABELS = { email: 'Email', whatsapp: 'WhatsApp', copy: 'Copied' }
@@ -8,7 +16,8 @@ const CHANNEL_LABELS = { email: 'Email', whatsapp: 'WhatsApp', copy: 'Copied' }
 const WEEKDAY = new Intl.DateTimeFormat('en-IN', { weekday: 'short' })
 
 export default function OutreachDashboard() {
-  const { prospects } = useOutreach()
+  const { prospects, profile, logContact } = useOutreach()
+  const followUp = TEMPLATES.find((t) => t.id === 'follow_up')
   const m = computeMetrics(prospects)
   const busiest = Math.max(1, ...m.activity.map((a) => a.count))
 
@@ -52,6 +61,14 @@ export default function OutreachDashboard() {
                         {p.company && <span className="muted"> · {p.company}</span>}
                         <div className="small muted">Last contact {formatDate(p.lastContactAt)}</div>
                       </div>
+                      {p.phone && (
+                        <WhatsAppShare
+                          label="Follow up on WhatsApp"
+                          phone={p.phone}
+                          text={fillTemplate(followUp.body, { name: p.name.split(' ')[0], company: p.company, ...profile })}
+                          onClick={() => logContact(p.id, 'whatsapp')}
+                        />
+                      )}
                     </li>
                   ))}
                 </ul>

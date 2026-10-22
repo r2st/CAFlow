@@ -2024,3 +2024,20 @@ th.tick input, td.tick input { width: auto; margin: 0; }
 .activity-chart li { display: flex; flex-direction: column; justify-content: flex-end; height: 100%; gap: 6px; }
 .activity-bar { display: block; min-height: 2px; background: var(--brand); border-radius: 4px 4px 0 0; }
 .activity-day { font-size: 0.75rem; color: var(--text-muted); text-align: center; }
+
+.whatsapp-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  background: #1f8f4e;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.whatsapp-button:hover { background: #18733e; color: #fff; text-decoration: none; }
+.blog-share { margin-top: 32px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
+.blog-share p { margin: 0 0 10px; }

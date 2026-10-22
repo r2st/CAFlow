@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, Navigate } from 'react-router-dom'
+import WhatsAppShare from '../components/WhatsAppShare'
 import { useAuth } from '../context/AuthContext'
 
 const FEATURES = [
@@ -223,6 +224,11 @@ export default function Landing() {
         <p className="landing-final-cta-sub">Start sending smarter emails in minutes. No credit card required.</p>
         <div className="landing-cta-group">
           <Link to="/register" className="landing-btn-primary landing-btn-lg">Get started free</Link>
+          <WhatsAppShare
+            className="landing-btn-lg"
+            label="Tell a friend on WhatsApp"
+            text="Free outreach tracker with WhatsApp follow-ups, no sign-up: https://reach.doaide.com/outreach"
+          />
         </div>
       </section>
 
