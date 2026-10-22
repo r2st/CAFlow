@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout'
 import RouteAnnouncer from './components/RouteAnnouncer'
+import SeoHead from './components/SeoHead'
 import { Loading, ServerUnreachable } from './components/ui'
 import { useAuth } from './context/AuthContext'
 import Account from './pages/Account'
@@ -50,6 +51,7 @@ export default function App() {
       {/* Outside the routes, so it names every screen including the ones with
           no app shell — the portal, and both auth pages. */}
       <RouteAnnouncer />
+      <SeoHead />
       <Routes>
         <Route path="/" element={<Landing />} />
         <Route path="/blog" element={<BlogIndex />} />

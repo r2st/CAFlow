@@ -1,0 +1,19 @@
+# The signed-in app and the client portal are not for search engines: every
+# one of these paths answers a crawler with a sign-in redirect.
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /dashboard
+Disallow: /calendar
+Disallow: /clients
+Disallow: /documents
+Disallow: /tasks
+Disallow: /reminders
+Disallow: /billing
+Disallow: /team
+Disallow: /settings
+Disallow: /audit
+Disallow: /account
+Disallow: /portal
+
+Sitemap: https://reach.doaide.com/sitemap.xml

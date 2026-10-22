@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { matchPath, useLocation } from 'react-router-dom'
+import { metaForPath } from '../seo'
 
 /**
  * Names the current page — in the tab title, and out loud.
@@ -46,7 +47,13 @@ const ROUTE_TITLES = [
   // never said what it was.
   ['/settings', 'Firm settings'],
   ['/account', 'Your account'],
-  ['/', 'Dashboard'],
+  ['/dashboard', 'Dashboard'],
+  ['/blog/:slug', 'Blog article'],
+  ['/blog', 'Blog'],
+  // The landing page. It used to be listed as "Dashboard" — a leftover from
+  // when the dashboard lived at `/` — which put "Dashboard · DoAide Reach" in
+  // the tab and in search results for the home page.
+  ['/', 'Home'],
 ]
 
 const SUFFIX = 'DoAide Reach'
@@ -62,7 +69,10 @@ export default function RouteAnnouncer() {
 
   useEffect(() => {
     const name = titleForPath(pathname)
-    document.title = name ? `${name} · ${SUFFIX}` : SUFFIX
+    // A public page's title is written for search results; the signed-in
+    // screens use the short "Clients · DoAide Reach" form.
+    const seoTitle = metaForPath(pathname).title
+    document.title = seoTitle ?? (name ? `${name} · ${SUFFIX}` : SUFFIX)
     setAnnouncement(name ? `${name} page` : '')
   }, [pathname])
 

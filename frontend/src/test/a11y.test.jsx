@@ -134,7 +134,12 @@ describe('reaching the content by keyboard', () => {
 
 describe('naming the current page', () => {
   it.each([
-    ['/', 'Dashboard'],
+    ['/', 'Home'],
+    ['/dashboard', 'Dashboard'],
+    ['/blog', 'Blog'],
+    ['/blog/some-post', 'Blog article'],
+    ['/outreach', 'Free outreach workspace'],
+    ['/outreach/dashboard', 'Outreach dashboard'],
     ['/calendar', 'Compliance calendar'],
     ['/clients', 'Clients'],
     ['/clients/new', 'Add a client'],
@@ -165,6 +170,10 @@ describe('naming the current page', () => {
      */
     const reachable = [
       '/',
+      '/dashboard',
+      '/blog',
+      '/outreach',
+      '/outreach/dashboard',
       '/calendar',
       '/clients',
       '/documents',

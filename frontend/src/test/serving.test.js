@@ -81,7 +81,11 @@ describe('the document the policy has to allow', () => {
   it('has no inline script for script-src to reject', () => {
     // `script-src 'self'` blocks a <script> with a body. Vite emits none;
     // this is here for the day someone pastes one in by hand.
-    const scripts = indexHtml.match(/<script\b[^>]*>([\s\S]*?)<\/script>/g) ?? []
+    // JSON-LD blocks are data, not script — the browser never executes them,
+    // so script-src does not apply and they are skipped here.
+    const scripts = (indexHtml.match(/<script\b[^>]*>([\s\S]*?)<\/script>/g) ?? []).filter(
+      (tag) => !/type="application\/ld\+json"/.test(tag),
+    )
     for (const tag of scripts) {
       expect(tag.replace(/<script\b[^>]*>|<\/script>/g, '').trim()).toBe('')
     }
