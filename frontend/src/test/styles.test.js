@@ -55,3 +55,35 @@ describe('the two things that stick to the top of a phone', () => {
     expect(rule(':root')).toMatch(/--mobile-header:\s*\d+px/)
   })
 })
+
+describe('touch targets', () => {
+  const touch = css.slice(css.indexOf('@media (max-width: 860px), (pointer: coarse)'))
+  // The media block's own body, comments stripped so they do not read as selectors.
+  const block = touch
+    .slice(touch.indexOf('{') + 1, touch.indexOf('\n}\n'))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+
+  it('exists for narrow screens and coarse pointers', () => {
+    expect(block.length).toBeGreaterThan(0)
+  })
+
+  it.each(['button', '.nav a', '.nav-toggle', '.whatsapp-button', '.button-link', '.landing-btn-primary'])(
+    'gives %s a 48px minimum height',
+    (selector) => {
+      const rules = [...block.matchAll(/([^{}]+)\{([^}]*)\}/g)].filter(
+        ([, selectors, body]) =>
+          selectors.split(',').map((s) => s.trim()).includes(selector) && body.includes('min-height: 48px'),
+      )
+      expect(rules.length).toBeGreaterThan(0)
+    },
+  )
+
+  it('keeps form fields at 16px so iOS does not zoom on focus', () => {
+    expect(block).toMatch(/select,\s*textarea\s*\{[^}]*font-size: 16px/)
+  })
+
+  it('keeps the shared header height in step with the 48px menu button', () => {
+    // sidebar padding 12px top and bottom, 48px button, 1px border.
+    expect(rule(':root')).toMatch(/--mobile-header:\s*73px/)
+  })
+})

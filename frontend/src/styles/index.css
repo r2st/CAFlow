@@ -32,7 +32,7 @@
      the two have no way to measure each other in CSS. Getting it slightly
      wrong leaves a small gap; not having it at all hides whatever sticks
      underneath, which is what used to happen to the bulk-action bar. */
-  --mobile-header: 57px;
+  --mobile-header: 73px; /* 12px padding × 2 + the 48px menu button + 1px border */
   --shadow: 0 1px 2px rgba(20, 24, 45, 0.06), 0 4px 14px rgba(20, 24, 45, 0.05);
   --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
@@ -2041,3 +2041,62 @@ th.tick input, td.tick input { width: auto; margin: 0; }
 .whatsapp-button:hover { background: #18733e; color: #fff; text-decoration: none; }
 .blog-share { margin-top: 32px; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, 0.1); }
 .blog-share p { margin: 0 0 10px; }
+
+/* ---------------------------------------------------------- touch targets -- */
+
+/* 48px is the size a fingertip can hit without hitting the neighbour as well
+   (Material's minimum, a little above Apple's 44pt). Applied on narrow screens
+   and on any touch-first pointer, so a tablet in landscape gets it too, and a
+   mouse on a desktop keeps the denser layout. */
+@media (max-width: 860px), (pointer: coarse) {
+  button,
+  .button-link,
+  .whatsapp-button,
+  .nav a,
+  .nav-toggle,
+  .outreach-nav a,
+  .landing-btn-primary,
+  .landing-btn-ghost,
+  .landing-footer-link,
+  .landing-faq-question,
+  .blog-back,
+  .attention-card {
+    min-height: 48px;
+  }
+
+  button,
+  .nav a,
+  .nav-toggle,
+  .outreach-nav a,
+  .landing-btn-primary,
+  .landing-btn-ghost,
+  .landing-footer-link,
+  .blog-back {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .nav a { justify-content: flex-start; }
+  .landing-faq-question { display: flex; align-items: center; }
+
+  /* A small button is small in type, not in reach. */
+  button.small { padding: 8px 14px; min-width: 48px; }
+  button.link { padding: 0 4px; min-width: 48px; }
+  .alert-close { min-width: 48px; }
+
+  /* 16px stops iOS Safari zooming the page whenever a field takes focus. */
+  input:not([type='checkbox']):not([type='radio']):not([type='file']):not([type='submit']):not([type='button']),
+  select,
+  textarea {
+    min-height: 48px;
+    font-size: 16px;
+  }
+  textarea { min-height: 96px; }
+
+  input[type='checkbox'],
+  input[type='radio'] {
+    width: 24px;
+    height: 24px;
+  }
+  .checkbox { min-height: 48px; margin-bottom: 0; }
+}
