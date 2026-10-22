@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
 import ComplianceTable from '../components/ComplianceTable'
+import OnboardingGuide from '../components/OnboardingGuide'
 import {
   Alert,
   EmptyState,
@@ -12,6 +13,16 @@ import {
   monthWindow,
 } from '../components/ui'
 import { useAuth } from '../context/AuthContext'
+
+const GUIDE_KEY = 'reach.firm-guide.hidden'
+
+function guideHidden() {
+  try {
+    return window.localStorage.getItem(GUIDE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
 /** Show a rolling window: a month of history for overdue work, six months ahead. */
 function calendarWindow() {
@@ -27,6 +38,16 @@ export default function Dashboard() {
   const [outstanding, setOutstanding] = useState(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [hideGuide, setHideGuide] = useState(guideHidden)
+
+  function dismissGuide() {
+    try {
+      window.localStorage.setItem(GUIDE_KEY, '1')
+    } catch {
+      /* the guide just comes back next visit */
+    }
+    setHideGuide(true)
+  }
 
   useEffect(() => {
     const window_ = calendarWindow()
@@ -66,6 +87,43 @@ export default function Dashboard() {
       </div>
 
       <Alert kind="error">{error}</Alert>
+
+      {!loading && !hideGuide && stats && (
+        <OnboardingGuide
+          title="Getting started with DoAide Reach"
+          intro="Three things that make the rest of the app work for your firm."
+          onDismiss={dismissGuide}
+          steps={[
+            {
+              label: 'Add your first client',
+              hint: (
+                <>
+                  Their filing calendar is generated automatically. <Link to="/clients/new">Add a client →</Link>
+                </>
+              ),
+              done: stats.active_clients > 0,
+            },
+            {
+              label: "Enter your firm's GSTIN",
+              hint: (
+                <>
+                  It decides CGST/SGST versus IGST on every invoice. <Link to="/settings">Firm settings →</Link>
+                </>
+              ),
+              done: Boolean(firm?.gstin),
+            },
+            {
+              label: 'Invite a colleague',
+              hint: (
+                <>
+                  Assign filings and tasks to your team. <Link to="/team">Team →</Link>
+                </>
+              ),
+              done: (workload?.rows?.length ?? 0) > 1,
+            },
+          ]}
+        />
+      )}
 
       {/* Skeletons rather than a spinner: the header and the shape of the page
           are already known, so nothing has to jump when the data lands. */}

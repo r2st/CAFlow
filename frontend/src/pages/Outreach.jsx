@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
+import OnboardingGuide from '../components/OnboardingGuide'
 import WhatsAppShare from '../components/WhatsAppShare'
 import { Alert, EmptyState, Pill, formatDate } from '../components/ui'
 import {
@@ -45,7 +46,8 @@ export function OutreachHeader({ title, subtitle, children }) {
 
 export default function Outreach() {
   const outreach = useOutreach()
-  const { prospects, profile, addProspect, updateProspect, removeProspect, setProfile } = outreach
+  const { prospects, profile, onboarded, addProspect, updateProspect, removeProspect, setProfile, setOnboarded } =
+    outreach
   const [form, setForm] = useState(BLANK)
   const [error, setError] = useState('')
   const [composingId, setComposingId] = useState(null)
@@ -84,7 +86,38 @@ export default function Outreach() {
         <OutreachHeader
           title="Free outreach workspace"
           subtitle="Track prospects, write personalised messages and never miss a follow-up. No sign-up — everything stays in this browser."
-        />
+        >
+          {onboarded && (
+            <button type="button" className="link small" onClick={() => setOnboarded(false)}>
+              Show the getting-started guide
+            </button>
+          )}
+        </OutreachHeader>
+
+        {!onboarded && (
+          <OnboardingGuide
+            title="Welcome — three steps to your first reply"
+            intro="Nothing to install and no account to create."
+            onDismiss={() => setOnboarded(true)}
+            steps={[
+              {
+                label: 'Tell us your name and what you offer',
+                hint: 'They fill in every message template for you.',
+                done: Boolean(profile.sender.trim() && profile.offer.trim()),
+              },
+              {
+                label: 'Add someone you want to reach',
+                hint: 'A phone number lets you message them on WhatsApp in one tap.',
+                done: prospects.length > 0,
+              },
+              {
+                label: 'Send your first message',
+                hint: 'Press “Write message”, then send on WhatsApp or email. Reach reminds you to follow up after 3 days.',
+                done: prospects.some((p) => p.history.length > 0),
+              },
+            ]}
+          />
+        )}
 
         <section className="card section" aria-labelledby="profile-heading">
           <div className="card-header">

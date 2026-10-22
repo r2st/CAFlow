@@ -2100,3 +2100,31 @@ th.tick input, td.tick input { width: auto; margin: 0; }
   }
   .checkbox { min-height: 48px; margin-bottom: 0; }
 }
+
+/* ------------------------------------------------------------- onboarding -- */
+
+.onboarding { border-color: var(--brand); }
+.onboarding-intro { margin: 4px 0 0; }
+.onboarding-steps { list-style: none; margin: 0; padding: 6px 18px 0; }
+.onboarding-steps li {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.onboarding-steps li:last-child { border-bottom: none; }
+.onboarding-steps li.done strong { color: var(--text-muted); text-decoration: line-through; }
+.onboarding-check {
+  flex: 0 0 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: #fff;
+}
+.onboarding-steps li.done .onboarding-check { background: var(--upcoming); border-color: var(--upcoming); }
+.onboarding-footer { padding-top: 6px; }
