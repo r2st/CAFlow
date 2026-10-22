@@ -1923,3 +1923,73 @@ th.tick input, td.tick input { width: auto; margin: 0; }
   .button-row { width: 100%; }
   .button-row button { flex: 1 1 auto; }
 }
+
+/* ------------------------------------------------- free outreach workspace -- */
+
+.outreach-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.outreach-topbar .brand { color: var(--text); text-decoration: none; padding-bottom: 0; }
+.outreach-nav { display: flex; gap: 4px; }
+.outreach-nav a {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.outreach-filter { margin-bottom: 0; min-width: 180px; }
+.outreach-footnote { margin-top: 18px; text-align: center; }
+
+.due-note { color: var(--due-soon); font-weight: 600; }
+
+.prospect-list { list-style: none; margin: 0; padding: 0; }
+.prospect {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.prospect:last-child { border-bottom: none; }
+.prospect-main { flex: 1 1 260px; min-width: 0; }
+.prospect-meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 4px; }
+.prospect-notes { margin: 6px 0 0; color: var(--text-muted); }
+.prospect-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.prospect-actions select { width: auto; }
+
+.composer {
+  flex: 1 1 100%;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+}
+
+/* A link that does a button's job — mailto: and wa.me cannot be buttons. */
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  padding: 8px 15px;
+  border-radius: var(--radius-sm);
+  background: var(--brand);
+  color: #fff;
+}
+.button-link:hover { background: var(--brand-dark); text-decoration: none; }
+
+@media (max-width: 600px) {
+  .prospect { padding: 14px; }
+  .prospect-actions { width: 100%; }
+  .prospect-actions select { flex: 1 1 100%; width: 100%; }
+  .prospect-actions button { flex: 1 1 auto; }
+  .composer-actions > * { flex: 1 1 100%; }
+}

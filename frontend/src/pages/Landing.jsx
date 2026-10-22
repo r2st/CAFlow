@@ -160,7 +160,7 @@ export default function Landing() {
         <h1 className="landing-title">Outreach that actually works.</h1>
         <div className="landing-cta-group">
           <Link to="/register" className="landing-btn-primary landing-btn-lg">Get started free</Link>
-          <Link to="/login" className="landing-btn-ghost landing-btn-lg">Sign in</Link>
+          <Link to="/outreach" className="landing-btn-ghost landing-btn-lg">Try it — no sign-up</Link>
         </div>
       </main>
 

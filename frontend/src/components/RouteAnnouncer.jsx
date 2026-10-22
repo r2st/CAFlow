@@ -26,6 +26,7 @@ const ROUTE_TITLES = [
   ['/login', 'Sign in'],
   ['/register', 'Register your firm'],
   ['/portal', 'Your documents and filings'],
+  ['/outreach', 'Free outreach workspace'],
   ['/calendar', 'Compliance calendar'],
   ['/clients/new', 'Add a client'],
   ['/clients/:clientId/edit', 'Edit client'],
