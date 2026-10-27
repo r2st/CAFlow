@@ -28,6 +28,8 @@ export default function SeoHead() {
       setMeta('meta[property="og:title"]', 'content', meta.title)
       setMeta('meta[name="twitter:title"]', 'content', meta.title)
     }
+    const ld = document.head.querySelector('script[data-seo-jsonld]')
+    if (ld) ld.textContent = meta.jsonLd ? JSON.stringify(meta.jsonLd) : '{}'
     if (meta.canonical) {
       setMeta('link[rel="canonical"]', 'href', meta.canonical)
       setMeta('meta[property="og:url"]', 'content', meta.canonical)

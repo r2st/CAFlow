@@ -14,6 +14,7 @@ const DEFAULT_DESCRIPTION =
 export const PUBLIC_PAGES = [
   {
     path: '/',
+    h1: 'Outreach that actually works.',
     title: 'DoAide Reach — Free Outreach Tracker with WhatsApp Follow-ups',
     description: DEFAULT_DESCRIPTION,
     changefreq: 'weekly',
@@ -21,6 +22,7 @@ export const PUBLIC_PAGES = [
   },
   {
     path: '/outreach',
+    h1: 'Free outreach workspace',
     title: 'Free Outreach Workspace — No Sign-up | DoAide Reach',
     description:
       'Track prospects, write personalised cold messages from templates and send them on WhatsApp or email. Free, no account needed — your list stays in your browser.',
@@ -29,6 +31,7 @@ export const PUBLIC_PAGES = [
   },
   {
     path: '/outreach/dashboard',
+    h1: 'Outreach dashboard',
     title: 'Outreach Dashboard — Reply Rate & Follow-ups | DoAide Reach',
     description:
       'See prospects contacted, reply rate, meetings booked and who needs a follow-up today. Free outreach metrics with no sign-up.',
@@ -37,6 +40,7 @@ export const PUBLIC_PAGES = [
   },
   {
     path: '/blog',
+    h1: 'Blog',
     title: 'Outreach Blog — Cold Email & WhatsApp Tips for India | DoAide Reach',
     description:
       'Email outreach strategies, deliverability guides and lead-generation tips for Indian startups and businesses.',
@@ -45,6 +49,7 @@ export const PUBLIC_PAGES = [
   },
   ...ARTICLES.map((a) => ({
     path: `/blog/${a.slug}`,
+    h1: a.title,
     title: `${a.title} | DoAide Reach Blog`,
     description: a.excerpt,
     changefreq: 'monthly',
@@ -53,6 +58,85 @@ export const PUBLIC_PAGES = [
     lastmod: new Date(a.date).toISOString().slice(0, 10),
   })),
 ]
+
+// Structured data for the home page only — the FAQ answers questions about
+// the product, so stamping it on every page (as index.html used to) misleads.
+const HOME_JSONLD = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      "@type": "SoftwareApplication",
+      "name": "DoAide Reach",
+      "description": "AI-powered email outreach automation for Indian startups and businesses. Smart targeting, auto follow-ups, and campaign analytics.",
+      "url": "https://reach.doaide.com",
+      "applicationCategory": "BusinessApplication",
+      "operatingSystem": "Web",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "INR"
+      },
+      "author": {
+        "@type": "Organization",
+        "name": "Apprend Technologies",
+        "url": "https://doaide.com"
+      }
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "What is DoAide Reach?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "DoAide Reach is an AI-powered email outreach automation platform designed for Indian startups and businesses. It helps you create targeted email campaigns, automate follow-ups, and track engagement with built-in analytics."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is DoAide Reach free to use?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes, DoAide Reach offers a free plan that includes core features like email campaign creation, basic targeting, and analytics. Premium plans unlock advanced AI personalization and higher sending limits."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How does the AI personalization work?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "DoAide Reach uses AI to analyze your target audience and generate personalized email content for each recipient. It considers industry, role, company size, and previous interactions to craft messages that resonate."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Can I automate follow-up emails?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. You can set up automated follow-up sequences triggered by recipient behavior — opens, clicks, or no response. The AI adjusts follow-up timing and messaging based on engagement patterns."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How is DoAide Reach different from cold email tools?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Unlike generic cold email tools, DoAide Reach is built for the Indian market with features like regional targeting, vernacular support, and pricing optimized for Indian startups. The AI understands Indian business contexts and communication styles."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What analytics does DoAide Reach provide?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "DoAide Reach provides campaign-level and email-level analytics including open rates, click rates, reply rates, bounce rates, and engagement heatmaps. The AI also generates actionable recommendations to improve future campaigns."
+          }
+        }
+      ]
+    }
+  ],
+}
 
 /** Reachable without signing in, but nothing a search result should land on. */
 const NOINDEX_PAGES = [
@@ -77,6 +161,8 @@ export function metaForPath(pathname) {
       canonical: `${SITE_URL}${page.path === '/' ? '/' : page.path}`,
       robots: page.noindex ? 'noindex, follow' : 'index, follow',
       type: page.type ?? 'website',
+      h1: page.h1 ?? null,
+      jsonLd: jsonLdFor(page),
     }
   }
   return {
@@ -85,6 +171,37 @@ export function metaForPath(pathname) {
     canonical: null,
     robots: 'noindex, nofollow',
     type: 'website',
+    h1: null,
+    jsonLd: null,
+  }
+}
+
+/** The JSON-LD for a page in the table: the product on home, a BlogPosting per article. */
+export function jsonLdFor(page) {
+  if (page.noindex) return null
+  if (page.path === '/') return HOME_JSONLD
+  const url = `${SITE_URL}${page.path}`
+  const org = { '@type': 'Organization', name: 'DoAide', url: 'https://doaide.com' }
+  if (page.type === 'article') {
+    return {
+      '@context': 'https://schema.org',
+      '@type': 'BlogPosting',
+      headline: page.h1,
+      description: page.description,
+      url,
+      mainEntityOfPage: url,
+      datePublished: page.lastmod,
+      author: org,
+      publisher: org,
+    }
+  }
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'WebPage',
+    name: page.h1,
+    url,
+    description: page.description,
+    isPartOf: { '@type': 'WebSite', name: SITE_NAME, url: `${SITE_URL}/` },
   }
 }
 
@@ -124,5 +241,9 @@ export function renderHead(html, pathname) {
   set(/<meta property="og:type" content="[^"]*" \/>/, `<meta property="og:type" content="${meta.type}" />`)
   set(/<meta name="twitter:title" content="[^"]*" \/>/, `<meta name="twitter:title" content="${title}" />`)
   set(/<meta name="twitter:description" content="[^"]*" \/>/, `<meta name="twitter:description" content="${description}" />`)
+  // `<` is escaped so article text can never close the script element early.
+  const jsonLd = meta.jsonLd ? JSON.stringify(meta.jsonLd).replace(/</g, '\\u003c') : '{}'
+  set(/<script type="application\/ld\+json" data-seo-jsonld>[\s\S]*?<\/script>/, () => `<script type="application/ld+json" data-seo-jsonld>${jsonLd}</script>`)
+  if (meta.h1) set(/<div id="root"><\/div>/, `<div id="root"><h1>${escapeAttr(meta.h1)}</h1></div>`)
   return html
 }

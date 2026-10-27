@@ -67,6 +67,35 @@ describe('the pre-rendered head', () => {
   })
 })
 
+describe('crawler h1 and structured data', () => {
+  const jsonLdIn = (html) =>
+    JSON.parse(html.match(/<script type="application\/ld\+json" data-seo-jsonld>([\s\S]*?)<\/script>/)[1])
+
+  it('gives every public page one h1 in the pre-rendered HTML', () => {
+    for (const page of PUBLIC_PAGES) {
+      const html = renderHead(indexHtml, page.path)
+      expect(html.match(/<h1>/g), page.path).toHaveLength(1)
+    }
+  })
+
+  it('keeps the product FAQ on the home page only', () => {
+    expect(JSON.stringify(jsonLdIn(renderHead(indexHtml, '/')))).toContain('FAQPage')
+    expect(JSON.stringify(jsonLdIn(renderHead(indexHtml, '/outreach')))).not.toContain('FAQPage')
+  })
+
+  it('marks each article as a dated BlogPosting', () => {
+    for (const page of PUBLIC_PAGES.filter((p) => p.type === 'article')) {
+      const ld = jsonLdIn(renderHead(indexHtml, page.path))
+      expect(ld['@type']).toBe('BlogPosting')
+      expect(ld.datePublished).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    }
+  })
+
+  it('gives sign-in pages no structured data', () => {
+    expect(jsonLdIn(renderHead(indexHtml, '/login'))).toEqual({})
+  })
+})
+
 describe('sitemap and robots', () => {
   it('lists every public page and nothing private', () => {
     const xml = sitemapXml()
